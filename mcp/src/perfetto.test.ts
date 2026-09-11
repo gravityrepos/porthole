@@ -26,7 +26,9 @@ describe("the questions", () => {
   it("are a fixed set, not an interface for arbitrary SQL", () => {
     // The moment this grows a `query` parameter it stops being a tool and
     // becomes a worse Perfetto, with an agent guessing at a hundred tables.
+    // Six was the ceiling set when this was designed; five are in.
     expect(QUESTIONS.length).toBeLessThanOrEqual(6);
+    expect(QUESTIONS.length).toBe(5);
     for (const q of QUESTIONS) {
       expect(q.sql).toContain("$from");
       expect(q.sql).toContain("$to");
@@ -77,6 +79,49 @@ describe("reading a real capture", () => {
 
   it("puts the error above the notes", () => {
     expect(findings[0].severity).toBe("error");
+  });
+
+  /**
+   * Unlike everything above, these rows are constructed rather than exported:
+   * answering them needs trace_processor, which is not installed here. The
+   * shapes follow the columns the queries select, and the interpretation is
+   * what is being pinned — but the SQL itself has not been run against a real
+   * trace, and today has repeatedly shown that is where the surprises live.
+   */
+  it("separates one blocking call into another process from chatter", () => {
+    const blocking = interpret({
+      binder: [
+        { target: "system_server", COUNT: "2", "SUM(dur)": "41000000", "MAX(dur)": "38000000" },
+      ],
+    });
+    const found = blocking.find((f) => f.id === "trace-binder");
+    expect(found?.severity).toBe("warning");
+    expect(found?.title).toContain("system_server");
+    expect(found?.detail).toMatch(/not in this one/);
+
+    const chatter = interpret({
+      binder: [
+        { target: "system_server", COUNT: "60", "SUM(dur)": "30000000", "MAX(dur)": "900000" },
+      ],
+    });
+    expect(chatter.find((f) => f.id === "trace-binder")?.severity).toBe("note");
+  });
+
+  it("says the render path is not something recompositions can explain", () => {
+    const found = interpret({
+      render: [
+        { name: "flush commands", thread_name: "RenderThread", COUNT: "40", "SUM(dur)": "62000000" },
+      ],
+    }).find((f) => f.id === "trace-render");
+    expect(found?.title).toContain("flush commands");
+    expect(found?.detail).toMatch(/recompositions` will have nothing to say/);
+  });
+
+  it("stays quiet about binder chatter too small to matter", () => {
+    const tiny = interpret({
+      binder: [{ target: "x", COUNT: "1", "SUM(dur)": "100000", "MAX(dur)": "100000" }],
+    });
+    expect(tiny.find((f) => f.id === "trace-binder")).toBeUndefined();
   });
 
   it("claims nothing when asked about nothing", () => {

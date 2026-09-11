@@ -203,6 +203,9 @@ server.registerTool(
       "'correlated' means two things happened close together, which is ordering and not " +
       "causation. Do not upgrade a correlated finding to a cause because it is the only one you " +
       "have.\n\n" +
+      "`clippedMs` says how much of the window asked for fell outside what is still buffered. " +
+      "Non-zero means part of the question was never examined, which is a different answer from " +
+      "there being nothing there.\n\n" +
       "An empty list means nothing crossed a threshold in this window. It does not mean the app " +
       "is fast, and it does not mean the window contained the problem — check `window` against " +
       "the moment you care about before concluding anything from silence.",
@@ -215,7 +218,18 @@ server.registerTool(
       return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
     }
 
-    const events = timeline.buffer().filter((e) => e.t >= span.from && e.t <= span.to);
+    const buffered = timeline.buffer();
+    const events = buffered.filter((e) => e.t >= span.from && e.t <= span.to);
+
+    // Asking about a moment the ring no longer holds returns nothing, which is
+    // indistinguishable from a moment when nothing happened. They are opposite
+    // answers and only one of them is about the app.
+    const oldest = buffered[0]?.t ?? span.from;
+    const newest = buffered[buffered.length - 1]?.t ?? span.to;
+    const clipped = {
+      start: span.from < oldest ? oldest - span.from : 0,
+      end: span.to > newest ? span.to - newest : 0,
+    };
     const trace = buildTrace({
       // The same analyser the headless capture runs, pointed at the live
       // buffer instead of a recorded scenario. One analyser, so a finding
@@ -230,15 +244,28 @@ server.registerTool(
     const findings = trace.findings.map(withFollowUp);
     const payload = {
       window: { from: span.from, to: span.to, ms: span.ms },
+      examined: { from: Math.max(span.from, oldest), to: Math.min(span.to, newest) },
+      buffered: { from: oldest, to: newest, events: buffered.length },
+      clippedMs: clipped,
       eventsExamined: events.length,
       metrics: trace.metrics,
       findings,
     };
 
+    const shortfall = clipped.start + clipped.end;
+    const missing =
+      shortfall > 0
+        ? ` ${Math.round(shortfall / 100) / 10}s of the window asked for is older or newer than ` +
+          "anything buffered, so it was not examined at all."
+        : "";
+
     if (findings.length === 0) {
       return ok(
-        `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
-          `(${events.length} events). That is not the same as the app being fast.`,
+        shortfall > span.ms * 0.5
+          ? `Almost none of that window is in the buffer${missing} This is not a quiet app; ` +
+              "it is a question the buffer cannot answer."
+          : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
+            `(${events.length} events). That is not the same as the app being fast.${missing}`,
         payload,
       );
     }
@@ -254,7 +281,7 @@ server.registerTool(
 
     return ok(
       `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
-        `Worst: ${worst.title} [${worst.confidence}].`,
+        `Worst: ${worst.title} [${worst.confidence}].${missing}`,
       payload,
     );
   },
@@ -632,6 +659,8 @@ server.registerTool(
         count: number;
         triggeredBy: Array<{ key: string; count: number }>;
       }>;
+      totalNodes?: number;
+      truncated?: boolean;
       unattributedWrites: Array<{ key: string; count: number }>;
     }>("recompositions", { screen, sinceMs, from, to, limit: limit ?? 50 }, (report) => {
       if (report.nodes.length === 0) {
@@ -640,10 +669,16 @@ server.registerTool(
       const top = report.nodes[0];
       const cause = top.triggeredBy[0];
       const total = report.nodes.reduce((sum, node) => sum + node.count, 0);
+      // A capped list that does not say it is capped reads as the whole
+      // truth, which is how "only three composables recomposed" gets believed.
+      const cut = report.truncated
+        ? ` Busiest ${report.nodes.length} of ${report.totalNodes ?? report.nodes.length} nodes shown.`
+        : "";
       return (
         `${total} recompositions across ${report.nodes.length} nodes. ` +
         `Worst: ${top.name} at ${top.count}` +
-        (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".")
+        (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".") +
+        cut
       );
     }),
 );

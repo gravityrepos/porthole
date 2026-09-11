@@ -34,6 +34,12 @@ internal class RecompositionCollector(
     private val ring: EventRing,
     private val snapshots: SnapshotWatcher,
     private val attributionWindowMs: Long = SnapshotWatcher.DEFAULT_ATTRIBUTION_WINDOW_MS,
+    /**
+     * Substitutable for the same reason the event ring's is: a clock reached
+     * for statically cannot be replaced, and a collector that calls
+     * SystemClock directly cannot be unit tested at all.
+     */
+    private val now: () -> Long = ::nowMs,
 ) {
     private class Sample(
         val nodeId: String,
@@ -47,7 +53,7 @@ internal class RecompositionCollector(
     private val lock = Any()
 
     /** Recomposition churn as spans in the system trace. See RecomposeBurst. */
-    private val burst = RecomposeBurst()
+    private val burst = RecomposeBurst(now = now)
 
     /**
      * Closes a burst once recompositions stop.
@@ -71,7 +77,7 @@ internal class RecompositionCollector(
 
     /** Called from a SideEffect, so: on the composition thread, once per pass. */
     fun onRecompose(nodeId: String, name: String, screen: String?, passCount: Int) {
-        val t = nowMs()
+        val t = now()
         // Before the attribution walk: this is two field writes, and it is
         // the part that has to survive being called thousands of times.
         burst.onRecompose()
@@ -106,14 +112,21 @@ internal class RecompositionCollector(
      * "the spike at t=24100" is expressible instead of "about twenty seconds
      * ago, roughly".
      */
-    fun report(screen: String?, sinceMs: Long?, from: Long? = null, to: Long? = null): RecompositionReport {
-        val now = nowMs()
+    fun report(
+        screen: String?,
+        sinceMs: Long?,
+        from: Long? = null,
+        to: Long? = null,
+        /** Busiest N nodes. The tail of a recomposition report is rarely the answer. */
+        limit: Int? = null,
+    ): RecompositionReport {
+        val current = now()
         val start = when {
             from != null -> from
-            sinceMs != null -> (now - sinceMs).coerceAtLeast(0L)
+            sinceMs != null -> (current - sinceMs).coerceAtLeast(0L)
             else -> 0L
         }
-        val end = to ?: now
+        val end = to ?: current
 
         val window = synchronized(lock) {
             samples.filter { it.t >= start && it.t <= end && (screen == null || matches(it, screen)) }
@@ -139,6 +152,12 @@ internal class RecompositionCollector(
             }
             .sortedByDescending { it.count }
 
+        // Applied after sorting, so a limit keeps the busiest rather than
+        // whichever nodes happened to be recorded first.
+        val cap = limit?.coerceAtLeast(1) ?: DEFAULT_NODE_LIMIT
+        val kept = nodes.take(cap)
+        val dropped = nodes.size - kept.size
+
         val attributed = window.flatMapTo(HashSet()) { it.triggers }
         val unattributed = snapshots.writesBetween(start, end)
             .filterKeys { it !in attributed }
@@ -147,7 +166,9 @@ internal class RecompositionCollector(
         return RecompositionReport(
             since = start,
             now = end,
-            nodes = nodes,
+            nodes = kept,
+            totalNodes = nodes.size,
+            truncated = dropped > 0,
             unattributedWrites = unattributed,
             notes = buildNotes(nodes.isEmpty(), unattributed.isNotEmpty(), nodes, unattributed),
         )
@@ -226,5 +247,14 @@ internal class RecompositionCollector(
          * one threshold of the churn actually stopping rather than up to two.
          */
         private const val BURST_TICK_MS = 60L
+
+        /**
+         * Nodes returned when the caller does not say.
+         *
+         * A busy screen has hundreds of instrumented call sites and the
+         * answer is always in the first few; the rest is weight on whoever
+         * reads it.
+         */
+        private const val DEFAULT_NODE_LIMIT = 50
     }
 }

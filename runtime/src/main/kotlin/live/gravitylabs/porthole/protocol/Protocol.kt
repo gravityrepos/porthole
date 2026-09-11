@@ -81,6 +81,10 @@ internal data class RecompositionReport(
     val since: Long,
     val now: Long,
     val nodes: List<RecompositionNode>,
+    /** How many nodes recomposed in the window, before any limit. */
+    val totalNodes: Int = 0,
+    /** True when [nodes] is the busiest slice of a longer list. */
+    val truncated: Boolean = false,
     /** Writes seen in the window that no instrumented node reacted to. */
     val unattributedWrites: List<StateWriteCount>,
     val notes: List<String> = emptyList(),

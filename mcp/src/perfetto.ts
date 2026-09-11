@@ -68,6 +68,36 @@ export const QUESTIONS: Question[] = [
           GROUP BY 1, 2 ORDER BY SUM(thread_state.dur) DESC`,
   },
   {
+    id: "binder",
+    asks: "which other processes the app called into, and for how long",
+    // android_binder_txns lives in the standard library, not the base schema,
+    // so the module has to be pulled in or the query fails to compile.
+    sql: `INCLUDE PERFETTO MODULE android.binder;
+          SELECT COALESCE(server_process.name, 'unknown') AS target,
+                 COUNT(*) AS COUNT, SUM(binder.dur) AS "SUM(dur)",
+                 MAX(binder.dur) AS "MAX(dur)"
+          FROM android_binder_txns AS binder
+          LEFT JOIN process AS server_process ON binder.server_upid = server_process.upid
+          JOIN process AS client_process ON binder.client_upid = client_process.upid
+          WHERE binder.ts >= $from AND binder.ts <= $to
+            AND client_process.name = $package
+          GROUP BY target ORDER BY SUM(binder.dur) DESC LIMIT 20`,
+  },
+  {
+    id: "render",
+    asks: "what the render thread and the GPU were doing",
+    sql: `SELECT slice.name AS name, thread.name AS thread_name,
+                 COUNT(*) AS COUNT, SUM(slice.dur) AS "SUM(dur)"
+          FROM slice
+          JOIN thread_track ON slice.track_id = thread_track.id
+          JOIN thread USING(utid)
+          JOIN process USING(upid)
+          WHERE slice.ts >= $from AND slice.ts <= $to
+            AND process.name = $package
+            AND thread.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+          GROUP BY 1, 2 ORDER BY SUM(slice.dur) DESC LIMIT 30`,
+  },
+  {
     id: "slices",
     asks: "what the app was actually doing, by total time",
     sql: `SELECT name, COUNT(*) AS COUNT, SUM(dur) AS "SUM(dur)",
@@ -84,6 +114,8 @@ export const QUESTIONS: Question[] = [
 export interface Rows {
   jank?: Array<Record<string, unknown>>;
   thread_states?: Array<Record<string, unknown>>;
+  binder?: Array<Record<string, unknown>>;
+  render?: Array<Record<string, unknown>>;
   slices?: Array<Record<string, unknown>>;
 }
 
@@ -177,6 +209,52 @@ export function interpret(rows: Rows): Finding[] {
       detail: rule.note,
       count: matched.reduce((sum, r) => sum + n(r.COUNT), 0),
       evidence: { totalMs: total },
+    });
+  }
+
+  // --- who else the app was waiting on ------------------------------------
+  const binder = rows.binder ?? [];
+  if (binder.length > 0) {
+    const total = ms(binder.reduce((sum, r) => sum + n(r["SUM(dur)"]), 0));
+    const worst = binder.reduce((a, b) => (n(b["MAX(dur)"]) > n(a["MAX(dur)"]) ? b : a));
+    const worstMs = ms(n(worst["MAX(dur)"]));
+    // A long single transaction is a stall in someone else's process wearing
+    // the app's name; many short ones are chatter, which is a different fix.
+    const blocking = worstMs >= 8;
+    if (total >= 5) {
+      findings.push({
+        id: "trace-binder",
+        severity: blocking ? "warning" : "note",
+        confidence: "observed",
+        title: blocking
+          ? `a ${worstMs}ms call into ${worst.target} blocked the app`
+          : `${total}ms across ${binder.length} process(es) the app called into`,
+        detail: blocking
+          ? "The time was spent in the other process, not in this one. Nothing in the app's own " +
+            "code will make it faster; the call has to move off the critical path."
+          : `Busiest: ${worst.target}. Short and frequent rather than blocking.`,
+        count: binder.reduce((sum, r) => sum + n(r.COUNT), 0),
+        evidence: { totalMs: total, worstMs, worstTarget: String(worst.target ?? "") },
+      });
+    }
+  }
+
+  // --- the half of the frame that is not the main thread -------------------
+  const render = rows.render ?? [];
+  if (render.length > 0) {
+    const total = ms(render.reduce((sum, r) => sum + n(r["SUM(dur)"]), 0));
+    const worst = render.reduce((a, b) => (n(b["SUM(dur)"]) > n(a["SUM(dur)"]) ? b : a));
+    findings.push({
+      id: "trace-render",
+      severity: "note",
+      confidence: "observed",
+      title: `${total}ms on the render path, mostly ${worst.name}`,
+      detail:
+        "Work after the main thread has handed the frame over. Large numbers here point at " +
+        "overdraw, an expensive shader or a big texture upload rather than at composition — " +
+        "and `recompositions` will have nothing to say about any of them.",
+      count: render.reduce((sum, r) => sum + n(r.COUNT), 0),
+      evidence: { totalMs: total, worst: String(worst.name ?? "") },
     });
   }
 

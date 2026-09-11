@@ -365,6 +365,7 @@ object Porthole {
                     sinceMs = params.long("sinceMs"),
                     from = params.long("from"),
                     to = params.long("to"),
+                    limit = params.long("limit")?.toInt(),
                 ),
             )
         }
