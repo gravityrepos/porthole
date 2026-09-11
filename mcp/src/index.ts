@@ -6,6 +6,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
+import { readFileSync } from "node:fs";
+import { buildTrace, type Finding } from "./trace.js";
+
+/** Read, not retyped: a hardcoded version here drifts from the package. */
+const pkg = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 const HOST = process.env.PORTHOLE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
@@ -16,7 +23,7 @@ const timeline = new TimelineServer(device, UI_PORT);
 
 const server = new McpServer({
   name: "porthole",
-  version: "0.1.0",
+  version: pkg.version,
 });
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
@@ -47,6 +54,83 @@ async function call<T>(
 }
 
 // ---------------------------------------------------------------------------
+// windows
+// ---------------------------------------------------------------------------
+
+/**
+ * The same three parameters on every tool that looks at a span of time.
+ *
+ * They used to differ per tool — `timeline` took only `sinceMs`, which made it
+ * the one tool that could not be asked about a moment the others had just
+ * named. An agent that cannot carry a window between calls compares two
+ * different windows and does not notice.
+ */
+const windowShape = {
+  sinceMs: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Look back this many milliseconds from now. Ignored if `from` is given."),
+  from: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "Absolute start on the device uptime clock that every event carries. Quote the `window` " +
+        "from an earlier result to ask a second question about the same span.",
+    ),
+  to: z.number().int().optional().describe("Absolute end, same clock. Defaults to the latest event."),
+};
+
+interface Window {
+  sinceMs?: number;
+  from?: number;
+  to?: number;
+}
+
+/** The span actually examined, resolved against the buffer so it can be quoted back. */
+function resolveWindow(w: Window): { from: number; to: number; ms: number } | null {
+  const events = timeline.buffer();
+  if (events.length === 0) return null;
+  const newest = events[events.length - 1].t;
+  const oldest = events[0].t;
+  const to = w.to ?? newest;
+  const from = w.from ?? (w.sinceMs !== undefined ? to - w.sinceMs : oldest);
+  return { from, to, ms: Math.max(0, to - from) };
+}
+
+// ---------------------------------------------------------------------------
+// what to do next
+// ---------------------------------------------------------------------------
+
+/**
+ * The tool that shows a finding's evidence.
+ *
+ * Without this a finding is a dead end: it states a conclusion and leaves the
+ * agent to guess which of eleven tools substantiates it. Guessing is where the
+ * wandering starts, so each finding names its own next call.
+ */
+const FOLLOW_UP: Record<string, { tool: string; why: string }> = {
+  "db-on-main-thread": { tool: "blocking", why: "the queries, their SQL and how long each took" },
+  "main-thread-stall": { tool: "blocking", why: "the stack the main thread was sitting in" },
+  "http-failed": { tool: "inflight", why: "the failed calls with status and body previews" },
+  "frames-dropped": { tool: "frames", why: "which phase dominated the janky frames" },
+  "blocking-gc": { tool: "timeline", why: "what allocated around each collection (kinds: [\"gc\"])" },
+  "trim-memory": { tool: "timeline", why: "the memory series around the trim (kinds: [\"memory\"])" },
+  "work-retried": { tool: "inflight", why: "the jobs and their attempt counts" },
+  "recompose-hotspot": {
+    tool: "recompositions",
+    why: "the per-node counts and the state keys written just before",
+  },
+};
+
+function withFollowUp(finding: Finding) {
+  const next = FOLLOW_UP[finding.id];
+  return next ? { ...finding, next: { tool: next.tool, window: "quote `window` above", shows: next.why } } : finding;
+}
+
+// ---------------------------------------------------------------------------
 // tools
 // ---------------------------------------------------------------------------
 
@@ -56,7 +140,8 @@ server.registerTool(
     title: "Porthole status",
     description:
       "Whether the porthole is connected to a running app, which collectors are active, and what to " +
-      "do if it is not. Start here when another tool reports it cannot reach the device.",
+      "do if it is not. Call this when another tool reports it cannot reach the device.\n\n" +
+      "This tool answers 'is it plugged in', not 'is anything wrong'. For that, call `findings`.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
@@ -76,6 +161,79 @@ server.registerTool(
           `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
         : device.notConnectedMessage();
     return ok(summary, payload);
+  },
+);
+
+server.registerTool(
+  "findings",
+  {
+    title: "What is wrong right now",
+    description:
+      "Start here. Everything the porthole can currently say is wrong, ranked, each with how " +
+      "strongly it can be claimed and which tool shows its evidence.\n\n" +
+      "The other tools return measurements and leave the conclusion to you. This one draws the " +
+      "conclusions the data actually supports, which is a shorter list than it looks: queries on " +
+      "the main thread, stalls, failed calls, dropped frames, blocking collections, memory trims, " +
+      "retried jobs, recomposition hotspots.\n\n" +
+      "`confidence` is load-bearing and worth repeating to whoever reads your answer. 'observed' " +
+      "means the device reported it: a query ran on the main thread, a frame missed its deadline. " +
+      "'correlated' means two things happened close together, which is ordering and not " +
+      "causation. Do not upgrade a correlated finding to a cause because it is the only one you " +
+      "have.\n\n" +
+      "An empty list means nothing crossed a threshold in this window. It does not mean the app " +
+      "is fast, and it does not mean the window contained the problem — check `window` against " +
+      "the moment you care about before concluding anything from silence.",
+    inputSchema: windowShape,
+    annotations: { readOnlyHint: true },
+  },
+  async ({ sinceMs, from, to }): Promise<ToolResult> => {
+    const span = resolveWindow({ sinceMs, from, to });
+    if (!span) {
+      return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+    }
+
+    const events = timeline.buffer().filter((e) => e.t >= span.from && e.t <= span.to);
+    const trace = buildTrace({
+      // The same analyser the headless capture runs, pointed at the live
+      // buffer instead of a recorded scenario. One analyser, so a finding
+      // means the same thing in CI as it does in an editor.
+      scenario: "live",
+      events,
+      hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+      durationMs: span.ms,
+      withEvents: false,
+    });
+
+    const findings = trace.findings.map(withFollowUp);
+    const payload = {
+      window: { from: span.from, to: span.to, ms: span.ms },
+      eventsExamined: events.length,
+      metrics: trace.metrics,
+      findings,
+    };
+
+    if (findings.length === 0) {
+      return ok(
+        `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
+          `(${events.length} events). That is not the same as the app being fast.`,
+        payload,
+      );
+    }
+
+    const worst = trace.findings[0];
+    const bySeverity = trace.findings.reduce<Record<string, number>>((acc, f) => {
+      acc[f.severity] = (acc[f.severity] ?? 0) + 1;
+      return acc;
+    }, {});
+    const tally = Object.entries(bySeverity)
+      .map(([severity, n]) => `${n} ${severity}`)
+      .join(", ");
+
+    return ok(
+      `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
+        `Worst: ${worst.title} [${worst.confidence}].`,
+      payload,
+    );
   },
 );
 
@@ -105,25 +263,18 @@ server.registerTool(
         .string()
         .optional()
         .describe("Only nodes on this screen, matched against the enclosing PortholeScreen name."),
-      sinceMs: z
+      limit: z
         .number()
         .int()
         .positive()
+        .max(500)
         .optional()
-        .describe("Look back this many milliseconds. Omit for everything still buffered."),
-      from: z
-        .number()
-        .int()
-        .optional()
-        .describe(
-          "Absolute start, in the device uptime clock every event carries. Use this to ask " +
-            "about a moment seen on the timeline instead of guessing a lookback.",
-        ),
-      to: z.number().int().optional().describe("Absolute end, same clock. Defaults to now."),
+        .describe("Busiest N nodes. Default 50; the tail is rarely what you are looking for."),
+      ...windowShape,
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ screen, sinceMs, from, to }): Promise<ToolResult> =>
+  async ({ screen, sinceMs, from, to, limit }): Promise<ToolResult> =>
     call<{
       nodes: Array<{
         name: string;
@@ -131,7 +282,7 @@ server.registerTool(
         triggeredBy: Array<{ key: string; count: number }>;
       }>;
       unattributedWrites: Array<{ key: string; count: number }>;
-    }>("recompositions", { screen, sinceMs, from, to }, (report) => {
+    }>("recompositions", { screen, sinceMs, from, to, limit: limit ?? 50 }, (report) => {
       if (report.nodes.length === 0) {
         return "No instrumented composable recomposed in that window.";
       }
@@ -154,7 +305,8 @@ server.registerTool(
       "The Compose semantics tree with a stable id per node. stableId is a structural path hash: " +
       "the same UI produces the same id across captures and across process restarts, so two " +
       "captures can be diffed. Nodes carrying a porthole node id line up with the ids in the " +
-      "recompositions report.",
+      "recompositions report.\n\n" +
+      "A snapshot of what is on screen now. It says nothing about cost — a large tree is not a slow one — so do not infer performance from its shape; use `frames` for that.",
     inputSchema: {
       merged: z
         .boolean()
@@ -181,7 +333,8 @@ server.registerTool(
     description:
       "The current back stack with each entry's route, arguments and lifecycle state, plus the " +
       "deep link that opened the app if there was one. Answers 'how did I get to this screen' " +
-      "and 'what arguments is it actually holding', which is usually where the bug is.",
+      "and 'what arguments is it actually holding', which is usually where the bug is.\n\n" +
+      "Present tense only. This is the stack as it is now, not how it got that way — for the order things happened in, ask `timeline` with kinds: [\"nav\"].",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
@@ -203,7 +356,8 @@ server.registerTool(
       "Current values of the state held by registered ViewModels. Each field says whether writes " +
       "to it are attributable — meaning snapshot state the recomposition report can name. A " +
       "StateFlow is never attributable on its own; collectAsNamedState is what makes the State " +
-      "it produces nameable.",
+      "it produces nameable.\n\n" +
+      "Only registered owners appear. An empty result means nothing was registered, not that the app holds no state, so do not read absence here as evidence about the app.",
     inputSchema: {
       viewModel: z
         .string()
@@ -288,9 +442,7 @@ server.registerTool(
       "Frames with firstDraw are a window being drawn for the first time and are expected to be " +
       "slow. Needs API 24 or newer.",
     inputSchema: {
-      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
-      from: z.number().int().optional().describe("Absolute start, device uptime clock."),
-      to: z.number().int().optional().describe("Absolute end, same clock."),
+      ...windowShape,
       limit: z
         .number()
         .int()
@@ -350,9 +502,7 @@ server.registerTool(
       "frame loop is a defect that has not bitten yet. For hitches shorter than the threshold, " +
       "use `frames` instead — that measures every frame, this one catches the big stops.",
     inputSchema: {
-      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
-      from: z.number().int().optional().describe("Absolute start, device uptime clock."),
-      to: z.number().int().optional().describe("Absolute end, same clock."),
+      ...windowShape,
       limit: z
         .number()
         .int()
@@ -406,16 +556,7 @@ server.registerTool(
         .describe("Minimum level. 'W' for warnings and worse, which is usually what you want."),
       tag: z.string().optional().describe("Substring match on the tag."),
       contains: z.string().optional().describe("Substring match on the message."),
-      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
-      from: z
-        .number()
-        .int()
-        .optional()
-        .describe(
-          "Absolute start, in the device uptime clock every event carries. Use this to ask " +
-            "about a moment seen on the timeline instead of guessing a lookback.",
-        ),
-      to: z.number().int().optional().describe("Absolute end, same clock. Defaults to now."),
+      ...windowShape,
       limit: z
         .number()
         .int()
@@ -466,12 +607,7 @@ server.registerTool(
       "Use it to order events relative to each other — which write came before which navigation, " +
       "what the app was doing while a call was open.",
     inputSchema: {
-      sinceMs: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Only events from the last N milliseconds of device uptime."),
+      ...windowShape,
       kinds: z
         .array(z.string())
         .optional()
@@ -489,7 +625,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ sinceMs, kinds, limit }): Promise<ToolResult> => {
+  async ({ sinceMs, from, to, kinds, limit }): Promise<ToolResult> => {
     try {
       // Prefer the local buffer: it holds more history than the device ring and
       // survives the app being restarted underneath us.
@@ -500,27 +636,48 @@ server.registerTool(
         });
         events = page.events;
       }
-      if (sinceMs !== undefined && events.length > 0) {
-        const newest = events[events.length - 1].t;
-        events = events.filter((event) => event.t >= newest - sinceMs);
+
+      // Absolute bounds first, so a window quoted from another tool selects the
+      // same span here. sinceMs stays as the convenience for "recently".
+      const span = resolveWindow({ sinceMs, from, to });
+      if (span) {
+        events = events.filter((event) => event.t >= span.from && event.t <= span.to);
       }
       if (kinds?.length) {
         const wanted = new Set(kinds);
         events = events.filter((event) => wanted.has(event.event));
       }
-      events = events.slice(-(limit ?? 500));
+
+      const matched = events.length;
+      const cap = limit ?? 500;
+      events = events.slice(-cap);
+      const truncated = matched > events.length;
 
       const counts: Record<string, number> = {};
       for (const event of events) counts[event.event] = (counts[event.event] ?? 0) + 1;
-      const span = events.length > 1 ? events[events.length - 1].t - events[0].t : 0;
+      const covered = events.length > 1 ? events[events.length - 1].t - events[0].t : 0;
+
+      // Say when the answer was cut. Silent truncation is how an agent
+      // concludes something did not happen when it simply fell off the end.
+      const note = truncated
+        ? ` ${matched} matched, newest ${events.length} returned — raise \`limit\` or narrow the window.`
+        : "";
       const summary =
         events.length === 0
-          ? "No events buffered yet. Interact with the app and try again."
-          : `${events.length} events over ${span}ms: ` +
+          ? "No events matched. Interact with the app, widen the window, or check `kinds`."
+          : `${events.length} events over ${covered}ms: ` +
             Object.entries(counts)
               .map(([kind, count]) => `${kind} ${count}`)
-              .join(", ");
-      return ok(summary, { events });
+              .join(", ") +
+            "." +
+            note;
+      return ok(summary, {
+        window: span ? { from: span.from, to: span.to, ms: span.ms } : null,
+        matched,
+        returned: events.length,
+        truncated,
+        events,
+      });
     } catch (error) {
       return fail(error);
     }
