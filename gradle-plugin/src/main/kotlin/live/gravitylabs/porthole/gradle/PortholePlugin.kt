@@ -98,9 +98,14 @@ class PortholePlugin : Plugin<Project> {
 
         project.tasks.register<PortholeMcpConfigTask>("portholeMcpConfig") {
             group = GROUP
-            description = "Prints the MCP server entry to paste into .mcp.json."
+            description = "Writes the MCP server entry into .mcp.json."
             port.set(extension.port)
             projectName.set(project.rootProject.name)
+            // The root of the build, which is where an MCP client looks.
+            configFile.set(project.rootProject.layout.projectDirectory.file(".mcp.json"))
+            overwrite.set(
+                project.providers.gradleProperty("porthole.overwrite").map { it == "true" },
+            )
         }
     }
 

@@ -321,6 +321,12 @@ and nothing else.
 }
 ```
 
+`./gradlew portholeMcpConfig` writes that entry for you. It merges rather than
+overwrites, so other servers in the file are untouched, and if a `porthole`
+entry is already there and differs it prints the difference and leaves it —
+a different entry is usually deliberate. `-Pporthole.overwrite=true` replaces
+it, and the previous file is kept as `.mcp.json.bak` either way.
+
 The MCP server and the UI are independent. Run either, or both at once — they
 each open their own connection to the device.
 

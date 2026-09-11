@@ -2,17 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.gradle
 
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 import java.io.ByteArrayOutputStream
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -116,9 +120,24 @@ abstract class PortholeDisconnectTask : DefaultTask() {
 }
 
 /**
- * Prints the MCP entry. Printing rather than editing `.mcp.json` in place: that
- * file is usually checked in and shared, and a build task should not be
- * rewriting it behind your back.
+ * Writes the MCP server entry into `.mcp.json`.
+ *
+ * It used to print a snippet to paste, on the reasoning that `.mcp.json` is
+ * usually checked in and a build task should not rewrite a shared file behind
+ * your back. That reasoning is sound and this keeps it: the file is only
+ * changed when the change is unambiguous, and the task says exactly what it
+ * did and where.
+ *
+ *  - no file          create it
+ *  - no porthole key  add it, keeping every other server untouched
+ *  - same entry       say so and touch nothing
+ *  - different entry  refuse, print the difference, and wait to be told
+ *
+ * That last case is the one worth refusing. A porthole entry that disagrees
+ * with this project was put there on purpose — a different port, a pinned
+ * version, a local build — and silently correcting it would be the behaviour
+ * the original comment was guarding against. `-Pporthole.overwrite=true`
+ * replaces it.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -128,25 +147,87 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
     @get:Input
     abstract val projectName: Property<String>
 
-    @TaskAction
-    fun print() {
-        val snippet = """
-            {
-              "mcpServers": {
-                "porthole": {
-                  "command": "npx",
-                  "args": ["-y", "$PORTHOLE_UI_PACKAGE"],
-                  "env": {
-                    "PORTHOLE_PORT": "${port.get()}"
-                  }
-                }
-              }
-            }
+    /**
+     * Deliberately not an `@OutputFile`. It lives in the source tree, not the
+     * build directory, and letting Gradle treat it as task output would invite
+     * `clean` to delete a file the project owns.
+     */
+    @get:Internal
+    abstract val configFile: RegularFileProperty
+
+    @get:Input
+    @get:Optional
+    abstract val overwrite: Property<Boolean>
+
+    private fun entry(): String =
+        """
+        {
+          "command": "npx",
+          "args": ["-y", "$PORTHOLE_UI_PACKAGE"],
+          "env": {
+            "PORTHOLE_PORT": "${port.get()}"
+          }
+        }
         """.trimIndent()
 
-        logger.lifecycle("Add this to .mcp.json in ${projectName.get()}:\n")
-        logger.lifecycle(snippet)
-        logger.lifecycle("\nThen: ./gradlew portholeConnect, launch the debug build, and the tools go live.")
+    @TaskAction
+    fun write() {
+        val file = configFile.get().asFile
+        val json = JsonSlurper()
+
+        @Suppress("UNCHECKED_CAST")
+        val root: MutableMap<String, Any?> =
+            if (file.isFile && file.readText().isNotBlank()) {
+                (json.parseText(file.readText()) as? Map<String, Any?>)?.toMutableMap()
+                    ?: throw GradleException("${file.name} is not a JSON object; leaving it alone.")
+            } else {
+                mutableMapOf()
+            }
+
+        @Suppress("UNCHECKED_CAST")
+        val servers =
+            (root["mcpServers"] as? Map<String, Any?>)?.toMutableMap() ?: mutableMapOf()
+
+        @Suppress("UNCHECKED_CAST")
+        val wanted = json.parseText(entry()) as Map<String, Any?>
+        val existing = servers["porthole"]
+
+        if (existing == wanted) {
+            logger.lifecycle("[porthole] ${file.name} already has a matching entry. Nothing to do.")
+            return
+        }
+
+        if (existing != null && overwrite.getOrElse(false) != true) {
+            logger.lifecycle("[porthole] ${file.name} already defines 'porthole', and it differs:")
+            logger.lifecycle("  there: ${JsonOutput.toJson(existing)}")
+            logger.lifecycle("  here:  ${JsonOutput.toJson(wanted)}")
+            logger.lifecycle(
+                "Left as it is — a different entry is usually deliberate. " +
+                    "Re-run with -Pporthole.overwrite=true to replace it.",
+            )
+            return
+        }
+
+        servers["porthole"] = wanted
+        root["mcpServers"] = servers
+
+        // Back the file up before rewriting it. Merging reformats the whole
+        // document, and someone should be able to get their formatting back.
+        if (file.isFile) {
+            file.copyTo(File(file.parentFile, "${file.name}.bak"), overwrite = true)
+        }
+        file.parentFile?.mkdirs()
+        file.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(root)) + "\n")
+
+        val what = if (existing != null) "replaced the entry in" else "added porthole to"
+        logger.lifecycle("[porthole] $what ${file.path}")
+        if (file.resolveSibling("${file.name}.bak").isFile) {
+            logger.lifecycle("[porthole] previous contents: ${file.name}.bak")
+        }
+        logger.lifecycle(
+            "[porthole] next: ./gradlew portholeConnect, launch the debug build, " +
+                "and the tools go live in ${projectName.get()}.",
+        )
     }
 }
 
