@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { extname, resolve } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent } from "./device.js";
+import { askTrace, findTraceProcessor } from "./perfetto.js";
+import { buildTrace } from "./trace.js";
 
 const UI_DIR = fileURLToPath(new URL("../ui/dist/", import.meta.url));
 
@@ -116,6 +118,76 @@ export class TimelineServer {
       // Identifies this server to another instance that finds the port
       // taken. Sniffing the HTML would answer 'a web server' and not
       // 'a Porthole, attached to this device, still alive'.
+      /**
+       * Both halves of the answer, in one list.
+       *
+       * Porthole says what the app was doing and that it hurt; a system trace
+       * says what the rest of the device was doing, and mostly rules causes
+       * out. They only belong in one list because they already share a shape —
+       * the same severities, and the same distinction between what was
+       * observed and what was merely adjacent. Each carries its source so a
+       * reader can tell which tool is making the claim.
+       */
+      if (path === "/api/findings") {
+        const query = new URL(req.url ?? "/", "http://localhost");
+        const events = this.events;
+        const to = numberParam(query.searchParams.get("to")) ?? events[events.length - 1]?.t ?? 0;
+        const from = numberParam(query.searchParams.get("from")) ?? events[0]?.t ?? 0;
+        const within = events.filter((e) => e.t >= from && e.t <= to);
+
+        const live = buildTrace({
+          scenario: "live",
+          events: within,
+          hello: (this.device.hello as unknown as Record<string, unknown>) ?? null,
+          durationMs: Math.max(0, to - from),
+          withEvents: false,
+        });
+
+        type Sourced = (typeof live.findings)[number] & { source: "porthole" | "trace" };
+        const findings: Sourced[] = live.findings.map((f) => ({ ...f, source: "porthole" }));
+        const notes: string[] = [];
+
+        const tracePath = query.searchParams.get("trace");
+        if (tracePath) {
+          const binary = findTraceProcessor();
+          const app = this.device.hello?.packageName;
+          if (!binary) {
+            notes.push(
+              "trace_processor_shell was not found, so the trace could not be read. " +
+                "The trace itself still opens at ui.perfetto.dev.",
+            );
+          } else if (!app) {
+            notes.push("Not attached to an app, so there is no process to scope the trace to.");
+          } else {
+            // The window is in Porthole's clock; the trace is stamped in the
+            // boot clock, and the two differ by however long the device slept.
+            const sample = within.find((e) => e.event === "clocks") ?? events.find((e) => e.event === "clocks");
+            const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
+            const asked = askTrace({
+              binary,
+              trace: tracePath,
+              packageName: app,
+              fromNs: (from + sleepMs) * 1e6,
+              toNs: (to + sleepMs) * 1e6,
+            });
+            findings.push(...asked.findings.map((f): Sourced => ({ ...f, source: "trace" })));
+            notes.push(...asked.unanswered);
+          }
+        }
+
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            window: { from, to, ms: Math.max(0, to - from) },
+            eventsExamined: within.length,
+            metrics: live.metrics,
+            findings,
+            notes,
+          }),
+        );
+        return;
+      }
+
       if (path === "/api/health") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(

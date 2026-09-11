@@ -1,5 +1,8 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { Finding } from "./trace.js";
 
 /**
@@ -192,3 +195,78 @@ function isMainThread(row: Record<string, unknown>): boolean {
 
 const rank = (severity: Finding["severity"]): number =>
   severity === "error" ? 3 : severity === "warning" ? 2 : 1;
+
+
+// ---------------------------------------------------------------------------
+// running them
+// ---------------------------------------------------------------------------
+
+/** trace_processor_shell, if the machine happens to have one. */
+export function findTraceProcessor(): string | null {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const candidates = [
+    process.env.PORTHOLE_TRACE_PROCESSOR,
+    join(home, ".perfetto", "trace_processor_shell"),
+    join(home, ".perfetto", "trace_processor_shell.exe"),
+    "/usr/local/bin/trace_processor_shell",
+  ].filter(Boolean) as string[];
+  return candidates.find((c) => existsSync(c)) ?? null;
+}
+
+/** trace_processor prints TSV: a header row, then values. */
+export function parseRows(stdout: string): Array<Record<string, unknown>> {
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const header = lines[0].split("\t");
+  return lines.slice(1).map((line) => {
+    const cells = line.split("\t");
+    return Object.fromEntries(header.map((key, i) => [key, cells[i]]));
+  });
+}
+
+export interface AskResult {
+  findings: Finding[];
+  /** Questions that could not be answered, and why. Never silently dropped. */
+  unanswered: string[];
+}
+
+/**
+ * Puts the three questions to a trace, scoped to one window and one process.
+ *
+ * Substitution rather than bound parameters because trace_processor's shell
+ * takes a file of SQL and no bindings. The package is the only string that
+ * reaches it and it is quoted here; the bounds are numbers by the time they
+ * arrive.
+ */
+export function askTrace(options: {
+  binary: string;
+  trace: string;
+  packageName: string;
+  fromNs: number;
+  toNs: number;
+}): AskResult {
+  const rows: Rows = {};
+  const unanswered: string[] = [];
+
+  for (const question of QUESTIONS) {
+    const sql = question.sql
+      .replace(/\$from/g, String(Math.round(options.fromNs)))
+      .replace(/\$to/g, String(Math.round(options.toNs)))
+      .replace(/\$package/g, `'${options.packageName.replace(/'/g, "''")}'`);
+
+    const result = spawnSync(options.binary, ["-q", "/dev/stdin", options.trace], {
+      input: sql,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+    });
+
+    if (result.status !== 0) {
+      const why = (result.stderr || result.error?.message || "failed").split("\n")[0];
+      unanswered.push(`${question.asks} — ${why.slice(0, 160)}`);
+      continue;
+    }
+    (rows as Record<string, unknown>)[question.id] = parseRows(result.stdout);
+  }
+
+  return { findings: interpret(rows), unanswered };
+}

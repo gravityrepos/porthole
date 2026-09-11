@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DbInspector } from "./components/DbInspector";
 import { Header } from "./components/Header";
+import { InsightsPanel } from "./components/InsightsPanel";
 import { LogPane } from "./components/LogPane";
 import { SelectionPanel } from "./components/SelectionPanel";
 import { TimelinePanel } from "./components/TimelinePanel";
@@ -176,7 +177,9 @@ export function App() {
           />
         </div>
 
-        <aside className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--color-panel)]">
+        <aside className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 overflow-y-auto bg-[var(--color-panel)] p-2">
+          {/* Conclusions first: the panels below are the evidence for them. */}
+          <InsightsPanel from={view.start} to={view.end} />
           <SelectionPanel hit={hit} />
           <WindowPanel
             summary={summary}

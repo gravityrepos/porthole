@@ -18,7 +18,7 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
-import { interpret, QUESTIONS, type Rows } from "./perfetto.js";
+import { askTrace, findTraceProcessor, QUESTIONS } from "./perfetto.js";
 import {
   captureArgs,
   countPortholeLabels,
@@ -151,26 +151,7 @@ function withFollowUp(finding: Finding) {
   return next ? { ...finding, next: { tool: next.tool, window: "quote `window` above", shows: next.why } } : finding;
 }
 
-/** trace_processor_shell, if the machine happens to have one. */
-function findTraceProcessor(): string | null {
-  const candidates = [
-    process.env.PORTHOLE_TRACE_PROCESSOR,
-    join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".perfetto", "trace_processor_shell"),
-    "/usr/local/bin/trace_processor_shell",
-  ].filter(Boolean) as string[];
-  return candidates.find((c) => existsSync(c)) ?? null;
-}
 
-/** trace_processor prints TSV: a header row, then values. */
-function parseRows(stdout: string): Array<Record<string, unknown>> {
-  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return [];
-  const header = lines[0].split("\t");
-  return lines.slice(1).map((line) => {
-    const cells = line.split("\t");
-    return Object.fromEntries(header.map((key, i) => [key, cells[i]]));
-  });
-}
 
 // ---------------------------------------------------------------------------
 // tools
@@ -405,35 +386,25 @@ server.registerTool(
       toNs: (span.to + sleepMs) * 1e6,
     };
 
-    const rows: Rows = {};
-    const failures: string[] = [];
-    for (const question of QUESTIONS) {
-      const sql = question.sql
-        .replace(/\$from/g, String(Math.round(bounds.fromNs)))
-        .replace(/\$to/g, String(Math.round(bounds.toNs)))
-        .replace(/\$package/g, `'${app.replace(/'/g, "''")}'`);
-      const result = spawnSync(binary, ["-q", "/dev/stdin", trace], {
-        input: sql,
-        encoding: "utf8",
-        maxBuffer: 32 * 1024 * 1024,
-      });
-      if (result.status !== 0) {
-        failures.push(`${question.id}: ${(result.stderr || "").split("\n")[0].slice(0, 160)}`);
-        continue;
-      }
-      (rows as Record<string, unknown>)[question.id] = parseRows(result.stdout);
-    }
+    const { findings: traceFindings, unanswered } = askTrace({
+      binary,
+      trace,
+      packageName: app,
+      fromNs: bounds.fromNs,
+      toNs: bounds.toNs,
+    });
 
-    const findings = interpret(rows).map(withFollowUp);
+    const findings = traceFindings.map(withFollowUp);
     const payload = {
       trace,
       app,
       window: { from: span.from, to: span.to, sleepMs },
       asked: QUESTIONS.map((q) => q.asks),
-      unanswered: failures,
+      unanswered,
       findings,
     };
 
+    const failures = unanswered;
     const summary = findings.length
       ? `${findings.length} finding(s) from the trace. ${findings[0].title}.`
       : "The trace had nothing to add about that window.";
