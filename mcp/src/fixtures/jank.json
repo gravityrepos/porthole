@@ -1,0 +1,23 @@
+[
+  {
+    "jank_type": "None",
+    "COUNT": "1",
+    "MIN(dur)": "12404610",
+    "MAX(dur)": "12404610",
+    "AVG(dur)": "12404610"
+  },
+  {
+    "jank_type": "App Resynced Jitter, Non Animating",
+    "COUNT": "1",
+    "MIN(dur)": "26873776",
+    "MAX(dur)": "26873776",
+    "AVG(dur)": "26873776"
+  },
+  {
+    "jank_type": "App Deadline Missed",
+    "COUNT": "1",
+    "MIN(dur)": "117264766",
+    "MAX(dur)": "117264766",
+    "AVG(dur)": "117264766"
+  }
+]

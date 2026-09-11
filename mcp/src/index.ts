@@ -18,13 +18,15 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
+import { interpret, QUESTIONS, type Rows } from "./perfetto.js";
 import {
   captureArgs,
   countPortholeLabels,
   describeCapture,
   planCapture,
 } from "./systrace.js";
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { buildTrace, type Finding } from "./trace.js";
 
@@ -147,6 +149,27 @@ const FOLLOW_UP: Record<string, { tool: string; why: string }> = {
 function withFollowUp(finding: Finding) {
   const next = FOLLOW_UP[finding.id];
   return next ? { ...finding, next: { tool: next.tool, window: "quote `window` above", shows: next.why } } : finding;
+}
+
+/** trace_processor_shell, if the machine happens to have one. */
+function findTraceProcessor(): string | null {
+  const candidates = [
+    process.env.PORTHOLE_TRACE_PROCESSOR,
+    join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".perfetto", "trace_processor_shell"),
+    "/usr/local/bin/trace_processor_shell",
+  ].filter(Boolean) as string[];
+  return candidates.find((c) => existsSync(c)) ?? null;
+}
+
+/** trace_processor prints TSV: a header row, then values. */
+function parseRows(stdout: string): Array<Record<string, unknown>> {
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const header = lines[0].split("\t");
+  return lines.slice(1).map((line) => {
+    const cells = line.split("\t");
+    return Object.fromEntries(header.map((key, i) => [key, cells[i]]));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +331,113 @@ server.registerTool(
     };
 
     return ok(describeSystem(context), context);
+  },
+);
+
+server.registerTool(
+  "ask_system_trace",
+  {
+    title: "Ask a system trace about a window",
+    description:
+      "Runs a fixed set of questions against a recorded trace, scoped to one window and one "
+      + "process, and returns findings in the same vocabulary as everything else here.\n\n"
+      + "It performs, without a person, the steps someone otherwise does by hand in a trace "
+      + "viewer: find the moment worth looking at, drag out the window, pick the app out of the "
+      + "process list, and export. Porthole already holds all four — the window comes from a "
+      + "finding, the package from the handshake with the device — which is the only reason this "
+      + "can be automated at all.\n\n"
+      + "What it is for is ruling causes out. `findings` can say a frame was late and that "
+      + "composition dominated it. It cannot say whether the device was starving the app of CPU, "
+      + "blocking it on I/O, or compiling its own bytecode in the background. Answering no to "
+      + "each of those is what turns a suspicion into a conclusion, and answering yes to one "
+      + "means the app's own work was never the whole story.\n\n"
+      + "Deliberately not a SQL interface. The questions are fixed, because an agent handed a "
+      + "hundred tables and no guidance assembles an answer from whichever guess came back "
+      + "non-empty — which is the failure this whole surface was reshaped to avoid.\n\n"
+      + "Needs `trace_processor_shell`, which is not bundled: it is a large platform-specific "
+      + "binary and Porthole is a plugin and an npm package. Point at it with PORTHOLE_TRACE_PROCESSOR "
+      + "or --trace-processor; get it from perfetto.dev.",
+    inputSchema: {
+      trace: z.string().describe("Path to a .pftrace, as returned by capture_system_trace."),
+      from: z
+        .number()
+        .int()
+        .optional()
+        .describe("Window start on the device uptime clock. Quote a finding's `window`."),
+      to: z.number().int().optional().describe("Window end, same clock."),
+      packageName: z
+        .string()
+        .optional()
+        .describe("Defaults to the app the porthole is attached to."),
+      traceProcessor: z.string().optional().describe("Path to trace_processor_shell."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ trace, from, to, packageName, traceProcessor }): Promise<ToolResult> => {
+    const binary =
+      traceProcessor ?? process.env.PORTHOLE_TRACE_PROCESSOR ?? findTraceProcessor();
+    if (!binary) {
+      return fail(
+        "No trace_processor_shell found. It is a separate download from perfetto.dev, not "
+          + "bundled here — it is a large platform-specific binary and this ships as a Gradle "
+          + "plugin and an npm package. Set PORTHOLE_TRACE_PROCESSOR to it, or pass "
+          + "`traceProcessor`. The trace itself is still readable at ui.perfetto.dev.",
+      );
+    }
+
+    const app = packageName ?? device.hello?.packageName;
+    if (!app) {
+      return fail(
+        "No package to scope to. Connect to the app, or pass `packageName` — without it the "
+          + "questions answer for the whole device, which is a different question.",
+      );
+    }
+
+    // The window arrives in Porthole's clock and the trace is stamped in the
+    // boot clock, so it has to be converted before it means anything here.
+    const events = timeline.buffer();
+    const span = resolveWindow({ from, to });
+    if (!span) return fail("Nothing buffered, so there is no window to ask about.");
+    const sample = events.find((e) => e.event === "clocks");
+    const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
+    const bounds = {
+      fromNs: (span.from + sleepMs) * 1e6,
+      toNs: (span.to + sleepMs) * 1e6,
+    };
+
+    const rows: Rows = {};
+    const failures: string[] = [];
+    for (const question of QUESTIONS) {
+      const sql = question.sql
+        .replace(/\$from/g, String(Math.round(bounds.fromNs)))
+        .replace(/\$to/g, String(Math.round(bounds.toNs)))
+        .replace(/\$package/g, `'${app.replace(/'/g, "''")}'`);
+      const result = spawnSync(binary, ["-q", "/dev/stdin", trace], {
+        input: sql,
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      if (result.status !== 0) {
+        failures.push(`${question.id}: ${(result.stderr || "").split("\n")[0].slice(0, 160)}`);
+        continue;
+      }
+      (rows as Record<string, unknown>)[question.id] = parseRows(result.stdout);
+    }
+
+    const findings = interpret(rows).map(withFollowUp);
+    const payload = {
+      trace,
+      app,
+      window: { from: span.from, to: span.to, sleepMs },
+      asked: QUESTIONS.map((q) => q.asks),
+      unanswered: failures,
+      findings,
+    };
+
+    const summary = findings.length
+      ? `${findings.length} finding(s) from the trace. ${findings[0].title}.`
+      : "The trace had nothing to add about that window.";
+    return ok(summary + (failures.length ? ` ${failures.length} question(s) failed.` : ""), payload);
   },
 );
 

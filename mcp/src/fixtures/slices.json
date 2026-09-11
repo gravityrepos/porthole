@@ -1,0 +1,842 @@
+[
+  {
+    "name": "porthole: recompose",
+    "COUNT": "1",
+    "SUM(dur)": "251476563",
+    "SUM(self_dur)": "251476563",
+    "AVG(dur)": "251476563"
+  },
+  {
+    "name": "traversal",
+    "COUNT": "6",
+    "SUM(dur)": "148480868",
+    "SUM(self_dur)": "17525556",
+    "AVG(dur)": "24746811.333333332"
+  },
+  {
+    "name": "226666108",
+    "COUNT": "2",
+    "SUM(dur)": "133864766",
+    "SUM(self_dur)": "133864766",
+    "AVG(dur)": "66932383"
+  },
+  {
+    "name": "Choreographer#doFrame 226666108",
+    "COUNT": "1",
+    "SUM(dur)": "117408776",
+    "SUM(self_dur)": "35261",
+    "AVG(dur)": "117408776"
+  },
+  {
+    "name": "Compose:recompose",
+    "COUNT": "4",
+    "SUM(dur)": "89886955",
+    "SUM(self_dur)": "51935824",
+    "AVG(dur)": "22471738.75"
+  },
+  {
+    "name": "Compiling baseline",
+    "COUNT": "838",
+    "SUM(dur)": "85902576",
+    "SUM(self_dur)": "78899310",
+    "AVG(dur)": "102509.04057279236"
+  },
+  {
+    "name": "226665975",
+    "COUNT": "2",
+    "SUM(dur)": "43473775",
+    "SUM(self_dur)": "43473775",
+    "AVG(dur)": "21736887.5"
+  },
+  {
+    "name": "clientTransactionExecuted",
+    "COUNT": "7",
+    "SUM(dur)": "35988957",
+    "SUM(self_dur)": "425855",
+    "AVG(dur)": "5141279.571428572"
+  },
+  {
+    "name": "binder transaction",
+    "COUNT": "41",
+    "SUM(dur)": "35014821",
+    "SUM(self_dur)": "35014821",
+    "AVG(dur)": "854020.0243902439"
+  },
+  {
+    "name": "226666371",
+    "COUNT": "2",
+    "SUM(dur)": "29004610",
+    "SUM(self_dur)": "29004610",
+    "AVG(dur)": "14502305"
+  },
+  {
+    "name": "Choreographer#doFrame 226665975",
+    "COUNT": "1",
+    "SUM(dur)": "27295573",
+    "SUM(self_dur)": "243750",
+    "AVG(dur)": "27295573"
+  },
+  {
+    "name": "Choreographer#doFrame - resynced to 226665977 in 23.1ms",
+    "COUNT": "1",
+    "SUM(dur)": "27051823",
+    "SUM(self_dur)": "9296",
+    "AVG(dur)": "27051823"
+  },
+  {
+    "name": "activityResume",
+    "COUNT": "2",
+    "SUM(dur)": "14871277",
+    "SUM(self_dur)": "3529350",
+    "AVG(dur)": "7435638.5"
+  },
+  {
+    "name": "wait",
+    "COUNT": "4",
+    "SUM(dur)": "14650338",
+    "SUM(self_dur)": "14650338",
+    "AVG(dur)": "3662584.5"
+  },
+  {
+    "name": "measure",
+    "COUNT": "4",
+    "SUM(dur)": "13960103",
+    "SUM(self_dur)": "254217",
+    "AVG(dur)": "3490025.75"
+  },
+  {
+    "name": "AndroidOwner:onMeasure",
+    "COUNT": "4",
+    "SUM(dur)": "13705886",
+    "SUM(self_dur)": "10700187",
+    "AVG(dur)": "3426471.5"
+  },
+  {
+    "name": "Compose:applyChanges",
+    "COUNT": "4",
+    "SUM(dur)": "11349192",
+    "SUM(self_dur)": "8977393",
+    "AVG(dur)": "2837298"
+  },
+  {
+    "name": "animation",
+    "COUNT": "4",
+    "SUM(dur)": "9970131",
+    "SUM(self_dur)": "268335",
+    "AVG(dur)": "2492532.75"
+  },
+  {
+    "name": "layout",
+    "COUNT": "2",
+    "SUM(dur)": "9620416",
+    "SUM(self_dur)": "9378098",
+    "AVG(dur)": "4810208"
+  },
+  {
+    "name": "Recomposer:recompose",
+    "COUNT": "2",
+    "SUM(dur)": "9541744",
+    "SUM(self_dur)": "639842",
+    "AVG(dur)": "4770872"
+  },
+  {
+    "name": "Choreographer#doFrame 226666371",
+    "COUNT": "1",
+    "SUM(dur)": "9125027",
+    "SUM(self_dur)": "19948",
+    "AVG(dur)": "9125027"
+  },
+  {
+    "name": "activityStart",
+    "COUNT": "2",
+    "SUM(dur)": "8776875",
+    "SUM(self_dur)": "3253541",
+    "AVG(dur)": "4388437.5"
+  },
+  {
+    "name": "allocateBuffers",
+    "COUNT": "4",
+    "SUM(dur)": "8124662",
+    "SUM(self_dur)": "354245",
+    "AVG(dur)": "2031165.5"
+  },
+  {
+    "name": "allocate",
+    "COUNT": "10",
+    "SUM(dur)": "7759115",
+    "SUM(self_dur)": "645729",
+    "AVG(dur)": "775911.5"
+  },
+  {
+    "name": "ScopedCodeCacheWrite",
+    "COUNT": "1693",
+    "SUM(dur)": "7062326",
+    "SUM(self_dur)": "7062326",
+    "AVG(dur)": "4171.486119314825"
+  },
+  {
+    "name": "draw-VRI[MainActivity]",
+    "COUNT": "5",
+    "SUM(dur)": "6684843",
+    "SUM(self_dur)": "616510",
+    "AVG(dur)": "1336968.6"
+  },
+  {
+    "name": "wmsSync-VRI[MainActivity]#4",
+    "COUNT": "1",
+    "SUM(dur)": "6642552",
+    "SUM(self_dur)": "6603047",
+    "AVG(dur)": "6642552"
+  },
+  {
+    "name": "activityDestroy",
+    "COUNT": "1",
+    "SUM(dur)": "6600364",
+    "SUM(self_dur)": "1228982",
+    "AVG(dur)": "6600364"
+  },
+  {
+    "name": "VRI[MainActivity]#5",
+    "COUNT": "1",
+    "SUM(dur)": "6471354",
+    "SUM(self_dur)": "6455025",
+    "AVG(dur)": "6471354"
+  },
+  {
+    "name": "Record View#draw()",
+    "COUNT": "3",
+    "SUM(dur)": "5696302",
+    "SUM(self_dur)": "4560444",
+    "AVG(dur)": "1898767.3333333333"
+  },
+  {
+    "name": "Drawing  0.00  0.00 1080.00 2404.00",
+    "COUNT": "3",
+    "SUM(dur)": "5446069",
+    "SUM(self_dur)": "458909",
+    "AVG(dur)": "1815356.3333333333"
+  },
+  {
+    "name": "performCreate:com.example.shop.ui.MainActivity",
+    "COUNT": "2",
+    "SUM(dur)": "4083932",
+    "SUM(self_dur)": "3718906",
+    "AVG(dur)": "2041966"
+  },
+  {
+    "name": "TextLayout:initLayout",
+    "COUNT": "19",
+    "SUM(dur)": "4001379",
+    "SUM(self_dur)": "761403",
+    "AVG(dur)": "210598.8947368421"
+  },
+  {
+    "name": "flush commands",
+    "COUNT": "3",
+    "SUM(dur)": "3984218",
+    "SUM(self_dur)": "5338",
+    "AVG(dur)": "1328072.6666666667"
+  },
+  {
+    "name": "Vulkan finish frame",
+    "COUNT": "3",
+    "SUM(dur)": "3978880",
+    "SUM(self_dur)": "247760",
+    "AVG(dur)": "1326293.3333333333"
+  },
+  {
+    "name": "wmsSync-VRI[MainActivity]#2",
+    "COUNT": "1",
+    "SUM(dur)": "3778541",
+    "SUM(self_dur)": "3726197",
+    "AVG(dur)": "3778541"
+  },
+  {
+    "name": "VRI[MainActivity]#3",
+    "COUNT": "1",
+    "SUM(dur)": "3601797",
+    "SUM(self_dur)": "3585495",
+    "AVG(dur)": "3601797"
+  },
+  {
+    "name": "Compose:onRemembered",
+    "COUNT": "2",
+    "SUM(dur)": "3547890",
+    "SUM(self_dur)": "3397160",
+    "AVG(dur)": "1773945"
+  },
+  {
+    "name": "Constructing StaticLayout",
+    "COUNT": "21",
+    "SUM(dur)": "3306409",
+    "SUM(self_dur)": "3306409",
+    "AVG(dur)": "157448.04761904763"
+  },
+  {
+    "name": "performDestroy:com.example.shop.ui.MainActivity",
+    "COUNT": "1",
+    "SUM(dur)": "2979219",
+    "SUM(self_dur)": "1843229",
+    "AVG(dur)": "2979219"
+  },
+  {
+    "name": "DrawFrames 226665975",
+    "COUNT": "1",
+    "SUM(dur)": "2644714",
+    "SUM(self_dur)": "403358",
+    "AVG(dur)": "2644714"
+  },
+  {
+    "name": "Choreographer#doFrame 226666963",
+    "COUNT": "1",
+    "SUM(dur)": "2590398",
+    "SUM(self_dur)": "7865",
+    "AVG(dur)": "2590398"
+  },
+  {
+    "name": "setSurface",
+    "COUNT": "4",
+    "SUM(dur)": "2517665",
+    "SUM(self_dur)": "2388445",
+    "AVG(dur)": "629416.25"
+  },
+  {
+    "name": "Choreographer#doFrame 226666130",
+    "COUNT": "1",
+    "SUM(dur)": "2463463",
+    "SUM(self_dur)": "90130",
+    "AVG(dur)": "2463463"
+  },
+  {
+    "name": "monitor contention with owner porthole-watchdog (17200) at boolean android.os.MessageQueue.enqueueMessageLegacy(android.os.Message, long)(MessageQueue.java:494) waiters=0 blocking from android.os.Message android.os.MessageQueue.nextLegacy()(MessageQueue.java:872)",
+    "COUNT": "1",
+    "SUM(dur)": "2461094",
+    "SUM(self_dur)": "249975",
+    "AVG(dur)": "2461094"
+  },
+  {
+    "name": "DrawFrames 226666108",
+    "COUNT": "1",
+    "SUM(dur)": "2354766",
+    "SUM(self_dur)": "177708",
+    "AVG(dur)": "2354766"
+  },
+  {
+    "name": "Choreographer#doFrame - resynced to 226666284 in 19.4ms",
+    "COUNT": "1",
+    "SUM(dur)": "2258828",
+    "SUM(self_dur)": "10546",
+    "AVG(dur)": "2258828"
+  },
+  {
+    "name": "Lock contention on a monitor lock (owner tid: 17200)",
+    "COUNT": "1",
+    "SUM(dur)": "2211119",
+    "SUM(self_dur)": "2211119",
+    "AVG(dur)": "2211119"
+  },
+  {
+    "name": "auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const",
+    "COUNT": "3",
+    "SUM(dur)": "2192734",
+    "SUM(self_dur)": "1918121",
+    "AVG(dur)": "730911.3333333334"
+  },
+  {
+    "name": "dispatchApplyInsets",
+    "COUNT": "2",
+    "SUM(dur)": "2097735",
+    "SUM(self_dur)": "2095834",
+    "AVG(dur)": "1048867.5"
+  },
+  {
+    "name": "VRI[MainActivity]-relayoutWindow#first=true/resize=true/vis=false/params=true/force=false/seqId=0",
+    "COUNT": "2",
+    "SUM(dur)": "2013359",
+    "SUM(self_dur)": "1363333",
+    "AVG(dur)": "1006679.5"
+  },
+  {
+    "name": "waitForever",
+    "COUNT": "3",
+    "SUM(dur)": "2000703",
+    "SUM(self_dur)": "2000703",
+    "AVG(dur)": "666901"
+  },
+  {
+    "name": "DrawFrames 226666371",
+    "COUNT": "1",
+    "SUM(dur)": "1940286",
+    "SUM(self_dur)": "217916",
+    "AVG(dur)": "1940286"
+  },
+  {
+    "name": "JIT compiling int jdk.internal.math.FloatingDecimal$BinaryToASCIIBuffer.getDigits(char[]) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "1923906",
+    "SUM(self_dur)": "4479",
+    "AVG(dur)": "1923906"
+  },
+  {
+    "name": "VerifyClass androidx.compose.material3.internal.TextFieldImplKt",
+    "COUNT": "1",
+    "SUM(dur)": "1644687",
+    "SUM(self_dur)": "1429948",
+    "AVG(dur)": "1644687"
+  },
+  {
+    "name": "MSG_WINDOW_FOCUS_CHANGED",
+    "COUNT": "1",
+    "SUM(dur)": "1505235",
+    "SUM(self_dur)": "890417",
+    "AVG(dur)": "1505235"
+  },
+  {
+    "name": "waiting for GPU completion 2",
+    "COUNT": "1",
+    "SUM(dur)": "1494584",
+    "SUM(self_dur)": "4167",
+    "AVG(dur)": "1494584"
+  },
+  {
+    "name": "TrimMaps",
+    "COUNT": "30",
+    "SUM(dur)": "1477005",
+    "SUM(self_dur)": "95882",
+    "AVG(dur)": "49233.5"
+  },
+  {
+    "name": "virtual void art::MemMapArenaPool::TrimMaps()",
+    "COUNT": "30",
+    "SUM(dur)": "1381123",
+    "SUM(self_dur)": "1381123",
+    "AVG(dur)": "46037.433333333334"
+  },
+  {
+    "name": "JIT compiling void android.content.Intent.<init>(android.content.Intent, int) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "1313828",
+    "SUM(self_dur)": "9036",
+    "AVG(dur)": "1313828"
+  },
+  {
+    "name": "VerifyClass androidx.compose.foundation.text.BasicTextFieldKt",
+    "COUNT": "1",
+    "SUM(dur)": "1303984",
+    "SUM(self_dur)": "977808",
+    "AVG(dur)": "1303984"
+  },
+  {
+    "name": "porthole: db SELECT cart_items",
+    "COUNT": "1",
+    "SUM(dur)": "1239427",
+    "SUM(self_dur)": "1239427",
+    "AVG(dur)": "1239427"
+  },
+  {
+    "name": "VerifyClass io.ktor.client.plugins.api.ClientPluginBuilder",
+    "COUNT": "1",
+    "SUM(dur)": "1145677",
+    "SUM(self_dur)": "1123230",
+    "AVG(dur)": "1145677"
+  },
+  {
+    "name": "JIT compiling java.lang.String android.view.ViewRootImpl$ViewRootHandler.getMessageName(android.os.Message) (kind=Baseline) from /system/framework/framework.jar!3",
+    "COUNT": "1",
+    "SUM(dur)": "1098750",
+    "SUM(self_dur)": "20808",
+    "AVG(dur)": "1098750"
+  },
+  {
+    "name": "JIT compiling void jdk.internal.math.FloatingDecimal$BinaryToASCIIBuffer.dtoa(int, long, int, boolean) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "1098125",
+    "SUM(self_dur)": "3021",
+    "AVG(dur)": "1098125"
+  },
+  {
+    "name": "JIT compiling void androidx.compose.runtime.ComposerImpl.end(boolean) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",
+    "COUNT": "1",
+    "SUM(dur)": "1052865",
+    "SUM(self_dur)": "5208",
+    "AVG(dur)": "1052865"
+  },
+  {
+    "name": "JIT compiling int android.text.Layout$SpannedEllipsizer.nextSpanTransition(int, int, java.lang.Class) (kind=Baseline) from /system/framework/framework.jar!3",
+    "COUNT": "1",
+    "SUM(dur)": "1052161",
+    "SUM(self_dur)": "3489",
+    "AVG(dur)": "1052161"
+  },
+  {
+    "name": "QueueSubmit",
+    "COUNT": "3",
+    "SUM(dur)": "1046823",
+    "SUM(self_dur)": "149244",
+    "AVG(dur)": "348941"
+  },
+  {
+    "name": "queueBuffer",
+    "COUNT": "6",
+    "SUM(dur)": "1038777",
+    "SUM(self_dur)": "248905",
+    "AVG(dur)": "173129.5"
+  },
+  {
+    "name": "JIT compiling java.lang.StringBuilder java.util.regex.Matcher.appendExpandedReplacement(java.lang.String, java.lang.StringBuilder) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "1036433",
+    "SUM(self_dur)": "3751",
+    "AVG(dur)": "1036433"
+  },
+  {
+    "name": "performResume:com.example.shop.ui.MainActivity",
+    "COUNT": "2",
+    "SUM(dur)": "991822",
+    "SUM(self_dur)": "983696",
+    "AVG(dur)": "495911"
+  },
+  {
+    "name": "JIT compiling boolean android.content.Intent.migrateExtraStreamToClipData(android.content.Context) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "979895",
+    "SUM(self_dur)": "3541",
+    "AVG(dur)": "979895"
+  },
+  {
+    "name": "JIT compiling android.content.ClipData android.content.Intent.getClipData() (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "936849",
+    "SUM(self_dur)": "6381",
+    "AVG(dur)": "936849"
+  },
+  {
+    "name": "performStart:com.example.shop.ui.MainActivity",
+    "COUNT": "2",
+    "SUM(dur)": "925417",
+    "SUM(self_dur)": "568281",
+    "AVG(dur)": "462708.5"
+  },
+  {
+    "name": "AndroidOwner:measureAndLayout",
+    "COUNT": "1",
+    "SUM(dur)": "903646",
+    "SUM(self_dur)": "866667",
+    "AVG(dur)": "903646"
+  },
+  {
+    "name": "JIT compiling java.lang.Object java.util.concurrent.ConcurrentHashMap.compute(java.lang.Object, java.util.function.BiFunction) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "877396",
+    "SUM(self_dur)": "3438",
+    "AVG(dur)": "877396"
+  },
+  {
+    "name": "JIT compiling boolean android.app.ApplicationPackageManager$ResourceName.equals(java.lang.Object) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "874062",
+    "SUM(self_dur)": "10129",
+    "AVG(dur)": "874062"
+  },
+  {
+    "name": "JIT compiling void android.os.Trace.asyncTraceForTrackBegin(long, java.lang.String, java.lang.String, int) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "830807",
+    "SUM(self_dur)": "6744",
+    "AVG(dur)": "830807"
+  },
+  {
+    "name": "Compose:onForgotten",
+    "COUNT": "1",
+    "SUM(dur)": "817161",
+    "SUM(self_dur)": "798489",
+    "AVG(dur)": "817161"
+  },
+  {
+    "name": "VerifyClass androidx.compose.foundation.text.CoreTextFieldKt",
+    "COUNT": "1",
+    "SUM(dur)": "812057",
+    "SUM(self_dur)": "622499",
+    "AVG(dur)": "812057"
+  },
+  {
+    "name": "JIT compiling int android.app.Instrumentation.execStartActivitiesAsUser(android.content.Context, android.os.IBinder, android.os.IBinder, android.app.Activity, android.content.Intent[], android.os.Bundle, int) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "790468",
+    "SUM(self_dur)": "3749",
+    "AVG(dur)": "790468"
+  },
+  {
+    "name": "JIT compiling void java.util.zip.ZipFile$Source.initCEN(int) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "746250",
+    "SUM(self_dur)": "2058",
+    "AVG(dur)": "746250"
+  },
+  {
+    "name": "JIT compiling java.lang.String java.util.AbstractMap.toString() (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "742422",
+    "SUM(self_dur)": "20754",
+    "AVG(dur)": "742422"
+  },
+  {
+    "name": "JIT compiling android.icu.text.BreakIterator android.icu.text.BreakIterator.getBreakInstance(android.icu.util.ULocale, int) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "721354",
+    "SUM(self_dur)": "3489",
+    "AVG(dur)": "721354"
+  },
+  {
+    "name": "VerifyClass androidx.compose.foundation.layout.FlowLayoutKt",
+    "COUNT": "1",
+    "SUM(dur)": "696797",
+    "SUM(self_dur)": "549637",
+    "AVG(dur)": "696797"
+  },
+  {
+    "name": "VerifyClass androidx.compose.material3.OutlinedTextFieldKt",
+    "COUNT": "1",
+    "SUM(dur)": "690703",
+    "SUM(self_dur)": "621458",
+    "AVG(dur)": "690703"
+  },
+  {
+    "name": "VerifyClass io.ktor.client.plugins.HttpRedirectKt",
+    "COUNT": "1",
+    "SUM(dur)": "673359",
+    "SUM(self_dur)": "234739",
+    "AVG(dur)": "673359"
+  },
+  {
+    "name": "JIT compiling void java.util.Formatter$FormatSpecifier.print(java.lang.StringBuilder, double, java.util.Locale, java.util.Formatter$Flags, char, int, boolean) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "663568",
+    "SUM(self_dur)": "3073",
+    "AVG(dur)": "663568"
+  },
+  {
+    "name": "JIT compiling void android.text.StaticLayout.calculateEllipsis(int, int, android.text.MeasuredParagraph, int, float, android.text.TextUtils$TruncateAt, int, float, android.text.TextPaint, boolean) (kind=Baseline) from /system/framework/framework.jar!3",
+    "COUNT": "1",
+    "SUM(dur)": "643073",
+    "SUM(self_dur)": "3359",
+    "AVG(dur)": "643073"
+  },
+  {
+    "name": "windowInsetsControlChanged",
+    "COUNT": "2",
+    "SUM(dur)": "603360",
+    "SUM(self_dur)": "389923",
+    "AVG(dur)": "301680"
+  },
+  {
+    "name": "JIT compiling int android.icu.text.RuleBasedBreakIterator.handleNext() (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "559454",
+    "SUM(self_dur)": "2787",
+    "AVG(dur)": "559454"
+  },
+  {
+    "name": "JIT compiling android.hardware.display.DisplayManager$DisplayListener android.hardware.display.DisplayManagerGlobal$DisplayListenerDelegate.-$$Nest$fgetmListener(android.hardware.display.DisplayManagerGlobal$DisplayListenerDelegate) (kind=Baseline) from /system/framework/framework.jar!1",
+    "COUNT": "1",
+    "SUM(dur)": "543386",
+    "SUM(self_dur)": "20496",
+    "AVG(dur)": "543386"
+  },
+  {
+    "name": "JIT compiling void java.util.zip.ZipFile$Source.checkAndAddEntry(int, int, int, int, java.util.zip.ZipCoder, java.lang.String) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "529687",
+    "SUM(self_dur)": "3046",
+    "AVG(dur)": "529687"
+  },
+  {
+    "name": "JIT compiling int android.text.Layout.getLineForOffset(int) (kind=Baseline) from /system/framework/framework.jar!3",
+    "COUNT": "1",
+    "SUM(dur)": "505000",
+    "SUM(self_dur)": "9635",
+    "AVG(dur)": "505000"
+  },
+  {
+    "name": "BindImageMemory2",
+    "COUNT": "3",
+    "SUM(dur)": "504349",
+    "SUM(self_dur)": "504349",
+    "AVG(dur)": "168116.33333333334"
+  },
+  {
+    "name": "TAKick: 19",
+    "COUNT": "1",
+    "SUM(dur)": "494401",
+    "SUM(self_dur)": "494401",
+    "AVG(dur)": "494401"
+  },
+  {
+    "name": "Choreographer#scheduleVsyncLocked",
+    "COUNT": "9",
+    "SUM(dur)": "486981",
+    "SUM(self_dur)": "486981",
+    "AVG(dur)": "54109"
+  },
+  {
+    "name": "createSurfaceControl",
+    "COUNT": "2",
+    "SUM(dur)": "481796",
+    "SUM(self_dur)": "176041",
+    "AVG(dur)": "240898"
+  },
+  {
+    "name": "JIT compiling java.util.Formatter java.util.Formatter.format(java.util.Locale, java.lang.String, java.lang.Object[]) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "473646",
+    "SUM(self_dur)": "3177",
+    "AVG(dur)": "473646"
+  },
+  {
+    "name": "IMM.startInputOrWindowGainedFocus",
+    "COUNT": "1",
+    "SUM(dur)": "453281",
+    "SUM(self_dur)": "123516",
+    "AVG(dur)": "453281"
+  },
+  {
+    "name": "JIT compiling java.lang.String android.icu.impl.ICUResourceBundle.getStringWithFallback(java.lang.String) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "450416",
+    "SUM(self_dur)": "3202",
+    "AVG(dur)": "450416"
+  },
+  {
+    "name": "JIT compiling android.icu.util.CodePointTrie android.icu.util.CodePointTrie.fromBinary(android.icu.util.CodePointTrie$Type, android.icu.util.CodePointTrie$ValueWidth, java.nio.ByteBuffer) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "443151",
+    "SUM(self_dur)": "2943",
+    "AVG(dur)": "443151"
+  },
+  {
+    "name": "JIT compiling android.icu.text.BreakIterator android.icu.text.BreakIteratorFactory.createBreakInstance(android.icu.util.ULocale, int) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "429479",
+    "SUM(self_dur)": "3385",
+    "AVG(dur)": "429479"
+  },
+  {
+    "name": "JIT compiling java.util.zip.ZipFile$Source$End java.util.zip.ZipFile$Source.findEND() (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",
+    "COUNT": "1",
+    "SUM(dur)": "423880",
+    "SUM(self_dur)": "1719",
+    "AVG(dur)": "423880"
+  },
+  {
+    "name": "JIT compiling int androidx.compose.runtime.SlotWriter.endGroup() (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",
+    "COUNT": "1",
+    "SUM(dur)": "421119",
+    "SUM(self_dur)": "2916",
+    "AVG(dur)": "421119"
+  },
+  {
+    "name": "JIT compiling void androidx.compose.runtime.SlotWriter.startGroup(int, java.lang.Object, boolean, java.lang.Object) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",
+    "COUNT": "1",
+    "SUM(dur)": "413776",
+    "SUM(self_dur)": "6979",
+    "AVG(dur)": "413776"
+  },
+  {
+    "name": "JIT compiling void android.app.ActivityThread.performDestroyActivity(android.app.ActivityThread$ActivityClientRecord, boolean, boolean, java.lang.String) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "409895",
+    "SUM(self_dur)": "3176",
+    "AVG(dur)": "409895"
+  },
+  {
+    "name": "JIT compiling int android.icu.impl.ICUBinary.readHeader(java.nio.ByteBuffer, int, android.icu.impl.ICUBinary$Authenticate) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "404817",
+    "SUM(self_dur)": "3151",
+    "AVG(dur)": "404817"
+  },
+  {
+    "name": "waiting for GPU completion 1",
+    "COUNT": "1",
+    "SUM(dur)": "404010",
+    "SUM(self_dur)": "4141",
+    "AVG(dur)": "404010"
+  },
+  {
+    "name": "Lock contention on ClassLinker classes lock (owner tid: 18446744073709551615)",
+    "COUNT": "25",
+    "SUM(dur)": "403488",
+    "SUM(self_dur)": "403488",
+    "AVG(dur)": "16139.52"
+  },
+  {
+    "name": "JIT compiling android.net.Uri$PathSegments android.net.Uri$PathPart.getPathSegments() (kind=Baseline) from /system/framework/framework.jar!2",
+    "COUNT": "1",
+    "SUM(dur)": "396771",
+    "SUM(self_dur)": "13099",
+    "AVG(dur)": "396771"
+  },
+  {
+    "name": "JIT compiling void android.app.Activity.onDestroy() (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "388880",
+    "SUM(self_dur)": "3047",
+    "AVG(dur)": "388880"
+  },
+  {
+    "name": "JIT compiling java.lang.String android.icu.impl.ICUResourceBundle.findStringWithFallback(java.lang.String, android.icu.util.UResourceBundle, android.icu.util.UResourceBundle) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "385130",
+    "SUM(self_dur)": "3619",
+    "AVG(dur)": "385130"
+  },
+  {
+    "name": "JIT compiling android.icu.impl.RBBIDataWrapper android.icu.impl.RBBIDataWrapper.get(java.nio.ByteBuffer) (kind=Baseline) from /apex/com.android.i18n/javalib/core-icu4j.jar",
+    "COUNT": "1",
+    "SUM(dur)": "382865",
+    "SUM(self_dur)": "3255",
+    "AVG(dur)": "382865"
+  },
+  {
+    "name": "postAndWait",
+    "COUNT": "3",
+    "SUM(dur)": "372031",
+    "SUM(self_dur)": "372031",
+    "AVG(dur)": "124010.33333333333"
+  },
+  {
+    "name": "activityPause",
+    "COUNT": "1",
+    "SUM(dur)": "370782",
+    "SUM(self_dur)": "46381",
+    "AVG(dur)": "370782"
+  },
+  {
+    "name": "JIT compiling android.content.pm.ActivityInfo android.content.pm.IPackageManager$Stub$Proxy.getActivityInfo(android.content.ComponentName, long, int) (kind=Baseline) from /system/framework/framework.jar",
+    "COUNT": "1",
+    "SUM(dur)": "370052",
+    "SUM(self_dur)": "12760",
+    "AVG(dur)": "370052"
+  },
+  {
+    "name": "VerifyClass androidx.compose.foundation.lazy.LazyListState",
+    "COUNT": "1",
+    "SUM(dur)": "367240",
+    "SUM(self_dur)": "211044",
+    "AVG(dur)": "367240"
+  },
+  {
+    "name": "auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const",
+    "COUNT": "3",
+    "SUM(dur)": "360808",
+    "SUM(self_dur)": "17657",
+    "AVG(dur)": "120269.33333333333"
+  },
+  {
+    "name": "VerifyClass androidx.compose.foundation.lazy.layout.LazyLayoutItemAnimator",
+    "COUNT": "1",
+    "SUM(dur)": "353906",
+    "SUM(self_dur)": "292293",
+    "AVG(dur)": "353906"
+  }
+]
