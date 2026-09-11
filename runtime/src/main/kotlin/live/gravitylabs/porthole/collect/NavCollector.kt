@@ -52,10 +52,11 @@ internal class NavCollector(
             }
             captureDeepLink(arguments, t)
 
-            // The marker that answers "what was I doing here" in a system
-            // trace. A navigation is the coarsest thing a person remembers
-            // doing, so it is the one worth finding first.
-            Atrace.event("nav → " + route)
+            // The screen, as a span covering the time spent on it, which is the
+            // thing that answers "what was I doing here" when scrubbing a system
+            // trace. A navigation as an instant would be invisible: a slice with
+            // no duration is drawn as nothing.
+            openScreen(route)
             // A NavBackStackEntry owns the view models scoped to its screen,
             // which is where viewModel() inside a NavHost puts them. Naming
             // them here means an app does not register each one by hand.
@@ -76,12 +77,31 @@ internal class NavCollector(
         controller.addOnDestinationChangedListener(l)
     }
 
+    /** Close the screen we were on, open the one we arrived at. */
+    private var screenSlice: String? = null
+    private var screenCookie = 0
+
+    private fun openScreen(route: String) {
+        screenSlice?.let { Atrace.end(it, screenCookie) }
+        val name = "screen $route"
+        screenCookie = Atrace.nextCookie()
+        screenSlice = name
+        Atrace.begin(name, screenCookie)
+    }
+
+    /** An unclosed slice runs to the end of the capture, which is worse than none. */
+    private fun closeScreen() {
+        screenSlice?.let { Atrace.end(it, screenCookie) }
+        screenSlice = null
+    }
+
     fun unregister() {
         val controller = controllerRef?.get()
         val l = listener
         if (controller != null && l != null) controller.removeOnDestinationChangedListener(l)
         controllerRef = null
         listener = null
+        closeScreen()
     }
 
     fun isRegistered(): Boolean = controllerRef?.get() != null

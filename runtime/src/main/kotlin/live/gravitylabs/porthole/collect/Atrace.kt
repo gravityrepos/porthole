@@ -64,20 +64,14 @@ internal object Atrace {
         runCatching { Trace.endAsyncSection(label(name), cookie) }
     }
 
-    /**
-     * A moment rather than a span: a navigation, a trim, a dropped frame.
-     *
-     * Implemented as a section opened and closed immediately, which is the only
-     * instantaneous marker the public API offers. Same thread by construction,
-     * so it nests correctly wherever it is called.
-     */
-    fun event(name: String) {
-        if (!tracing) return
-        runCatching {
-            Trace.beginSection(label(name))
-            Trace.endSection()
-        }
-    }
+    // There was an `event` here, opening and closing a section immediately to
+    // mark a moment. It worked, in that the label really was in the trace — and
+    // it was useless, because a zero-duration slice has no width and a trace
+    // viewer draws nothing. The navigation and stall markers were both invisible
+    // while appearing, by every check this code could make, to have been written.
+    //
+    // Anything worth marking is worth giving a real duration, so both callers
+    // became spans and this went away rather than staying as a trap.
 
     /**
      * Prefixed so these are findable among the platform's own slices, and

@@ -56,6 +56,9 @@ internal class MainThreadWatchdog(
         worker = null
     }
 
+    /** Identity of the open stall slice, matched at both ends. */
+    private var stallCookie = 0
+
     private fun loop() {
         while (running) {
             val postedAt = nowMs()
@@ -75,10 +78,22 @@ internal class MainThreadWatchdog(
                 // Sampled once, at the moment it becomes a stall. Sampling
                 // repeatedly would mostly re-capture the same frames, and
                 // Thread.getStackTrace on a running thread is not free.
-                if (waited >= STALL_MS && stack == null) stack = captureMainStack()
+                if (waited >= STALL_MS && stack == null) {
+                    stack = captureMainStack()
+                    // Opened at detection rather than at the start of the stall,
+                    // which has already passed and cannot be drawn. The slice
+                    // therefore covers detection to recovery — a true subset of
+                    // the stall, and visible, which an instant at the end would
+                    // not have been.
+                    stallCookie = Atrace.nextCookie()
+                    Atrace.begin(STALL_SLICE, stallCookie)
+                }
             }
 
-            if (stack != null) record(postedAt, waited, stack)
+            if (stack != null) {
+                Atrace.end(STALL_SLICE, stallCookie)
+                record(postedAt, waited, stack)
+            }
 
             val remaining = INTERVAL_MS - (nowMs() - postedAt)
             if (remaining > 0) {
@@ -109,11 +124,6 @@ internal class MainThreadWatchdog(
             at = startedAt,
         )
 
-        // A marker rather than a span: the stall is detected after the fact, so
-        // there is no moment to have opened a slice at. It lands where the
-        // watchdog noticed, which is the end of the stall, and carries the
-        // duration so the start can be read off it.
-        Atrace.event("stalled ${durationMs}ms — " + stack.lineSequence().firstOrNull().orEmpty())
     }
 
     /**
@@ -154,5 +164,8 @@ internal class MainThreadWatchdog(
         const val STALL_MS = 100L
 
         const val CAPACITY = 120
+
+        /** One name for every stall slice; its width carries the duration. */
+        const val STALL_SLICE = "main thread stalled"
     }
 }
