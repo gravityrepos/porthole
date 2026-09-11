@@ -123,7 +123,9 @@ internal class InflightCollector(private val ring: EventRing) {
 
         // Also into the system trace, so this call is visible in a Perfetto
         // capture rather than only in Porthole's own timeline.
-        call.traceName = method + " " + call.url
+        // Endpoint, not request: a query string is per-call and would put every
+        // call on a track of its own.
+        call.traceName = TraceLabels.http(method, call.url)
         call.traceCookie = Atrace.nextCookie()
         Atrace.begin(call.traceName, call.traceCookie)
     }
@@ -227,10 +229,10 @@ internal class InflightCollector(private val ring: EventRing) {
         )
         queries[id] = open
 
-        // The SQL, not the id: a slice in a Perfetto capture has to say what it
-        // is without anything else to look it up in. Marked when it ran on the
-        // main thread, since that is the reason anyone would be looking.
-        open.traceName = (if (onMain) "db(main) " else "db ") + sql.collapse()
+        // Verb and table rather than the statement. The name of an async
+        // section is its track, so naming it after the SQL gave one screen load
+        // ten tracks — seven of them Room's own invalidation triggers.
+        open.traceName = TraceLabels.db(sql, onMain)
         open.traceCookie = Atrace.nextCookie()
         Atrace.begin(open.traceName, open.traceCookie)
 
