@@ -19,7 +19,7 @@ version = libs.versions.porthole.get()
  */
 val generateVersion = tasks.register("generatePortholeVersion") {
     val version = project.version.toString()
-    val uiPackage = "@gravitylabs/porthole"
+    val uiPackage = "@gravitylabsllc/porthole"
     val outputDir = layout.buildDirectory.dir("generated/version")
 
     inputs.property("version", version)

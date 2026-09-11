@@ -135,7 +135,7 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
               "mcpServers": {
                 "porthole": {
                   "command": "npx",
-                  "args": ["-y", "@gravitylabs/porthole"],
+                  "args": ["-y", "$PORTHOLE_UI_PACKAGE"],
                   "env": {
                     "PORTHOLE_PORT": "${port.get()}"
                   }
@@ -183,7 +183,7 @@ abstract class PortholeUiTask : DefaultTask() {
                 if (isWindows()) "npx.cmd" else "npx",
                 "-y",
                 "--package",
-                "@gravitylabs/porthole@" + packageVersion.get(),
+                "$PORTHOLE_UI_PACKAGE@" + packageVersion.get(),
                 "porthole",
                 "ui",
             )

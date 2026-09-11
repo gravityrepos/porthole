@@ -68,10 +68,28 @@ class VersionConsistencyTest {
 
         assertEquals(
             "mcp/package.json is on $npmVersion but the catalog says $catalogVersion. " +
-                "portholeUi runs `npx --package @gravitylabs/porthole@${PortholePlugin.UI_PACKAGE_VERSION}`, " +
+                "portholeUi runs `npx --package @gravitylabsllc/porthole@${PortholePlugin.UI_PACKAGE_VERSION}`, " +
                 "so a mismatch here means the task fetches a version that was never published.",
             catalogVersion,
             npmVersion,
+        )
+    }
+
+    @Test
+    fun `the npm package the ui task launches is the one that gets published`() {
+        // The name went wrong once already: @gravitylabs turned out to belong to
+        // someone else, and the plugin would have shipped pointing at a package
+        // that could never exist under that scope.
+        val packageJson = read("mcp/package.json")
+        val match = Regex("""^ {2}"name":\s*"([^"]+)"""", RegexOption.MULTILINE).find(packageJson)
+        val npmName = requireNotNull(match) { "no top-level name in mcp/package.json" }
+            .groupValues[1]
+
+        assertEquals(
+            "mcp/package.json publishes $npmName, but portholeUi and portholeMcpConfig " +
+                "both reach for $PORTHOLE_UI_PACKAGE.",
+            npmName,
+            PORTHOLE_UI_PACKAGE,
         )
     }
 

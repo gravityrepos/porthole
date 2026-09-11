@@ -37,7 +37,7 @@ abstract class PortholeExtension {
     /** Used when developing porthole itself: depend on `:runtime` instead of Maven. */
     abstract val useProjectDependencies: Property<Boolean>
 
-    /** npm version of @gravitylabs/porthole that `portholeUi` runs. */
+    /** npm version of @gravitylabsllc/porthole that `portholeUi` runs. */
     abstract val uiPackageVersion: Property<String>
 
     /**

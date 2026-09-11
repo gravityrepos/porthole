@@ -36,7 +36,7 @@ porthole — a window into a running Android app
 
 porthole ui — open the live timeline for a running debug build
 
-  npx @gravitylabs/porthole ui [options]
+  npx @gravitylabsllc/porthole ui [options]
 
   --port <n>       device port the porthole is listening on (default 8677)
   --ui-port <n>    port to serve the timeline on (default 8678)

@@ -300,7 +300,7 @@ If you would rather not go through Gradle, or you do not have the plugin
 applied, the CLI is the same thing:
 
 ```bash
-npx @gravitylabs/porthole ui
+npx @gravitylabsllc/porthole ui
 ```
 
 Both need Node, because the UI is a web app. If you only want the adb bridge —
@@ -314,7 +314,7 @@ and nothing else.
   "mcpServers": {
     "porthole": {
       "command": "npx",
-      "args": ["-y", "@gravitylabs/porthole"],
+      "args": ["-y", "@gravitylabsllc/porthole"],
       "env": { "PORTHOLE_PORT": "8677" }
     }
   }
@@ -774,11 +774,11 @@ registries. Publishing is a deliberate act and needs credentials that are not in
 this repo.
 
 The order is not arbitrary. `portholeUi` launches the timeline with `npx
---package @gravitylabs/porthole@<version>`, and the plugin points at the AAR
+--package @gravitylabsllc/porthole@<version>`, and the plugin points at the AAR
 coordinates, so each step wants the one before it to already exist:
 
 ```bash
-cd mcp && npm publish                              # @gravitylabs/porthole
+cd mcp && npm publish                              # @gravitylabsllc/porthole
 ./gradlew publishToMavenCentral                    # the two AARs, staged
 ./gradlew -p gradle-plugin publishPlugins          # the Gradle Plugin Portal
 ```
