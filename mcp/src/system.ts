@@ -77,7 +77,13 @@ export function parseThermal(output: string): Thermal {
   const readings: Array<{ name: string; celsius: number }> = [];
 
   // Temperature{mValue=41.2, mType=3, mName=CPU, mStatus=0}
-  for (const match of output.matchAll(/mValue=([-\d.]+),\s*mType=\d+,\s*mName=([^,}]+)/g)) {
+  //
+  // Anchored on the type. The dump also lists CoolingDevice entries with the
+  // identical inner shape, and an unanchored match read one of those as a
+  // sensor: "hottest sensor tpu at 7964000°C", which is a throttling level.
+  for (const match of output.matchAll(
+    /Temperature\{mValue=([-\d.]+),\s*mType=\d+,\s*mName=([^,}]+)/g,
+  )) {
     const celsius = num(match[1]);
     if (Number.isFinite(celsius)) readings.push({ name: match[2].trim(), celsius });
   }

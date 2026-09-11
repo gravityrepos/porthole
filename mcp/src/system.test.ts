@@ -176,6 +176,20 @@ describe("what a real device actually returns", () => {
     expect(out.readings).toHaveLength(2);
   });
 
+  it("does not read a cooling device as a temperature sensor", () => {
+    // A Pixel's dump lists CoolingDevice entries with the same inner shape as
+    // Temperature ones, and an unanchored match reported "hottest sensor tpu
+    // at 7964000°C" — which is a throttling level, not a temperature.
+    const out = parseThermal(`
+      Current temperatures from HAL:
+        Temperature{mValue=38.0, mType=0, mName=LITTLE, mStatus=0}
+      Current cooling devices from HAL:
+        CoolingDevice{mValue=7964000, mType=5, mName=tpu}
+    `);
+    expect(out.readings.map((r) => r.name)).toEqual(["LITTLE"]);
+    expect(out.hottest).toEqual({ name: "LITTLE", celsius: 38 });
+  });
+
   it("says nothing about the CPU when it could not read it", () => {
     // The summary has to omit the claim entirely, not soften it.
     const line = describeSystem({
