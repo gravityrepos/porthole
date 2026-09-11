@@ -23,6 +23,7 @@ import android.view.Surface
 import android.view.WindowManager
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import live.gravitylabs.porthole.clockOffsets
 import live.gravitylabs.porthole.store.EventRing
 
 /**
@@ -93,6 +94,30 @@ internal class DeviceCollector(private val ring: EventRing) {
                 put("darkMode", isDark(app.resources.configuration).toString())
                 put("rotation", rotationName(rotationOf(app)))
             },
+        )
+        emitClocks()
+    }
+
+    /**
+     * What Porthole's clock reads against the system's, so a timestamp taken
+     * from somewhere else can be found in a capture.
+     *
+     * Perfetto stamps its events with CLOCK_BOOTTIME and Porthole uses
+     * CLOCK_MONOTONIC, which differ by however long the device has been in
+     * deep sleep. Emitted as an event rather than a field on the profile
+     * because the gap grows every time the device sleeps: one reading at
+     * startup is only true until the first doze.
+     */
+    fun emitClocks() {
+        val clocks = clockOffsets()
+        emit(
+            "clocks",
+            mapOf(
+                "uptimeMs" to clocks.uptimeMs.toString(),
+                "bootMs" to clocks.bootMs.toString(),
+                "wallMs" to clocks.wallMs.toString(),
+                "sleepMs" to clocks.sleepMs.toString(),
+            ),
         )
     }
 
@@ -215,6 +240,9 @@ internal class DeviceCollector(private val ring: EventRing) {
                         }
                     },
                 )
+                // A power change is the one moment the device plausibly slept,
+                // which is the only thing that moves the two clocks apart.
+                emitClocks()
             }
         }
 

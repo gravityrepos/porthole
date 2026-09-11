@@ -51,6 +51,11 @@ internal class NavCollector(
                 enteredAt.remove(enteredAt.keys.first())
             }
             captureDeepLink(arguments, t)
+
+            // The marker that answers "what was I doing here" in a system
+            // trace. A navigation is the coarsest thing a person remembers
+            // doing, so it is the one worth finding first.
+            Atrace.event("nav → " + route)
             // A NavBackStackEntry owns the view models scoped to its screen,
             // which is where viewModel() inside a NavHost puts them. Naming
             // them here means an app does not register each one by hand.

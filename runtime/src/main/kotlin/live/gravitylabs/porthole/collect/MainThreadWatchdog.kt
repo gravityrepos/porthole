@@ -108,6 +108,12 @@ internal class MainThreadWatchdog(
             ),
             at = startedAt,
         )
+
+        // A marker rather than a span: the stall is detected after the fact, so
+        // there is no moment to have opened a slice at. It lands where the
+        // watchdog noticed, which is the end of the stall, and carries the
+        // duration so the start can be read off it.
+        Atrace.event("stalled ${durationMs}ms — " + stack.lineSequence().firstOrNull().orEmpty())
     }
 
     /**

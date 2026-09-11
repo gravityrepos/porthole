@@ -39,6 +39,10 @@ internal class InflightCollector(private val ring: EventRing) {
         @Volatile var requestBody: BodyPreview? = null
         @Volatile var responseBody: BodyPreview? = null
 
+        /** Identity of the system-trace slice. Matched on both at end. */
+        @Volatile var traceName: String = ""
+        @Volatile var traceCookie: Int = 0
+
         /**
          * A request body is observed as it is written to the socket, so its
          * preview is not final until the upload is. This resolves the current
@@ -77,7 +81,11 @@ internal class InflightCollector(private val ring: EventRing) {
         val thread: String,
         val kind: String,
         val onMainThread: Boolean,
-    )
+    ) {
+        /** Identity of the system-trace slice. Matched on both at end. */
+        @Volatile var traceName: String = ""
+        @Volatile var traceCookie: Int = 0
+    }
 
     private val http = ConcurrentHashMap<Any, OpenHttp>()
     private val queries = ConcurrentHashMap<String, OpenQuery>()
@@ -112,6 +120,12 @@ internal class InflightCollector(private val ring: EventRing) {
         val call = OpenHttp(nextId("http"), method, redact(url), nowMs(), "queued")
         http[token] = call
         emit("http_start", call.id, mapOf("method" to method, "url" to call.url))
+
+        // Also into the system trace, so this call is visible in a Perfetto
+        // capture rather than only in Porthole's own timeline.
+        call.traceName = method + " " + call.url
+        call.traceCookie = Atrace.nextCookie()
+        Atrace.begin(call.traceName, call.traceCookie)
     }
 
     fun httpPhase(token: Any, phase: String) {
@@ -168,6 +182,7 @@ internal class InflightCollector(private val ring: EventRing) {
 
     fun httpEnd(token: Any, phase: String, detail: String? = null) {
         val call = http.remove(token) ?: return
+        Atrace.end(call.traceName, call.traceCookie)
         val now = nowMs()
         val dto = call.toDto(now, phase)
 
@@ -211,6 +226,14 @@ internal class InflightCollector(private val ring: EventRing) {
             onMainThread = onMain,
         )
         queries[id] = open
+
+        // The SQL, not the id: a slice in a Perfetto capture has to say what it
+        // is without anything else to look it up in. Marked when it ran on the
+        // main thread, since that is the reason anyone would be looking.
+        open.traceName = (if (onMain) "db(main) " else "db ") + sql.collapse()
+        open.traceCookie = Atrace.nextCookie()
+        Atrace.begin(open.traceName, open.traceCookie)
+
         emit(
             "db_start",
             id,
@@ -226,6 +249,7 @@ internal class InflightCollector(private val ring: EventRing) {
 
     fun queryEnd(id: String, result: Long? = null, error: String? = null) {
         val q = queries.remove(id) ?: return
+        Atrace.end(q.traceName, q.traceCookie)
         val elapsed = nowMs() - q.startedAt
         if (q.onMainThread) {
             synchronized(mainThreadLock) {
