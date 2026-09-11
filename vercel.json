@@ -4,7 +4,6 @@
   "installCommand": null,
   "buildCommand": null,
   "outputDirectory": "site",
-  "cleanUrls": true,
   "trailingSlash": false,
   "headers": [
     {
@@ -17,7 +16,7 @@
       ]
     },
     {
-      "source": "/api/(.*)",
+      "source": "/api/:path*",
       "headers": [
         {
           "key": "Content-Security-Policy",

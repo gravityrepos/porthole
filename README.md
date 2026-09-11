@@ -894,8 +894,16 @@ leaves the site too.
 They get different content security policies, which is why `vercel.json` scopes
 the strict one to `/` rather than to everything: the landing page runs no script
 and the policy says so, while the reference is a Dokka app that needs its own.
-Both were checked by serving the site with exactly those headers and watching
-for violations; the reference's navigation and search work under its policy.
+The reference's rule is `/api/:path*` rather than `/api/(.*)`, which misses the
+directory itself and left `/api` with no policy at all.
+
+`cleanUrls` is deliberately off. It strips `.html` and redirects, and the
+reference is fifty-eight pages that link to each other by `.html` — every
+navigation was paying for a 308.
+
+Both of those were only visible once deployed. Locally the headers looked
+right, because a local check answers what a rule matches, not what the site
+does with a URL before the rule is reached.
 
 The canonical host is `https://porthole.gravitylabs.live`, which `og:url`,
 `og:image` and the canonical link all name absolutely — most card scrapers
