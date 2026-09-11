@@ -159,6 +159,24 @@ describe("what_was_happening", () => {
   });
 });
 
+describe("system_context", () => {
+  it("says its readings are current, not historical", () => {
+    // The other windowed tools answer about a span. This one cannot, and an
+    // agent that assumes it can will attribute today's thermal state to
+    // yesterday's capture.
+    expect(toolSource("system_context")).toMatch(/current, not historical/);
+  });
+
+  it("refuses to draw the conclusion", () => {
+    const tool = toolSource("system_context");
+    expect(tool).toMatch(/draws no conclusions|does not know what your app/);
+  });
+
+  it("lists what it could not read rather than omitting it", () => {
+    expect(toolSource("system_context")).toContain("unavailable");
+  });
+});
+
 describe("the entry point", () => {
   it("is named by the status tool rather than left to be guessed", () => {
     expect(toolSource("porthole_status")).toContain("`findings`");

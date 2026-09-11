@@ -7,7 +7,17 @@ import { z } from "zod";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
+import { runAdb } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf } from "./moment.js";
+import {
+  CPU_PROBE,
+  describeSystem,
+  parseCpu,
+  parseMemory,
+  parseThermal,
+  parseTop,
+  type SystemContext,
+} from "./system.js";
 import { buildTrace, type Finding } from "./trace.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
@@ -235,6 +245,61 @@ server.registerTool(
         `Worst: ${worst.title} [${worst.confidence}].`,
       payload,
     );
+  },
+);
+
+server.registerTool(
+  "system_context",
+  {
+    title: "What the rest of the device was doing",
+    description:
+      "Thermal state, CPU governor and clock, the busiest processes, and system memory pressure. "
+      + "Read straight off the device over adb.\n\n"
+      + "This is the half Porthole cannot see. It watches one process, so when `blocking` reports a "
+      + "stall whose stack bottoms out in a native read, or `frames` blames swapBuffers, the reason "
+      + "is usually below the app and none of the other tools can reach it. A throttled device, a "
+      + "governor holding the cores down, or another process eating the CPU explains a regression "
+      + "that no code change accounts for.\n\n"
+      + "Reports only what it read. Values are current, not historical — this says what is true now, "
+      + "not what was true during a window you are investigating, so take it while the problem is "
+      + "happening. Sources it could not parse are listed in `unavailable` rather than omitted, "
+      + "because a missing thermal reading and a cool device are not the same thing.\n\n"
+      + "It draws no conclusions. Two cores below maximum is a fact; that it is why your app is "
+      + "slow is a guess, and this tool does not know what your app was doing.",
+    inputSchema: {
+      serial: z
+        .string()
+        .optional()
+        .describe("Device serial, when more than one is attached. `adb devices` lists them."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ serial }): Promise<ToolResult> => {
+    const unavailable: SystemContext["unavailable"] = [];
+
+    const read = (source: string, args: string[]): string | null => {
+      const result = runAdb(args, serial);
+      if (!result.ok) {
+        unavailable.push({ source, reason: result.output.split("\n")[0].slice(0, 160) });
+        return null;
+      }
+      return result.output;
+    };
+
+    const thermalOut = read("thermalservice", ["shell", "dumpsys", "thermalservice"]);
+    const cpuOut = read("cpufreq", ["shell", CPU_PROBE]);
+    const topOut = read("cpuinfo", ["shell", "dumpsys", "cpuinfo"]);
+    const memOut = read("meminfo", ["shell", "dumpsys", "meminfo"]);
+
+    const context: SystemContext = {
+      thermal: thermalOut === null ? null : parseThermal(thermalOut),
+      cpu: cpuOut === null ? null : parseCpu(cpuOut),
+      top: topOut === null ? [] : parseTop(topOut),
+      memory: memOut === null ? null : parseMemory(memOut),
+      unavailable,
+    };
+
+    return ok(describeSystem(context), context);
   },
 );
 
