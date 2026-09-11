@@ -140,6 +140,25 @@ describe("saying what is not known", () => {
   });
 });
 
+describe("what_was_happening", () => {
+  it("distinguishes 'outside the buffer' from 'nothing was happening'", () => {
+    // Conflating the two is how an agent concludes an app was idle when the
+    // truth is the moment simply aged out of the ring.
+    const tool = toolSource("what_was_happening");
+    expect(tool).toMatch(/no longer held|outside what is buffered/);
+  });
+
+  it("says durations are as they were then, not as they turned out", () => {
+    expect(toolSource("what_was_happening")).toMatch(/what was true then/);
+  });
+
+  it("accepts the clock a Perfetto trace actually uses", () => {
+    const tool = toolSource("what_was_happening");
+    expect(tool).toContain("bootMs");
+    expect(tool).toMatch(/CLOCK_BOOTTIME/);
+  });
+});
+
 describe("the entry point", () => {
   it("is named by the status tool rather than left to be guessed", () => {
     expect(toolSource("porthole_status")).toContain("`findings`");

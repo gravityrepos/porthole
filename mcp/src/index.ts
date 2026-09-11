@@ -7,6 +7,7 @@ import { z } from "zod";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
+import { describe as describeMoment, fromBootMs, momentOf } from "./moment.js";
 import { buildTrace, type Finding } from "./trace.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
@@ -234,6 +235,95 @@ server.registerTool(
         `Worst: ${worst.title} [${worst.confidence}].`,
       payload,
     );
+  },
+);
+
+server.registerTool(
+  "what_was_happening",
+  {
+    title: "What was happening at a moment",
+    description:
+      "The narrative for one instant: which screen, with what arguments, what was in flight, what " +
+      "the main thread was doing, and what state had just been written.\n\n" +
+      "Built for the question a system trace cannot answer. Perfetto will tell you which threads " +
+      "ran at 00:42.318 and for how long; it has no idea that you had just opened the cart, that " +
+      "a checkout call had been open for 600ms, or that the query blocking the frame was on the " +
+      "main thread. Paste the timestamp here and get the part Perfetto is missing.\n\n" +
+      "Give it `at` in the device uptime clock every Porthole event carries, or `bootMs` for a " +
+      "CLOCK_BOOTTIME reading taken from a Perfetto trace — the two differ by however long the " +
+      "device has been in deep sleep, and the conversion uses the clock sample in force at that " +
+      "moment rather than the newest one.\n\n" +
+      "Durations are as they were then, not as they turned out. A call open for 600ms at the " +
+      "moment asked about reports 600ms even if it ran for four seconds, because the question is " +
+      "what was true then. A span that never finished says so.\n\n" +
+      "Bounded by what the timeline server still holds. A moment older than the buffer cannot be " +
+      "answered and will say so rather than return an empty one, which would read as 'nothing " +
+      "was happening'.",
+    inputSchema: {
+      at: z
+        .number()
+        .int()
+        .optional()
+        .describe("The moment, in the device uptime clock. Omit if giving `bootMs`."),
+      bootMs: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "The moment as CLOCK_BOOTTIME milliseconds, which is what a Perfetto trace stamps with.",
+        ),
+      spreadMs: z
+        .number()
+        .int()
+        .positive()
+        .max(60_000)
+        .optional()
+        .describe("How far either side to look for context. Default 2000."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ at, bootMs, spreadMs }): Promise<ToolResult> => {
+    const events = timeline.buffer();
+    if (events.length === 0) {
+      return ok(device.notConnectedMessage(), { moment: null, connected: false });
+    }
+
+    let moment_at = at;
+    let clock: { bootMs: number; sleepMs: number; sampledAt: number } | null = null;
+
+    if (moment_at === undefined && bootMs !== undefined) {
+      const converted = fromBootMs(events, bootMs);
+      if (!converted) {
+        return ok(
+          "No clock sample in the buffer, so a boot-clock timestamp cannot be placed. " +
+            "The app must have been running with Porthole attached for that to exist.",
+          { moment: null, bootMs },
+        );
+      }
+      moment_at = converted.at;
+      // Keep the boot reading that was asked about, so the answer shows both
+      // ends of the conversion rather than only the result.
+      clock = { bootMs, sleepMs: converted.sleepMs, sampledAt: converted.sampledAt };
+    }
+
+    if (moment_at === undefined) {
+      return ok("Give either `at` or `bootMs`.", { moment: null });
+    }
+
+    // Outside the buffer is a different answer from "nothing happened", and
+    // conflating them is how an agent concludes the app was idle.
+    const oldest = events[0].t;
+    const newest = events[events.length - 1].t;
+    if (moment_at < oldest || moment_at > newest) {
+      return ok(
+        `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +
+          "Not that nothing was happening — it is no longer held.",
+        { moment: null, asked: moment_at, buffered: { from: oldest, to: newest }, clock },
+      );
+    }
+
+    const moment = { ...momentOf(events, moment_at, spreadMs ?? 2_000), clock };
+    return ok(describeMoment(moment), moment);
   },
 );
 

@@ -1,0 +1,238 @@
+// Copyright 2026 Gravity Labs
+// SPDX-License-Identifier: Apache-2.0
+import type { DeviceEvent } from "./device.js";
+
+/**
+ * What the app was doing at one moment.
+ *
+ * This exists for a specific experience: staring at a slice in a Perfetto
+ * capture and trying to remember what you did at that exact time. Perfetto can
+ * say which threads ran and for how long. It cannot say that you had just
+ * navigated to the cart, that a checkout call was open, or that the query on
+ * the main thread was the one behind the stall — and those are the things a
+ * person actually needs in order to recognise the moment.
+ *
+ * Deliberately a narrative rather than a dump. The tools that return everything
+ * in a window already exist; what was missing was an answer shaped like the
+ * question, which is "where was I and what was happening".
+ */
+
+const str = (value: unknown, fallback = ""): string =>
+  typeof value === "string" ? value : value == null ? fallback : String(value);
+
+const num = (value: unknown, fallback = 0): number => {
+  if (typeof value === "number") return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+export interface OpenSpan {
+  kind: "http" | "db" | "work";
+  label: string;
+  startedAt: number;
+  /** Elapsed at the moment asked about, not the span's full duration. */
+  openForMs: number;
+  endedAt: number | null;
+  data: Record<string, unknown>;
+}
+
+export interface Moment {
+  at: number;
+  window: { from: number; to: number };
+  /** How `at` was arrived at, when it came from another clock. */
+  clock: { bootMs: number; sleepMs: number; sampledAt: number } | null;
+  screen: { route: string; args: string; enteredAt: number; agoMs: number } | null;
+  inFlight: OpenSpan[];
+  stateWrites: Array<{ key: string; at: number }>;
+  recompositions: number;
+  stalls: Array<{ durationMs: number; top: string; at: number }>;
+  frames: { missed: number; worstMs: number };
+  logs: Array<{ level: string; tag: string; message: string; at: number }>;
+}
+
+/**
+ * A CLOCK_BOOTTIME reading — what a Perfetto trace stamps with — in the clock
+ * every Porthole event carries.
+ *
+ * Uses the most recent `clocks` sample at or before the moment asked about,
+ * because the gap between the two clocks is accumulated deep sleep and grows
+ * whenever the device dozes. Taking the newest sample instead would apply a
+ * later device's sleep total to an earlier moment.
+ */
+export function fromBootMs(
+  events: DeviceEvent[],
+  bootMs: number,
+): { at: number; sleepMs: number; sampledAt: number } | null {
+  const samples = events.filter((e) => e.event === "clocks");
+  if (samples.length === 0) return null;
+
+  // Pick by boot time, since that is the axis the caller is speaking in.
+  let chosen = samples[0];
+  for (const sample of samples) {
+    if (num(sample.data.bootMs) <= bootMs) chosen = sample;
+  }
+  const sleepMs = num(chosen.data.sleepMs);
+  return { at: bootMs - sleepMs, sleepMs, sampledAt: chosen.t };
+}
+
+/** Spans open across `at`, plus those that closed inside the window. */
+function spansAcross(
+  events: DeviceEvent[],
+  prefix: "http" | "db" | "work",
+  at: number,
+  from: number,
+  to: number,
+): OpenSpan[] {
+  const open = new Map<string, DeviceEvent>();
+  const out: OpenSpan[] = [];
+
+  for (const event of events) {
+    const id = str(event.data.id);
+    if (event.event === `${prefix}_start`) {
+      open.set(id, event);
+      continue;
+    }
+    if (event.event !== `${prefix}_end`) continue;
+
+    const start = open.get(id);
+    open.delete(id);
+    if (!start) continue;
+
+    // Open across the moment, or finished within the window either side of it.
+    const straddles = start.t <= at && event.t >= at;
+    const nearby = event.t >= from && event.t <= to;
+    if (!straddles && !nearby) continue;
+
+    out.push({
+      kind: prefix,
+      label: labelOf(prefix, start.data, event.data),
+      startedAt: start.t,
+      openForMs: Math.max(0, Math.min(at, event.t) - start.t),
+      endedAt: event.t,
+      data: { ...start.data, ...event.data },
+    });
+  }
+
+  // Anything still open never got an end event, which is itself the finding:
+  // a call that was in flight and stayed that way.
+  for (const start of open.values()) {
+    if (start.t > at) continue;
+    out.push({
+      kind: prefix,
+      label: labelOf(prefix, start.data, {}),
+      startedAt: start.t,
+      openForMs: at - start.t,
+      endedAt: null,
+      data: start.data,
+    });
+  }
+
+  return out.sort((a, b) => b.openForMs - a.openForMs);
+}
+
+function labelOf(
+  prefix: string,
+  start: Record<string, unknown>,
+  end: Record<string, unknown>,
+): string {
+  if (prefix === "http") {
+    const status = end.status !== undefined ? ` → ${str(end.status)}` : "";
+    return `${str(start.method)} ${str(start.url)}${status}`.trim();
+  }
+  if (prefix === "db") {
+    const main = start.onMainThread === "true" || start.onMainThread === true ? " (main thread)" : "";
+    return `${str(start.sql)}${main}`;
+  }
+  return str(start.name) || str(start.id);
+}
+
+/**
+ * @param at the moment, in Porthole's clock
+ * @param spreadMs how far either side to look for context. Small on purpose:
+ *   the question is "what was happening here", and widening it turns the answer
+ *   back into the dump the other tools already provide.
+ */
+export function momentOf(events: DeviceEvent[], at: number, spreadMs = 2_000): Moment {
+  const from = at - spreadMs;
+  const to = at + spreadMs;
+  const within = (e: DeviceEvent) => e.t >= from && e.t <= to;
+
+  // The screen is the last navigation at or before the moment — not one within
+  // the window, since you can sit on a screen far longer than the spread.
+  const navs = events.filter((e) => e.event === "nav" && e.t <= at);
+  const lastNav = navs.length ? navs[navs.length - 1] : null;
+
+  const frames = events.filter((e) => e.event === "frame" && within(e));
+
+  return {
+    at,
+    window: { from, to },
+    clock: null,
+    screen: lastNav
+      ? {
+          route: str(lastNav.data.route),
+          args: str(lastNav.data.args),
+          enteredAt: lastNav.t,
+          agoMs: at - lastNav.t,
+        }
+      : null,
+    inFlight: [
+      ...spansAcross(events, "http", at, from, to),
+      ...spansAcross(events, "db", at, from, to),
+      ...spansAcross(events, "work", at, from, to),
+    ],
+    stateWrites: events
+      .filter((e) => e.event === "state_write" && e.t <= at && e.t >= at - spreadMs)
+      .map((e) => ({ key: str(e.data.key), at: e.t })),
+    recompositions: events.filter((e) => e.event === "recompose" && within(e)).length,
+    stalls: events
+      .filter((e) => e.event === "blocked" && within(e))
+      .map((e) => ({ durationMs: num(e.data.durationMs), top: str(e.data.top), at: e.t })),
+    frames: {
+      missed: frames.reduce((sum, e) => sum + num(e.data.missedFrames), 0),
+      worstMs: frames.reduce((worst, e) => Math.max(worst, num(e.data.totalMs)), 0),
+    },
+    logs: events
+      .filter((e) => e.event === "log" && within(e))
+      .map((e) => ({
+        level: str(e.data.level),
+        tag: str(e.data.tag),
+        message: str(e.data.message).slice(0, 300),
+        at: e.t,
+      })),
+  };
+}
+
+/** One sentence, because the summary is usually the whole answer. */
+export function describe(moment: Moment): string {
+  const parts: string[] = [];
+
+  parts.push(
+    moment.screen
+      ? `On ${moment.screen.route}${moment.screen.args ? ` ${moment.screen.args}` : ""}` +
+          ` (entered ${Math.round(moment.screen.agoMs / 100) / 10}s earlier).`
+      : "No navigation recorded before this moment.",
+  );
+
+  if (moment.inFlight.length) {
+    const worst = moment.inFlight[0];
+    parts.push(
+      `${moment.inFlight.length} in flight, longest ${worst.label} ` +
+        `open ${worst.openForMs}ms${worst.endedAt === null ? " and never finished" : ""}.`,
+    );
+  }
+  if (moment.stalls.length) {
+    const worst = moment.stalls.reduce((a, b) => (b.durationMs > a.durationMs ? b : a));
+    parts.push(`Main thread blocked ${worst.durationMs}ms in ${worst.top}.`);
+  }
+  if (moment.frames.missed) {
+    parts.push(`${moment.frames.missed} refreshes missed, worst frame ${moment.frames.worstMs}ms.`);
+  }
+  if (moment.recompositions) parts.push(`${moment.recompositions} recompositions.`);
+  if (moment.stateWrites.length) {
+    const keys = [...new Set(moment.stateWrites.map((w) => w.key))].slice(0, 3);
+    parts.push(`State written just before: ${keys.join(", ")}.`);
+  }
+
+  return parts.join(" ");
+}
