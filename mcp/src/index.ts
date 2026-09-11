@@ -18,6 +18,14 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
+import {
+  captureArgs,
+  countPortholeLabels,
+  describeCapture,
+  planCapture,
+} from "./systrace.js";
+import { mkdirSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { buildTrace, type Finding } from "./trace.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
@@ -300,6 +308,93 @@ server.registerTool(
     };
 
     return ok(describeSystem(context), context);
+  },
+);
+
+server.registerTool(
+  "capture_system_trace",
+  {
+    title: "Record a Perfetto trace",
+    description:
+      "Records a system trace on the device, pulls it to disk, and returns the path. Does not "
+      + "return the trace itself: a ten-second capture is tens of megabytes of protobuf, and it is "
+      + "not something to read — it is something to open.\n\n"
+      + "The reason to take one here rather than by hand is that the app's own spans are already "
+      + "inside it. The runtime writes navigations, HTTP calls, queries and main-thread stalls as "
+      + "atrace sections, so the capture arrives annotated with what the app was doing and not only "
+      + "what the kernel was doing. The result says how many Porthole labels it found, which is how "
+      + "you know the annotation actually happened.\n\n"
+      + "Use it when Porthole has found something it cannot explain — a stall whose stack bottoms "
+      + "out below the app, or jank blamed on swapBuffers — and you need to see what the rest of "
+      + "the system was doing at that moment. `findings` gives you the window worth looking at; "
+      + "this gives you the depth at it.\n\n"
+      + "Blocks for the requested duration. Reproduce the problem while it runs.",
+    inputSchema: {
+      seconds: z
+        .number()
+        .int()
+        .positive()
+        .max(120)
+        .optional()
+        .describe("How long to record. Default 10."),
+      categories: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "atrace categories. Defaults to a set aimed at jank. `app` is always included, "
+            + "since without it none of Porthole's own sections are recorded.",
+        ),
+      outputDir: z
+        .string()
+        .optional()
+        .describe("Where to write it. Defaults to .porthole/traces under the working directory."),
+      packages: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Packages whose app-tag sections to record. Defaults to the app the porthole is "
+            + "attached to. Without one, the trace has no Porthole slices in it.",
+        ),
+      serial: z.string().optional().describe("Device serial, when more than one is attached."),
+    },
+    annotations: { readOnlyHint: false },
+  },
+  async ({ seconds, categories, outputDir, packages, serial }): Promise<ToolResult> => {
+    // Default to whatever app the porthole is attached to: that is the one
+    // whose sections are worth recording, and asking for it again is friction.
+    const apps = packages?.length ? packages : device.hello ? [device.hello.packageName] : [];
+    const plan = planCapture({ seconds, categories, apps });
+
+    const recorded = runAdb(captureArgs(plan), serial);
+    if (!recorded.ok) {
+      return fail(
+        `Could not record: ${recorded.output}\n` +
+          "On-device Perfetto needs Android 9 or newer, and the traced service must be running.",
+      );
+    }
+
+    // Default under .porthole/, which the project's gitignore already covers —
+    // a multi-megabyte trace should not be a candidate for committing.
+    const dir = resolve(outputDir ?? join(process.cwd(), ".porthole", "traces"));
+    mkdirSync(dir, { recursive: true });
+    const local = join(dir, plan.devicePath.split("/").pop() as string);
+
+    const pulled = runAdb(["pull", plan.devicePath, local], serial);
+    // Tidy up regardless: the device's trace directory is not ours to fill.
+    runAdb(["shell", "rm", "-f", plan.devicePath], serial);
+
+    if (!pulled.ok) return fail(`Recorded, but could not pull it: ${pulled.output}`);
+
+    const bytes = statSync(local).size;
+    const result = {
+      path: local,
+      bytes,
+      seconds: plan.seconds,
+      categories: plan.categories,
+      portholeLabels: countPortholeLabels(readFileSync(local)),
+      notes: plan.notes,
+    };
+    return ok(describeCapture(result), result);
   },
 );
 
