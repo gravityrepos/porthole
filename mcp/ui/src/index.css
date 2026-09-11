@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+/*
+ * One palette, two consumers. Tailwind's @theme emits these as real custom
+ * properties on :root, which matters because the lane canvases read them back
+ * with getComputedStyle — the marks and the chrome cannot be allowed to drift.
+ */
+@theme {
+  --color-bg: #10141c;
+  --color-plot: #121722;
+  --color-panel: #141924;
+  --color-bar: #151b26;
+  --color-tile: #181f2b;
+  --color-control: #1b2230;
+
+  --color-line: #232b3a;
+  --color-line-soft: #1b2230;
+  --color-grid: #1c2331;
+  --color-edge: #29313f;
+
+  --color-text: #d7dee9;
+  --color-bright: #f0f4fa;
+  --color-muted: #8b97a9;
+  --color-dim: #96a2b4;
+  --color-faint: #4b566a;
+
+  /* Teal is the product's own colour: status, primary action, affirmations. */
+  --color-accent: #5ec8b0;
+
+  --color-recompose: #f0883e;
+  --color-write: #a371f7;
+  --color-danger: #f85149;
+  --color-nav: #56c88c;
+  --color-http: #539bf5;
+  --color-db: #e3b341;
+  --color-work: #db61a2;
+  --color-memory: #6cb6ff;
+  --color-device: #56d4dd;
+
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* Short aliases, because the canvas asks for these names. */
+:root {
+  --recompose: var(--color-recompose);
+  --write: var(--color-write);
+  --danger: var(--color-danger);
+  --nav: var(--color-nav);
+  --http: var(--color-http);
+  --db: var(--color-db);
+  --work: var(--color-work);
+  --memory: var(--color-memory);
+  --device: var(--color-device);
+  --accent: var(--color-accent);
+  --grid: var(--color-grid);
+  --faint: var(--color-faint);
+
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+@keyframes ph-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ph-pulse {
+  animation: ph-pulse 1.8s ease-in-out infinite;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b3446;
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b475e;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

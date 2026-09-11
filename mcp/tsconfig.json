@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts"],
+  // Tests run from source through vitest, so compiling them only puts
+  // them in dist — and `files` in package.json publishes dist wholesale,
+  // which was shipping report.test.js and trace.test.js to npm.
+  "exclude": ["src/**/*.test.ts"]
+}

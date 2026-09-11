@@ -1,0 +1,60 @@
+# Credentials. Nothing here is currently in the repository and nothing should
+# ever be: publishing reads its keys from ~/.gradle/gradle.properties or the
+# environment, never from the tree. These patterns exist so that a signing key
+# or a registry token exported into the working directory by accident cannot be
+# committed by a hurried `git add -A`.
+.env
+.env.*
+.npmrc
+*.asc
+*.gpg
+secring.*
+*.jks
+*.keystore
+*.p12
+
+# gradle
+.gradle/
+build/
+local.properties
+*.hprof
+
+# node
+node_modules/
+dist/
+coverage/
+*.tgz
+
+# The npm package publishes dist/ and ui/dist/ through its `files` allowlist,
+# which wins over this file — verified with `npm pack --dry-run`. Ignoring them
+# here keeps build output out of git without keeping it out of the tarball.
+
+# ide
+.idea/
+.vscode/
+.fleet/
+*.iml
+
+# android studio
+captures/
+.cxx/
+
+# os
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# porthole runtime output
+.porthole/
+
+# kotlin compiler session files
+.kotlin/
+
+# vite / tsc build info
+*.tsbuildinfo
+
+# vercel cli, which writes the project and org id here on first deploy
+.vercel/
+
+# site/api is deliberately NOT ignored. It is Dokka output, committed on
+# purpose, because the host that serves it cannot build it. See the README.

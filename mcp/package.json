@@ -1,0 +1,62 @@
+{
+  "name": "@gravitylabs/porthole",
+  "version": "0.1.0",
+  "description": "MCP server and live timeline for Porthole: query a running Android app for recomposition counts, frame timing, main-thread stalls, navigation, state, in-flight work and logs.",
+  "type": "module",
+  "bin": {
+    "porthole": "dist/cli.js",
+    "porthole-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "ui/dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm run build --workspace porthole-ui && tsc",
+    "build:server": "tsc",
+    "build:ui": "npm run build --workspace porthole-ui",
+    "dev:ui": "npm run dev --workspace porthole-ui",
+    "dev:server": "tsc --watch",
+    "lint": "npm run lint --workspace porthole-ui",
+    "format": "npm run format --workspace porthole-ui",
+    "start": "node dist/index.js",
+    "ui": "node dist/cli.js ui",
+    "mock": "node tools/mock-device.mjs",
+    "test": "vitest run",
+    "test:ui": "npm run test --workspace porthole-ui"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gravityrepos/porthole.git"
+  },
+  "homepage": "https://github.com/gravityrepos/porthole",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "android",
+    "compose",
+    "mcp",
+    "debugging",
+    "profiling",
+    "jank"
+  ],
+  "workspaces": [
+    "ui"
+  ]
+}

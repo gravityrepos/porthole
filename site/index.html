@@ -1,0 +1,941 @@
+<!doctype html>
+<!-- Copyright 2026 Gravity Labs -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Porthole — a window into your running app</title>
+    <meta
+      name="description"
+      content="A debug-only window into a running Android app — for the developer watching it, and the coding agent fixing it."
+    />
+    <link rel="canonical" href="https://porthole.gravitylabs.live/" />
+    <!-- Absolute, because Facebook's scraper does not resolve relative ones. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://porthole.gravitylabs.live/" />
+    <meta property="og:title" content="Porthole — a window into your running app" />
+    <meta
+      property="og:description"
+      content="A debug-only window into a running Android app — for the developer watching it, and the coding agent fixing it."
+    />
+    <meta property="og:image" content="https://porthole.gravitylabs.live/og.png" />
+    <meta property="og:image:width" content="2400" />
+    <meta property="og:image:height" content="1260" />
+    <meta
+      property="og:image:alt"
+      content="Porthole — a debug-only window into a running Android app"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#0d1117" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13.2' fill='none' stroke='%235ec8b0' stroke-width='3.4'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%235ec8b0'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* No script runs on this page. Everything below is markup, so it renders
+         the same from a file:// path, a sanitising preview, or a strict CSP as
+         it does from a server. */
+      :root {
+        --ground: #0d1117;
+        --ground-2: #0f141d;
+        --panel: #141924;
+        --line: #232b3a;
+        --line-soft: #1c2331;
+        --rule: #1e2634;
+        --text: #e4eaf2;
+        --bright: #f2f6fb;
+        --muted: #9aa6b8;
+        --dim: #8b97a9;
+        --teal: #5ec8b0;
+        --teal-lit: #7fdcc6;
+        --recompose: #f0883e;
+        --state: #a371f7;
+        --danger: #f85149;
+        --nav: #56c88c;
+        --http: #539bf5;
+        --db: #e3b341;
+        --work: #db61a2;
+        --memory: #6cb6ff;
+        --device: #56d4dd;
+        --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+        --sans: "Space Grotesk", system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--ground);
+      }
+      body {
+        color: var(--text);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--teal);
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--teal-lit);
+      }
+      h1,
+      h2 {
+        margin: 0;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      h2 {
+        font-size: clamp(24px, 3.2vw, 32px);
+      }
+      p {
+        margin: 0;
+      }
+      section {
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .wrap {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 66px 24px;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 34px;
+        align-items: start;
+      }
+      .heading {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 28px;
+      }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        color: var(--teal);
+      }
+      .lede {
+        max-width: 64ch;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #a8b4c4;
+        text-wrap: pretty;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .grid {
+        display: grid;
+        gap: 14px;
+      }
+      .cols-wide {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+      .cols-mid {
+        grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+      }
+      .cols-tight {
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      }
+      pre {
+        margin: 0;
+        padding: 12px;
+        background: var(--ground-2);
+        border: 1px solid #222a38;
+        border-radius: 8px;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        line-height: 1.6;
+        color: #cfd8e5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      /* nav */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 20px;
+        padding: 13px 24px;
+        background: rgba(13, 17, 23, 0.86);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .wordmark {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        color: var(--bright);
+      }
+      .nav-links {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 18px;
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+      .nav-links a {
+        color: var(--muted);
+      }
+      .nav-links a:hover {
+        color: var(--text);
+      }
+
+      /* buttons */
+      .btn {
+        font-family: var(--mono);
+        font-size: 13px;
+        font-weight: 500;
+        border-radius: 8px;
+        padding: 11px 20px;
+        display: inline-block;
+      }
+      .btn-primary,
+      .nav-links a.btn-primary {
+        color: #0f1620;
+        background: var(--teal);
+      }
+      .btn-primary:hover,
+      .nav-links a.btn-primary:hover {
+        background: var(--teal-lit);
+        color: #0f1620;
+      }
+      .btn-ghost {
+        color: #cfd8e5;
+        background: #181f2b;
+        border: 1px solid #2a3342;
+      }
+      .btn-ghost:hover {
+        background: #202836;
+        color: var(--bright);
+      }
+      .btn-small {
+        border-radius: 6px;
+        padding: 5px 11px;
+        font-weight: 500;
+      }
+
+      /* hero */
+      header {
+        position: relative;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line-soft);
+        background: radial-gradient(110% 130% at 15% -10%, #182231 0%, #0f141d 52%, #0d1117 100%);
+      }
+      .rules {
+        position: absolute;
+        inset: 0;
+        opacity: 0.45;
+        background-image: linear-gradient(to right, #1a2130 1px, transparent 1px);
+        background-size: 8.33% 100%;
+      }
+      .hero {
+        position: relative;
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 76px 24px 64px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: 20px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        color: var(--teal);
+        border: 1px solid rgba(94, 200, 176, 0.28);
+        background: rgba(94, 200, 176, 0.07);
+        border-radius: 999px;
+        padding: 5px 12px;
+      }
+      .badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--teal);
+      }
+      h1 {
+        max-width: 20ch;
+        font-size: clamp(34px, 6vw, 60px);
+        line-height: 1.04;
+        letter-spacing: -0.025em;
+        color: #f4f7fb;
+        text-wrap: balance;
+      }
+      .hero p {
+        max-width: 60ch;
+        font-size: clamp(15px, 1.7vw, 18px);
+        line-height: 1.6;
+        color: #a8b4c4;
+        text-wrap: pretty;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 10px;
+      }
+
+      /* quick start */
+      .step {
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .step-head {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .step-num {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--teal);
+        border: 1px solid rgba(94, 200, 176, 0.3);
+        border-radius: 5px;
+        padding: 2px 7px;
+      }
+      .step-name {
+        font-size: 14px;
+        font-weight: 600;
+        color: #eaf0f7;
+      }
+      .step p {
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: var(--muted);
+      }
+
+      /* lanes */
+      .lane {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .lane-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .lane-head::before {
+        content: "";
+        width: 3px;
+        height: 13px;
+        border-radius: 2px;
+        background: var(--lane);
+      }
+      .lane-name {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--text);
+      }
+      .lane-desc {
+        font-size: 12.5px;
+        line-height: 1.5;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+
+      /* the capture */
+      .stat-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+      .stat-label {
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        color: var(--stat);
+      }
+      .stat-sub {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+      }
+      .stat-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin: 0;
+      }
+      .stat-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 9px;
+        border-bottom: 1px solid var(--rule);
+      }
+      .stat-row dt {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .stat-row dd {
+        margin: 0;
+        font-family: var(--mono);
+        font-size: 19px;
+        color: var(--stat);
+      }
+      .note {
+        margin-top: 18px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+      }
+
+      /* agent */
+      .agent-points {
+        margin: 4px 0 0;
+        padding-left: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        font-size: 13px;
+        line-height: 1.55;
+        color: #b6c1d0;
+      }
+      .agent-points strong {
+        color: #dbe3ef;
+      }
+      .chat-head {
+        padding: 9px 13px;
+        border-bottom: 1px solid var(--line);
+        font-family: var(--mono);
+        font-size: 10.5px;
+        letter-spacing: 0.1em;
+        color: var(--dim);
+      }
+      .chat {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .ask {
+        align-self: flex-end;
+        max-width: 88%;
+        background: #1d2532;
+        border: 1px solid #2a3342;
+        border-radius: 10px 10px 2px 10px;
+        padding: 10px 12px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #dbe3ef;
+      }
+      .answer {
+        max-width: 92%;
+        background: rgba(94, 200, 176, 0.06);
+        border: 1px solid rgba(94, 200, 176, 0.22);
+        border-radius: 10px 10px 10px 2px;
+        padding: 12px;
+        font-size: 13px;
+        line-height: 1.55;
+        color: #c6d2e0;
+      }
+      .confidence {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(94, 200, 176, 0.18);
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+      }
+
+      /* faq */
+      .faq-list {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        margin: 0;
+      }
+      .faq-item {
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--rule);
+      }
+      .faq-item dt {
+        font-size: 14px;
+        font-weight: 600;
+        color: #eaf0f7;
+        margin-bottom: 6px;
+      }
+      .faq-item dd {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--muted);
+        text-wrap: pretty;
+      }
+
+      /* roadmap */
+      .roadmap {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .road-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 13px 14px;
+        background: var(--panel);
+        font-size: 13.5px;
+        color: #dbe3ef;
+      }
+      .road-tag {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        white-space: nowrap;
+        border-radius: 999px;
+        padding: 3px 9px;
+      }
+      .road-tag.next {
+        color: var(--recompose);
+        background: rgba(240, 136, 62, 0.12);
+      }
+      .road-tag.exploring {
+        color: var(--state);
+        background: rgba(163, 113, 247, 0.12);
+      }
+      .road-tag.planned {
+        color: #96a2b4;
+        background: rgba(150, 162, 180, 0.12);
+      }
+
+      /* footer */
+      .foot {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 56px 24px 40px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 32px;
+        justify-content: space-between;
+      }
+      .foot-col {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        max-width: 40ch;
+      }
+      .foot-col p {
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+      .foot-meta {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+      }
+      .colophon {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 16px 24px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a class="wordmark" href="#top">
+        <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true">
+          <circle cx="16" cy="16" r="13.2" fill="none" stroke="#5ec8b0" stroke-width="2.6" />
+          <circle cx="16" cy="16" r="3.5" fill="#5ec8b0" />
+        </svg>
+        PORTHOLE
+      </a>
+      <div style="flex: 1 1 20px"></div>
+      <div class="nav-links">
+        <a href="#install">install</a>
+        <a href="#lanes">lanes</a>
+        <a href="#agent">agent</a>
+        <a href="#faq">faq</a>
+        <a href="/api/">api</a>
+        <a class="btn-primary btn-small" href="https://github.com/gravityrepos/porthole">github</a>
+      </div>
+    </nav>
+
+    <header id="top">
+      <div class="rules"></div>
+      <div class="hero">
+        <span class="badge">Apache-2.0 · debug builds only</span>
+        <h1>A window into your running app</h1>
+        <p>
+          Porthole is a debug-only window into a running Android app — for the developer watching
+          it, and the coding agent fixing it.
+        </p>
+        <div class="actions">
+          <a class="btn btn-primary" href="https://github.com/gravityrepos/porthole">get porthole</a>
+          <a class="btn btn-ghost" href="#install">read the quick start</a>
+        </div>
+      </div>
+    </header>
+
+    <section id="install" style="background: var(--ground-2)">
+      <div class="wrap">
+        <div class="heading">
+          <span class="eyebrow">QUICK START</span>
+          <h2>The plugin, and one line per client</h2>
+          <p class="lede" style="margin-top: 4px">
+            The runtime starts with your process and finds the Activity itself, so there is nothing
+            to wrap. What it cannot discover is your HTTP and database clients: instrumenting one
+            means being handed the builder before it is built.
+          </p>
+        </div>
+        <div class="grid cols-mid">
+          <div class="card step">
+            <div class="step-head">
+              <span class="step-num">01</span>
+              <span class="step-name">Apply the plugin</span>
+            </div>
+            <pre>plugins {
+  id("live.gravitylabs.porthole")
+}</pre>
+            <p>
+              It puts the runtime on your debug build types and a no-op with the same API on
+              everything else.
+            </p>
+          </div>
+
+          <div class="card step">
+            <div class="step-head">
+              <span class="step-num">02</span>
+              <span class="step-name">Instrument your clients</span>
+            </div>
+            <pre>import live.gravitylabs.porthole.*
+
+OkHttpClient.Builder().installPorthole()
+Room.databaseBuilder(…).installPorthole()</pre>
+            <p>
+              Ktor and SQLDelight too. Forget one and the lane says so, rather than looking like an
+              app that made no requests.
+            </p>
+          </div>
+
+          <div class="card step">
+            <div class="step-head">
+              <span class="step-num">03</span>
+              <span class="step-name">Open the window</span>
+            </div>
+            <pre>./gradlew portholeUi</pre>
+            <p>
+              Forwards the port, serves the timeline, opens your browser. No restart, no launch
+              flag.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="lanes">
+      <div class="wrap">
+        <div class="heading">
+          <span class="eyebrow">WHAT IT CAPTURES</span>
+          <h2>Eleven lanes on one clock</h2>
+          <p class="lede" style="margin-top: 4px">
+            Every lane shares a single monotonic clock, so a recomposition burst, the state writes
+            that preceded it, and the frames it cost line up in the same column.
+          </p>
+        </div>
+        <div class="grid cols-tight">
+          <div class="lane" style="--lane: var(--recompose)">
+            <div class="lane-head"><span class="lane-name">recompositions</span></div>
+            <span class="lane-desc"
+              >Per-composable counts and peak per frame, down to the call site.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--state)">
+            <div class="lane-head"><span class="lane-name">state writes</span></div>
+            <span class="lane-desc"
+              >Yours separated from framework writes, named from the owner that holds them.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--danger)">
+            <div class="lane-head"><span class="lane-name">dropped frames</span></div>
+            <span class="lane-desc"
+              >Counted in refreshes, so a 400ms freeze is not one missed frame.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--danger)">
+            <div class="lane-head"><span class="lane-name">main thread</span></div>
+            <span class="lane-desc"
+              >Stalls over 100ms with the stack, and queries that ran on the main thread.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--nav)">
+            <div class="lane-head"><span class="lane-name">navigation</span></div>
+            <span class="lane-desc"
+              >Destinations with their arguments and the deep link that got you there.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--http)">
+            <div class="lane-head"><span class="lane-name">http</span></div>
+            <span class="lane-desc"
+              >OkHttp or Ktor, with phases, status and bodies when you ask for them.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--db)">
+            <div class="lane-head"><span class="lane-name">db</span></div>
+            <span class="lane-desc"
+              >Room or SQLDelight: the SQL, the bound values, and the thread it ran on.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--work)">
+            <div class="lane-head"><span class="lane-name">work</span></div>
+            <span class="lane-desc"
+              >One bar per WorkManager attempt, so a retry is visible rather than averaged
+              away.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--memory)">
+            <div class="lane-head"><span class="lane-name">memory</span></div>
+            <span class="lane-desc"
+              >Java heap against total RAM, allocation rate, and collections that paused the
+              app.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--device)">
+            <div class="lane-head"><span class="lane-name">device</span></div>
+            <span class="lane-desc"
+              >Rotation, foreground and background, trim memory, battery, doze, network.</span
+            >
+          </div>
+          <div class="lane" style="--lane: var(--db)">
+            <div class="lane-head"><span class="lane-name">warnings</span></div>
+            <span class="lane-desc">Your own logcat at warning and above, stack traces intact.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="agent" style="background: var(--ground-2)">
+      <div class="wrap split">
+        <div style="display: flex; flex-direction: column; gap: 14px">
+          <span class="eyebrow">FOR THE AGENT</span>
+          <h2>The same session, in a form an agent can read</h2>
+          <p style="max-width: 56ch; font-size: 14px; line-height: 1.65; color: #a8b4c4">
+            A screen recording tells a coding agent nothing. Porthole ships an MCP server that
+            answers against the window you are looking at — recomposition counts, the state keys
+            written just before them, what held the main thread and the stack it was stuck in.
+          </p>
+          <ul class="agent-points">
+            <li>
+              Press <strong>ask agent</strong> and it copies the window as bounds, not prose, so the
+              agent asks about the moment you actually saw.
+            </li>
+            <li>
+              Every finding says how strongly it can be claimed — observed when the device said so,
+              correlated when two things merely happened near each other.
+            </li>
+            <li>Local only. The socket binds to loopback and nothing leaves the machine.</li>
+          </ul>
+        </div>
+        <div class="card" style="overflow: hidden">
+          <div class="chat-head">ASK AGENT</div>
+          <div class="chat">
+            <div class="ask">Why does the cart screen stutter when I add an item?</div>
+            <div class="answer">
+              CartViewModel.tick preceded 445 of 490 recompositions in this window, most often in
+              Cart.ItemRow. The main thread was also blocked for 305ms in
+              CartViewModel.blockTheMainThread.
+              <div class="confidence">observed · ordering, not proof of cause</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="heading">
+          <span class="eyebrow">ONE WINDOW FROM THE SAMPLE</span>
+          <h2>What eight seconds looked like</h2>
+          <p class="lede" style="margin-top: 4px">
+            The sample deliberately misbehaves: a ticking value is read inside every list row, and
+            one button blocks the main thread. This is what the window said about it.
+          </p>
+        </div>
+        <div class="grid cols-wide">
+          <div
+            class="card"
+            style="padding: 18px; border-color: rgba(240, 136, 62, 0.28); --stat: var(--recompose)"
+          >
+            <div class="stat-head">
+              <span class="stat-label">RECOMPOSITION</span>
+              <span class="stat-sub">cart screen</span>
+            </div>
+            <dl class="stat-list">
+              <div class="stat-row"><dt>recompositions</dt><dd>490</dd></div>
+              <div class="stat-row"><dt>preceded by tick</dt><dd>445</dd></div>
+              <div class="stat-row"><dt>hottest node</dt><dd>Cart.ItemRow</dd></div>
+              <div class="stat-row"><dt>state key</dt><dd>CartViewModel.tick</dd></div>
+            </dl>
+          </div>
+          <div
+            class="card"
+            style="padding: 18px; border-color: rgba(248, 81, 73, 0.28); --stat: var(--danger)"
+          >
+            <div class="stat-head">
+              <span class="stat-label">FRAMES AND MAIN THREAD</span>
+              <span class="stat-sub">same window</span>
+            </div>
+            <dl class="stat-list">
+              <div class="stat-row"><dt>frames missed</dt><dd>158</dd></div>
+              <div class="stat-row"><dt>worst frame</dt><dd>276ms</dd></div>
+              <div class="stat-row"><dt>spent in</dt><dd>swapBuffers</dd></div>
+              <div class="stat-row"><dt>main thread blocked</dt><dd>305ms</dd></div>
+            </dl>
+          </div>
+        </div>
+        <p class="note">one capture from the sample app — your own numbers will differ</p>
+      </div>
+    </section>
+
+    <section id="faq">
+      <div class="wrap split">
+        <div>
+          <div class="heading" style="margin-bottom: 20px">
+            <span class="eyebrow">FAQ</span>
+            <h2>The usual objections</h2>
+          </div>
+          <dl class="faq-list">
+            <div class="faq-item">
+              <dt>Does it end up in my release APK?</dt>
+              <dd>
+                No. The plugin puts the runtime on debug build types and a no-op artifact with the
+                same public API on everything else. An API parity test fails the build if an
+                integration ever ships without its no-op.
+              </dd>
+            </div>
+            <div class="faq-item">
+              <dt>What does it cost at runtime?</dt>
+              <dd>
+                Per instrumented recomposition: a timestamp, a short backwards walk over the last
+                ~32ms of state writes, an object into a ring, and a queue offer. Event fan-out
+                happens on a writer thread, never on the thread that emitted.
+              </dd>
+            </div>
+            <div class="faq-item">
+              <dt>Does the device need to be rooted?</dt>
+              <dd>
+                No. Everything goes over a standard adb port forward, and the socket binds to
+                loopback only.
+              </dd>
+            </div>
+            <div class="faq-item">
+              <dt>Views, or only Compose?</dt>
+              <dd>
+                Frames, main thread, navigation, http, db, work, memory, device and logcat work in
+                any app. Recompositions and state writes are Compose-specific.
+              </dd>
+            </div>
+            <div class="faq-item">
+              <dt>Will it leak a token into a trace?</dt>
+              <dd>
+                Query-string values and sensitive headers are replaced before anything leaves the
+                process, and bodies are not captured unless you ask. The sample sends three secrets
+                containing do-not-log so you can grep a capture and check.
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <div>
+          <div class="heading" style="margin-bottom: 20px">
+            <span class="eyebrow">ROADMAP</span>
+            <h2>Next up</h2>
+          </div>
+          <ul class="roadmap">
+            <li class="road-row">
+              Publish to Maven Central and the Plugin Portal <span class="road-tag next">next</span>
+            </li>
+            <li class="road-row">
+              Compose Multiplatform core <span class="road-tag exploring">exploring</span>
+            </li>
+            <li class="road-row">
+              Control surface for out-of-process drivers
+              <span class="road-tag exploring">exploring</span>
+            </li>
+            <li class="road-row">
+              Verified on a physical device <span class="road-tag planned">planned</span>
+            </li>
+            <li class="road-row">
+              Stack symbolication for minified builds <span class="road-tag planned">planned</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="foot">
+        <div class="foot-col">
+          <div class="wordmark" style="font-size: 17px">
+            <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+              <circle cx="16" cy="16" r="13.2" fill="none" stroke="#5ec8b0" stroke-width="2.6" />
+              <circle cx="16" cy="16" r="3.5" fill="#5ec8b0" />
+            </svg>
+            PORTHOLE
+          </div>
+          <p>
+            Open source, Apache-2.0. Debug builds only — release builds link a no-op with the same
+            API, so the calls stay in your code and compile to nothing.
+          </p>
+          <span class="foot-meta">v0.1.0 · Android · Jetpack Compose</span>
+        </div>
+      </div>
+      <div style="border-top: 1px solid var(--line-soft)">
+        <div class="colophon">
+          <a href="https://github.com/gravityrepos/porthole">github.com/gravityrepos/porthole</a>
+          &nbsp;·&nbsp;
+          <a href="/api/">api reference</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,250 @@
+// Copyright 2026 Gravity Labs
+// SPDX-License-Identifier: Apache-2.0
+import { restartApp } from "./adb.js";
+import http from "node:http";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { extname, resolve } from "node:path";
+import { WebSocketServer, WebSocket } from "ws";
+import type { DeviceClient, DeviceEvent } from "./device.js";
+
+const UI_DIR = fileURLToPath(new URL("../ui/dist/", import.meta.url));
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".json": "application/json",
+  ".map": "application/json",
+};
+
+/** Roughly ten minutes of a busy app. The device ring is smaller; this is the wider view. */
+const BUFFER_LIMIT = 20_000;
+
+/**
+ * Serves the timeline UI and streams events to it.
+ *
+ * Kept separate from the MCP transport on purpose: MCP talks stdio to the agent,
+ * this talks HTTP and WebSocket to a browser, and the two never cross. The event
+ * buffer is shared so the UI and the `timeline` tool see the same history.
+ */
+export class TimelineServer {
+  private server: http.Server | null = null;
+  private wss: WebSocketServer | null = null;
+  private events: DeviceEvent[] = [];
+  private started = false;
+
+  constructor(
+    private readonly device: DeviceClient,
+    private readonly port: number,
+    private readonly serial?: string,
+  ) {
+    device.on("event", (event: DeviceEvent) => this.record(event));
+    device.on("state", (state: string) => this.broadcast({ type: "state", state }));
+    device.on("hello", (hello: unknown) => {
+      // A process is a session. Sequence numbers restart with it, so keeping the
+      // previous process's events would put two timelines on one axis — and,
+      // worse, make the new process's first events look like ones already seen.
+      const startedAt = (hello as { startedAt?: number } | null)?.startedAt;
+      if (startedAt !== undefined && startedAt !== this.startedAt) {
+        this.startedAt = startedAt;
+        this.events = [];
+      }
+      this.broadcast({ type: "hello", hello });
+      void this.backfill();
+    });
+  }
+
+  /** Uptime the connected process started at; identifies the session. */
+  private startedAt: number | undefined;
+
+  /** Everything we have seen, newest last. Used by the `timeline` tool too. */
+  buffer(): DeviceEvent[] {
+    return this.events;
+  }
+
+  private record(event: DeviceEvent): void {
+    this.events.push(event);
+    if (this.events.length > BUFFER_LIMIT) {
+      this.events.splice(0, this.events.length - BUFFER_LIMIT);
+    }
+    this.broadcast({ type: "event", event });
+  }
+
+  /**
+   * Pulls the device's own ring after a (re)connect, so events emitted while
+   * nothing was listening are not lost — which is most of them, since the app
+   * usually starts before anyone attaches.
+   */
+  private async backfill(): Promise<void> {
+    try {
+      const page = await this.device.request<{ events: DeviceEvent[] }>("timeline", {
+        limit: 2000,
+      });
+      const known = new Set(this.events.map((e) => e.seq));
+      const fresh = page.events.filter((e) => !known.has(e.seq));
+      if (fresh.length === 0) return;
+      this.events = [...fresh, ...this.events].sort((a, b) => a.seq - b.seq).slice(-BUFFER_LIMIT);
+      this.broadcast({ type: "reset", events: this.events });
+    } catch {
+      // A failed backfill is not worth surfacing; live events still flow.
+    }
+  }
+
+  async start(): Promise<string> {
+    if (this.started) return this.url();
+    this.started = true;
+
+    const server = http.createServer(async (req, res) => {
+      const path = (req.url ?? "/").split("?")[0];
+
+      // The inspector proxies to the device rather than holding a copy: the
+      // app's tables are the app's, and a cached mirror would go stale the
+      // moment it mattered.
+      if (path.startsWith("/api/db/")) {
+        const query = new URL(req.url ?? "/", "http://localhost");
+        const method =
+          path === "/api/db/tables"
+            ? "db_tables"
+            : path === "/api/db/rows"
+              ? "db_rows"
+              : "db_query";
+        const params: Record<string, unknown> = {
+          database: query.searchParams.get("database") ?? undefined,
+          table: query.searchParams.get("table") ?? undefined,
+          sql: query.searchParams.get("sql") ?? undefined,
+          limit: numberParam(query.searchParams.get("limit")),
+          offset: numberParam(query.searchParams.get("offset")),
+          count: query.searchParams.get("count") === "0" ? false : undefined,
+        };
+        try {
+          const result = await this.device.request(method, params);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (error) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: (error as Error).message }));
+        }
+        return;
+      }
+
+      if (path === "/api/tools/restart" && req.method === "POST") {
+        const packageName = (this.device.hello as { packageName?: string } | null)?.packageName;
+        if (!packageName) {
+          res.writeHead(409, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, output: "The app has not said hello yet." }));
+          return;
+        }
+        const result = restartApp(packageName, this.serial);
+        res.writeHead(result.ok ? 200 : 502, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // What the app wired up, and what it has on its classpath but did not.
+      // The UI uses it to tell an empty lane apart from a missing integration.
+      if (path === "/api/setup") {
+        try {
+          const result = await this.device.request("setup", {});
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (error) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: (error as Error).message }));
+        }
+        return;
+      }
+
+      if (path === "/api/events") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ events: this.events, hello: this.device.hello }));
+        return;
+      }
+
+      // The UI is a built Vite bundle: an entry document plus hashed assets.
+      // Anything that is not a real file falls back to index.html, so a deep
+      // link still boots the app rather than 404ing.
+      const requested = path === "/" ? "index.html" : path.replace(/^\/+/, "");
+      const resolved = resolve(UI_DIR, requested);
+      const target = resolved.startsWith(resolve(UI_DIR))
+        ? resolved
+        : resolve(UI_DIR, "index.html");
+
+      try {
+        const body = await readFile(target);
+        res.writeHead(200, {
+          "content-type": CONTENT_TYPES[extname(target)] ?? "application/octet-stream",
+        });
+        res.end(body);
+      } catch {
+        try {
+          const html = await readFile(resolve(UI_DIR, "index.html"));
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(html);
+        } catch (error) {
+          res.writeHead(500, { "content-type": "text/plain" });
+          res.end(
+            "The timeline UI has not been built. Run `npm run build` in the package root.\n" +
+              (error as Error).message,
+          );
+        }
+      }
+    });
+
+    this.wss = new WebSocketServer({ server, path: "/ws" });
+    this.wss.on("connection", (socket: WebSocket) => {
+      socket.send(
+        JSON.stringify({
+          type: "init",
+          state: this.device.state,
+          hello: this.device.hello,
+          events: this.events,
+        }),
+      );
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      // Loopback only. The UI is a dev tool and has no business being routable.
+      server.listen(this.port, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+
+    this.server = server;
+    return this.url();
+  }
+
+  stop(): void {
+    this.wss?.close();
+    this.server?.close();
+    this.server = null;
+    this.wss = null;
+    this.started = false;
+  }
+
+  isRunning(): boolean {
+    return this.started;
+  }
+
+  url(): string {
+    return `http://127.0.0.1:${this.port}/`;
+  }
+
+  private broadcast(message: unknown): void {
+    if (!this.wss) return;
+    const payload = JSON.stringify(message);
+    for (const client of this.wss.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(payload);
+    }
+  }
+}
+
+function numberParam(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}

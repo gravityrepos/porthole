@@ -1,0 +1,62 @@
+$dokka.format:html-v1
+$dokka.linkExtension:html
+$dokka.location:live.gravitylabs.porthole.compose////PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/index.html
+$dokka.location:live.gravitylabs.porthole.compose//LocalPortholeScreen/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/-local-porthole-screen.html
+$dokka.location:live.gravitylabs.porthole.compose//PortholeBackStack/#kotlin.collections.List[kotlin.Any]#kotlin.Function1[kotlin.Any,kotlin.String]/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/-porthole-back-stack.html
+$dokka.location:live.gravitylabs.porthole.compose//PortholeNodeIdKey/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/-porthole-node-id-key.html
+$dokka.location:live.gravitylabs.porthole.compose//PortholeRoot/#kotlin.String#kotlin.Function0[kotlin.Unit]/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/-porthole-root.html
+$dokka.location:live.gravitylabs.porthole.compose//PortholeScreen/#kotlin.String#kotlin.Function0[kotlin.Unit]/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/-porthole-screen.html
+$dokka.location:live.gravitylabs.porthole.compose//collectAsNamedState/kotlinx.coroutines.flow.StateFlow[TypeParam(bounds=[kotlin.Any?])]#kotlin.String/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/collect-as-named-state.html
+$dokka.location:live.gravitylabs.porthole.compose//portholeNode/androidx.compose.ui.Modifier#kotlin.String/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/porthole-node.html
+$dokka.location:live.gravitylabs.porthole.compose//portholeNodeId/#kotlin.String/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/porthole-node-id.html
+$dokka.location:live.gravitylabs.porthole.compose//rememberNamedState/#kotlin.String#TypeParam(bounds=[kotlin.Any?])/PointingToDeclaration/porthole/live.gravitylabs.porthole.compose/remember-named-state.html
+$dokka.location:live.gravitylabs.porthole.integration////PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/index.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/index.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion/DEFAULT_REDACTED_HEADERS/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/-d-e-f-a-u-l-t_-r-e-d-a-c-t-e-d_-h-e-a-d-e-r-s.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion/DEFAULT_STREAMING_TYPES/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/-d-e-f-a-u-l-t_-s-t-r-e-a-m-i-n-g_-t-y-p-e-s.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion/DEFAULT_TEXT_TYPES/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/-d-e-f-a-u-l-t_-t-e-x-t_-t-y-p-e-s.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion/Off/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/-off.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture.Companion/Text/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-companion/-text.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/index.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/BodyCapture/#kotlin.Boolean#kotlin.Boolean#kotlin.Long#kotlin.collections.Set[kotlin.String]#kotlin.collections.List[kotlin.String]#kotlin.collections.List[kotlin.String]/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/-body-capture.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/enabled/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/enabled.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/maxBytes/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/max-bytes.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/redactHeaders/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/redact-headers.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/request/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/request.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/response/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/response.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/streamingContentTypes/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/streaming-content-types.html
+$dokka.location:live.gravitylabs.porthole.integration/BodyCapture/textContentTypes/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-body-capture/text-content-types.html
+$dokka.location:live.gravitylabs.porthole.integration/KtorPorthole///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ktor-porthole/index.html
+$dokka.location:live.gravitylabs.porthole.integration/KtorPorthole/plugin/#/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ktor-porthole/plugin.html
+$dokka.location:live.gravitylabs.porthole.integration/OkHttpPorthole///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ok-http-porthole/index.html
+$dokka.location:live.gravitylabs.porthole.integration/OkHttpPorthole/bodyInterceptor/#live.gravitylabs.porthole.integration.BodyCapture/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ok-http-porthole/body-interceptor.html
+$dokka.location:live.gravitylabs.porthole.integration/OkHttpPorthole/eventListenerFactory/#okhttp3.EventListener.Factory?/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ok-http-porthole/event-listener-factory.html
+$dokka.location:live.gravitylabs.porthole.integration/OkHttpPorthole/installPorthole/okhttp3.OkHttpClient.Builder#okhttp3.EventListener.Factory?#live.gravitylabs.porthole.integration.BodyCapture/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-ok-http-porthole/install-porthole.html
+$dokka.location:live.gravitylabs.porthole.integration/RoomPorthole///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-room-porthole/index.html
+$dokka.location:live.gravitylabs.porthole.integration/RoomPorthole/installPorthole/androidx.room.RoomDatabase.Builder[TypeParam(bounds=[androidx.room.RoomDatabase])]#androidx.sqlite.db.SupportSQLiteOpenHelper.Factory#kotlin.Boolean#kotlin.Int/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-room-porthole/install-porthole.html
+$dokka.location:live.gravitylabs.porthole.integration/SqlitePorthole///PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-sqlite-porthole/index.html
+$dokka.location:live.gravitylabs.porthole.integration/SqlitePorthole/factory/#androidx.sqlite.db.SupportSQLiteOpenHelper.Factory#kotlin.Boolean#kotlin.Int/PointingToDeclaration/porthole/live.gravitylabs.porthole.integration/-sqlite-porthole/factory.html
+$dokka.location:live.gravitylabs.porthole////PointingToDeclaration/porthole/live.gravitylabs.porthole/index.html
+$dokka.location:live.gravitylabs.porthole//installPorthole/androidx.room.RoomDatabase.Builder[TypeParam(bounds=[androidx.room.RoomDatabase])]#androidx.sqlite.db.SupportSQLiteOpenHelper.Factory#kotlin.Boolean#kotlin.Int/PointingToDeclaration/porthole/live.gravitylabs.porthole/install-porthole.html
+$dokka.location:live.gravitylabs.porthole//installPorthole/okhttp3.OkHttpClient.Builder#okhttp3.EventListener.Factory?#live.gravitylabs.porthole.integration.BodyCapture/PointingToDeclaration/porthole/live.gravitylabs.porthole/install-porthole.html
+$dokka.location:live.gravitylabs.porthole//portholeKtor/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/porthole-ktor.html
+$dokka.location:live.gravitylabs.porthole//portholeSqliteFactory/#androidx.sqlite.db.SupportSQLiteOpenHelper.Factory#kotlin.Boolean#kotlin.Int/PointingToDeclaration/porthole/live.gravitylabs.porthole/porthole-sqlite-factory.html
+$dokka.location:live.gravitylabs.porthole/Porthole///PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/index.html
+$dokka.location:live.gravitylabs.porthole/Porthole/DEFAULT_PORT/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/-d-e-f-a-u-l-t_-p-o-r-t.html
+$dokka.location:live.gravitylabs.porthole/Porthole/ENABLED/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/-e-n-a-b-l-e-d.html
+$dokka.location:live.gravitylabs.porthole/Porthole/attachComposeView/#android.view.View/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/attach-compose-view.html
+$dokka.location:live.gravitylabs.porthole/Porthole/detachComposeView/#android.view.View/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/detach-compose-view.html
+$dokka.location:live.gravitylabs.porthole/Porthole/install/#android.app.Application#kotlin.Int/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/install.html
+$dokka.location:live.gravitylabs.porthole/Porthole/mark/#kotlin.String#kotlin.String?/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/mark.html
+$dokka.location:live.gravitylabs.porthole/Porthole/nameState/#kotlin.Any#kotlin.String/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/name-state.html
+$dokka.location:live.gravitylabs.porthole/Porthole/registerNavController/#kotlin.Any/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/register-nav-controller.html
+$dokka.location:live.gravitylabs.porthole/Porthole/registerViewModel/#kotlin.String#kotlin.Any/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/register-view-model.html
+$dokka.location:live.gravitylabs.porthole/Porthole/reportBackStack/#kotlin.collections.List[kotlin.String]/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/report-back-stack.html
+$dokka.location:live.gravitylabs.porthole/Porthole/shutdown/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole/shutdown.html
+$dokka.location:live.gravitylabs.porthole/PortholeInitializer///PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole-initializer/index.html
+$dokka.location:live.gravitylabs.porthole/PortholeInitializer/PortholeInitializer/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole-initializer/-porthole-initializer.html
+$dokka.location:live.gravitylabs.porthole/PortholeInitializer/create/#android.content.Context/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole-initializer/create.html
+$dokka.location:live.gravitylabs.porthole/PortholeInitializer/dependencies/#/PointingToDeclaration/porthole/live.gravitylabs.porthole/-porthole-initializer/dependencies.html
+live.gravitylabs.porthole
+live.gravitylabs.porthole.compose
+live.gravitylabs.porthole.integration

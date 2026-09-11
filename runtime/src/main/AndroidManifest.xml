@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Binding a loopback ServerSocket still counts as network use. This
+         manifest is only merged into debug builds. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Lets the device collector name the transport (wifi, cellular) behind a
+         slow request. Without it everything else still works. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge"
+            xmlns:tools="http://schemas.android.com/tools">
+            <meta-data
+                android:name="live.gravitylabs.porthole.PortholeInitializer"
+                android:value="androidx.startup" />
+        </provider>
+    </application>
+</manifest>

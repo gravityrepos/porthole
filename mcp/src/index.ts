@@ -1,0 +1,568 @@
+#!/usr/bin/env node
+// Copyright 2026 Gravity Labs
+// SPDX-License-Identifier: Apache-2.0
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { DeviceClient, type DeviceEvent } from "./device.js";
+import { TimelineServer } from "./timeline.js";
+
+const HOST = process.env.PORTHOLE_HOST ?? "127.0.0.1";
+const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
+const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
+
+const device = new DeviceClient(HOST, PORT);
+const timeline = new TimelineServer(device, UI_PORT);
+
+const server = new McpServer({
+  name: "porthole",
+  version: "0.1.0",
+});
+
+type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+
+/** Summary line first, then the JSON. The summary is often the whole answer. */
+function ok(summary: string, payload: unknown): ToolResult {
+  return {
+    content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(payload, null, 2)}` }],
+  };
+}
+
+function fail(error: unknown): ToolResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+async function call<T>(
+  method: string,
+  params: Record<string, unknown>,
+  summarise: (value: T) => string,
+) {
+  try {
+    const result = await device.request<T>(method, params);
+    return ok(summarise(result), result);
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tools
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "porthole_status",
+  {
+    title: "Porthole status",
+    description:
+      "Whether the porthole is connected to a running app, which collectors are active, and what to " +
+      "do if it is not. Start here when another tool reports it cannot reach the device.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async (): Promise<ToolResult> => {
+    const payload = {
+      state: device.state,
+      host: HOST,
+      port: PORT,
+      app: device.hello,
+      timelineUi: timeline.isRunning() ? timeline.url() : null,
+      bufferedEvents: timeline.buffer().length,
+      lastError: device.lastError,
+    };
+    const summary =
+      device.state === "connected" && device.hello
+        ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
+          `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
+        : device.notConnectedMessage();
+    return ok(summary, payload);
+  },
+);
+
+server.registerTool(
+  "recompositions",
+  {
+    title: "Recomposition counts",
+    description:
+      "How many times each instrumented composable recomposed, and which state keys were written " +
+      "just before each recomposition. Use it to find the composable doing needless work and the " +
+      "state that keeps invalidating it.\n\n" +
+      "Two limits worth holding in mind: only call sites wrapped in PortholeScreen or " +
+      "Modifier.portholeNode are counted, so an absent composable is uninstrumented rather than " +
+      "idle; and triggeredBy is a temporal correlation within a ~32ms window, not a causal read " +
+      "of the invalidation graph, so several states changing in one frame all get listed.\n\n" +
+      "Keys like 'unnamed#3f2a1c' are state objects nobody named. In a Compose app most of them " +
+      "belong to the framework — ripples, scroll offsets, focus, animation clocks — and are not " +
+      "worth chasing. A key that is yours and still unnamed means its owner was never registered: " +
+      "Porthole.registerViewModel for a ViewModel, collectAsNamedState for a Flow, " +
+      "rememberNamedState for state a composable creates for itself.\n\n" +
+      "A key carrying 'holds' is anonymous state that was found holding one of the app's own " +
+      "types, so it is definitely the app's and definitely unregistered — that one is worth " +
+      "chasing. Its absence proves nothing: an unregistered Int is indistinguishable from a " +
+      "ripple, so most of the app's own unnamed state will not be flagged.",
+    inputSchema: {
+      screen: z
+        .string()
+        .optional()
+        .describe("Only nodes on this screen, matched against the enclosing PortholeScreen name."),
+      sinceMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Look back this many milliseconds. Omit for everything still buffered."),
+      from: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Absolute start, in the device uptime clock every event carries. Use this to ask " +
+            "about a moment seen on the timeline instead of guessing a lookback.",
+        ),
+      to: z.number().int().optional().describe("Absolute end, same clock. Defaults to now."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ screen, sinceMs, from, to }): Promise<ToolResult> =>
+    call<{
+      nodes: Array<{
+        name: string;
+        count: number;
+        triggeredBy: Array<{ key: string; count: number }>;
+      }>;
+      unattributedWrites: Array<{ key: string; count: number }>;
+    }>("recompositions", { screen, sinceMs, from, to }, (report) => {
+      if (report.nodes.length === 0) {
+        return "No instrumented composable recomposed in that window.";
+      }
+      const top = report.nodes[0];
+      const cause = top.triggeredBy[0];
+      const total = report.nodes.reduce((sum, node) => sum + node.count, 0);
+      return (
+        `${total} recompositions across ${report.nodes.length} nodes. ` +
+        `Worst: ${top.name} at ${top.count}` +
+        (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".")
+      );
+    }),
+);
+
+server.registerTool(
+  "semantics_tree",
+  {
+    title: "Semantics tree",
+    description:
+      "The Compose semantics tree with a stable id per node. stableId is a structural path hash: " +
+      "the same UI produces the same id across captures and across process restarts, so two " +
+      "captures can be diffed. Nodes carrying a porthole node id line up with the ids in the " +
+      "recompositions report.",
+    inputSchema: {
+      merged: z
+        .boolean()
+        .optional()
+        .describe("Merged tree (what accessibility services see). Default true."),
+      maxDepth: z.number().int().positive().optional().describe("Depth cap. Default 40."),
+      maxNodes: z.number().int().positive().optional().describe("Node budget. Default 1500."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ merged, maxDepth, maxNodes }): Promise<ToolResult> =>
+    call<{ root: unknown; error?: string }>(
+      "semantics_tree",
+      { merged, maxDepth, maxNodes },
+      (tree) =>
+        tree.error ? tree.error : tree.root ? "Captured the semantics tree." : "Empty tree.",
+    ),
+);
+
+server.registerTool(
+  "nav_state",
+  {
+    title: "Navigation state",
+    description:
+      "The current back stack with each entry's route, arguments and lifecycle state, plus the " +
+      "deep link that opened the app if there was one. Answers 'how did I get to this screen' " +
+      "and 'what arguments is it actually holding', which is usually where the bug is.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async (): Promise<ToolResult> =>
+    call<{ current?: { route?: string } | null; backStack: unknown[]; error?: string }>(
+      "nav_state",
+      {},
+      (nav) =>
+        nav.error ??
+        `At ${nav.current?.route ?? "an unnamed destination"} with ${nav.backStack.length} entries on the stack.`,
+    ),
+);
+
+server.registerTool(
+  "state",
+  {
+    title: "ViewModel state",
+    description:
+      "Current values of the state held by registered ViewModels. Each field says whether writes " +
+      "to it are attributable — meaning snapshot state the recomposition report can name. A " +
+      "StateFlow is never attributable on its own; collectAsNamedState is what makes the State " +
+      "it produces nameable.",
+    inputSchema: {
+      viewModel: z
+        .string()
+        .optional()
+        .describe("Registered name or class name. Omit for every registered owner."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ viewModel }): Promise<ToolResult> =>
+    call<{ owners: Array<{ name: string; fields: unknown[] }> }>("state", { viewModel }, (dump) => {
+      if (dump.owners.length === 0) {
+        return 'No ViewModels registered. Call Porthole.registerViewModel("CartViewModel", vm) where you obtain it.';
+      }
+      return dump.owners.map((owner) => `${owner.name} (${owner.fields.length} fields)`).join(", ");
+    }),
+);
+
+server.registerTool(
+  "inflight",
+  {
+    title: "In-flight work",
+    description:
+      "Open HTTP calls with the phase each is stuck in, database queries currently executing and " +
+      "the thread running them, and enqueued or running WorkManager jobs. This is the tool for " +
+      "'why is this screen still spinning'.\n\n" +
+      "Also returns recentHttp: the last 25 finished calls with status, headers and — when the " +
+      "app opted in via BodyCapture — request and response body previews. A body with text:null " +
+      "carries an omittedReason saying why it was not captured (disabled, wrong content type, " +
+      "one-shot stream); that is different from the call having had no body at all.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async (): Promise<ToolResult> =>
+    call<{
+      http: Array<{ method: string; url: string; phase: string; elapsedMs: number }>;
+      queries: Array<{ sql: string; kind: string; elapsedMs: number; thread: string }>;
+      work: Array<{ name: string; state: string }>;
+      recentHttp?: Array<{ method: string; url: string; status: number | null; elapsedMs: number }>;
+    }>("inflight", {}, (flight) => {
+      const parts: string[] = [];
+      if (flight.http.length) {
+        const worst = flight.http[0];
+        parts.push(
+          `${flight.http.length} HTTP call(s), oldest ${worst.method} ${worst.url} ` +
+            `in '${worst.phase}' for ${worst.elapsedMs}ms`,
+        );
+      }
+      if (flight.queries.length) {
+        const writes = flight.queries.filter((q) => q.kind === "write").length;
+        parts.push(
+          `${flight.queries.length} query(ies) running on ${flight.queries[0].thread}` +
+            (writes ? ` (${writes} write)` : ""),
+        );
+      }
+      if (flight.work.length) parts.push(`${flight.work.length} work job(s)`);
+
+      const recent = flight.recentHttp ?? [];
+      const failed = recent.filter((c) => c.status !== null && c.status >= 400);
+      if (recent.length) {
+        parts.push(
+          `${recent.length} recent call(s)` +
+            (failed.length ? `, ${failed.length} with a ${failed[0].status}` : ""),
+        );
+      }
+      return parts.length ? parts.join("; ") : "Nothing in flight.";
+    }),
+);
+
+server.registerTool(
+  "frames",
+  {
+    title: "Frame timing",
+    description:
+      "How many frames the app dropped, and where the time went in the worst ones. This is the " +
+      "outcome every other collector is a proxy for: a recomposition count only matters because " +
+      "of what it does to frame time.\n\n" +
+      "worstPhase names the stage that dominated a janky frame, which is what decides where to " +
+      "look: layoutMeasure or draw points at composition doing too much, gpu or swapBuffers at " +
+      "overdraw or an expensive shader, unknownDelay at the main thread being busy with " +
+      "something that is not drawing at all. Pair a jank cluster with recompositions over the " +
+      "same from/to window to see whether recomposition is the cause.\n\n" +
+      "Frames with firstDraw are a window being drawn for the first time and are expected to be " +
+      "slow. Needs API 24 or newer.",
+    inputSchema: {
+      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
+      from: z.number().int().optional().describe("Absolute start, device uptime clock."),
+      to: z.number().int().optional().describe("Absolute end, same clock."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(200)
+        .optional()
+        .describe("Worst N frames. Default 20."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ sinceMs, from, to, limit }): Promise<ToolResult> =>
+    call<{
+      totalFrames: number;
+      jankyFrames: number;
+      frameIntervalMs: number;
+      worst: Array<{
+        totalMs: number;
+        missedFrames: number;
+        worstPhase: string;
+        firstDraw: boolean;
+      }>;
+    }>("frames", { sinceMs, from, to, limit }, (report) => {
+      if (report.totalFrames === 0) return "No frames observed yet.";
+      const rate = ((report.jankyFrames / report.totalFrames) * 100).toFixed(1);
+      const worst = report.worst[0];
+      const byPhase: Record<string, number> = {};
+      for (const frame of report.worst) {
+        byPhase[frame.worstPhase] = (byPhase[frame.worstPhase] ?? 0) + 1;
+      }
+      const phases = Object.entries(byPhase)
+        .sort((a, b) => b[1] - a[1])
+        .map(([phase, n]) => `${phase} ${n}`)
+        .join(", ");
+      return (
+        `${report.jankyFrames} of ${report.totalFrames} frames janky (${rate}%), ` +
+        `budget ${report.frameIntervalMs}ms.` +
+        (worst
+          ? ` Worst ${worst.totalMs}ms, ${worst.missedFrames} refresh(es) missed, mostly ` +
+            `${worst.worstPhase}. Across the worst frames: ${phases}.`
+          : "")
+      );
+    }),
+);
+
+server.registerTool(
+  "blocking",
+  {
+    title: "Main thread blocking",
+    description:
+      "What held the main thread: stalls longer than the threshold, with the stack the main " +
+      "thread was in at the time, and any database query that ran on it.\n\n" +
+      "Stalls are found by pinging the main looper and timing the reply, so the duration is how " +
+      "long everything queued ahead of the ping took. The stack is sampled once, when the ping " +
+      "goes overdue, and app frames are listed first because the top frame is usually a native " +
+      "read and the line you can change is a few frames down.\n\n" +
+      "Database work on the main thread is reported however fast it was: a 4ms disk read in the " +
+      "frame loop is a defect that has not bitten yet. For hitches shorter than the threshold, " +
+      "use `frames` instead — that measures every frame, this one catches the big stops.",
+    inputSchema: {
+      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
+      from: z.number().int().optional().describe("Absolute start, device uptime clock."),
+      to: z.number().int().optional().describe("Absolute end, same clock."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .optional()
+        .describe("Worst N of each. Default 20."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ sinceMs, from, to, limit }): Promise<ToolResult> =>
+    call<{
+      stalls: Array<{ durationMs: number; stack: string }>;
+      mainThreadQueries: Array<{ sql: string; elapsedMs: number; kind: string }>;
+      stallThresholdMs: number;
+    }>("blocking", { sinceMs, from, to, limit }, (report) => {
+      const parts: string[] = [];
+      if (report.stalls.length) {
+        const worst = report.stalls[0];
+        parts.push(
+          `${report.stalls.length} stall(s) over ${report.stallThresholdMs}ms, worst ` +
+            `${worst.durationMs}ms in ${worst.stack.split("\n")[0]}`,
+        );
+      }
+      if (report.mainThreadQueries.length) {
+        const worst = report.mainThreadQueries[0];
+        parts.push(
+          `${report.mainThreadQueries.length} database ${report.mainThreadQueries.length === 1 ? "query" : "queries"} ` +
+            `on the main thread, worst ${worst.elapsedMs}ms: ${worst.sql.slice(0, 80)}`,
+        );
+      }
+      return parts.length ? parts.join(". ") : "Nothing blocked the main thread in this window.";
+    }),
+);
+
+server.registerTool(
+  "logs",
+  {
+    title: "App logs",
+    description:
+      "The app's own logcat output, captured in-process and streamed over the same socket as " +
+      "everything else — no adb needed. Stack traces arrive attached to the line that started " +
+      "them rather than as loose fragments.\n\n" +
+      "Entries carry the same uptime clock as the timeline, so a log line can be placed against " +
+      "a recomposition burst or an HTTP call. Only the app's own output is visible, and the " +
+      "porthole's own tag is excluded.",
+    inputSchema: {
+      level: z
+        .enum(["V", "D", "I", "W", "E", "F"])
+        .optional()
+        .describe("Minimum level. 'W' for warnings and worse, which is usually what you want."),
+      tag: z.string().optional().describe("Substring match on the tag."),
+      contains: z.string().optional().describe("Substring match on the message."),
+      sinceMs: z.number().int().positive().optional().describe("Only the last N milliseconds."),
+      from: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Absolute start, in the device uptime clock every event carries. Use this to ask " +
+            "about a moment seen on the timeline instead of guessing a lookback.",
+        ),
+      to: z.number().int().optional().describe("Absolute end, same clock. Defaults to now."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(2000)
+        .optional()
+        .describe("Newest N entries. Default 200."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ level, tag, contains, sinceMs, from, to, limit }): Promise<ToolResult> =>
+    call<{
+      entries: Array<{ level: string; tag: string; message: string; wallTime: string }>;
+      capturing: boolean;
+      evicted: number;
+      notes: string[];
+    }>("logs", { level, tag, contains, sinceMs, from, to, limit }, (page) => {
+      if (!page.capturing) {
+        return page.notes.join(" ") || "Log capture is not running.";
+      }
+      if (page.entries.length === 0) {
+        return page.notes.join(" ") || "No log entries matched.";
+      }
+      const counts: Record<string, number> = {};
+      for (const entry of page.entries) counts[entry.level] = (counts[entry.level] ?? 0) + 1;
+      const worst = page.entries
+        .filter((entry) => entry.level === "E" || entry.level === "F")
+        .at(-1);
+      return (
+        `${page.entries.length} entries (` +
+        Object.entries(counts)
+          .map(([level, count]) => `${level} ${count}`)
+          .join(", ") +
+        ")" +
+        (worst
+          ? `. Latest error: ${worst.tag}: ${worst.message.split("\n")[0].slice(0, 120)}`
+          : ".")
+      );
+    }),
+);
+
+server.registerTool(
+  "timeline",
+  {
+    title: "Event timeline",
+    description:
+      "Raw event stream: recompositions, state writes, navigation, HTTP and database start/end. " +
+      "Use it to order events relative to each other — which write came before which navigation, " +
+      "what the app was doing while a call was open.",
+    inputSchema: {
+      sinceMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Only events from the last N milliseconds of device uptime."),
+      kinds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Filter by event name: recompose, state_write, frame, nav, http_start, http_end, " +
+            "db_start, db_end, log.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(5000)
+        .optional()
+        .describe("Newest N events. Default 500."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ sinceMs, kinds, limit }): Promise<ToolResult> => {
+    try {
+      // Prefer the local buffer: it holds more history than the device ring and
+      // survives the app being restarted underneath us.
+      let events: DeviceEvent[] = timeline.buffer();
+      if (events.length === 0) {
+        const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
+          limit: limit ?? 500,
+        });
+        events = page.events;
+      }
+      if (sinceMs !== undefined && events.length > 0) {
+        const newest = events[events.length - 1].t;
+        events = events.filter((event) => event.t >= newest - sinceMs);
+      }
+      if (kinds?.length) {
+        const wanted = new Set(kinds);
+        events = events.filter((event) => wanted.has(event.event));
+      }
+      events = events.slice(-(limit ?? 500));
+
+      const counts: Record<string, number> = {};
+      for (const event of events) counts[event.event] = (counts[event.event] ?? 0) + 1;
+      const span = events.length > 1 ? events[events.length - 1].t - events[0].t : 0;
+      const summary =
+        events.length === 0
+          ? "No events buffered yet. Interact with the app and try again."
+          : `${events.length} events over ${span}ms: ` +
+            Object.entries(counts)
+              .map(([kind, count]) => `${kind} ${count}`)
+              .join(", ");
+      return ok(summary, { events });
+    } catch (error) {
+      return fail(error);
+    }
+  },
+);
+
+server.registerTool(
+  "open_timeline",
+  {
+    title: "Open the timeline UI",
+    description:
+      "Starts the local timeline UI and returns its URL. Lanes for recompositions, state writes, " +
+      "navigation, network and database, on a shared time axis. Open it in a browser; it updates " +
+      "live over a WebSocket.",
+    inputSchema: {},
+  },
+  async (): Promise<ToolResult> => {
+    try {
+      const url = await timeline.start();
+      return ok(`Timeline UI running at ${url}`, { url, events: timeline.buffer().length });
+    } catch (error) {
+      return fail(error);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+
+device.start();
+
+// stdout belongs to the MCP transport; anything we say goes to stderr.
+device.on("state", (state: string) => process.stderr.write(`[porthole] device ${state}\n`));
+
+const shutdown = () => {
+  device.stop();
+  timeline.stop();
+  process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+await server.connect(new StdioServerTransport());
+process.stderr.write(`[porthole] MCP server ready, device target ${HOST}:${PORT}\n`);

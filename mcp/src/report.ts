@@ -1,0 +1,204 @@
+// Copyright 2026 Gravity Labs
+// SPDX-License-Identifier: Apache-2.0
+import type { Finding, Trace } from "./trace.js";
+import { frameBudgetMs } from "./trace.js";
+
+/** Lanes a reader should be told were checked and found quiet. */
+const CHECKED: Array<{ label: string; keys: string[] }> = [
+  { label: "http", keys: ["http.failed"] },
+  { label: "db", keys: ["db.onMainThread"] },
+  { label: "main thread", keys: ["mainThread.stalls"] },
+  { label: "frames", keys: ["frames.missed"] },
+  { label: "work", keys: ["work.retries", "work.failures"] },
+  { label: "memory", keys: ["memory.blockingGcMs"] },
+];
+
+const LABEL: Record<Finding["severity"], string> = {
+  error: "ERROR  ",
+  warning: "WARNING",
+  note: "NOTE   ",
+};
+
+export function renderReport(trace: Trace): string {
+  const lines: string[] = [];
+  const device = trace.device as Record<string, unknown>;
+  const hz = Number(device.refreshHz) || 60;
+
+  lines.push(
+    [
+      trace.scenario,
+      `${(trace.durationMs / 1000).toFixed(1)}s`,
+      `${device.model ?? "unknown device"} (${Math.round(hz)}Hz)`,
+      trace.app.packageName,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  );
+  lines.push("");
+
+  if (trace.findings.length === 0) {
+    lines.push("  nothing worth reporting");
+  }
+
+  // Severity order, not grouped by mark. Grouping reads well until the first
+  // marked run, where it drops an ERROR below two WARNINGs and defeats the one
+  // job of a prioritised list. The mark rides along on the line instead.
+  for (const finding of trace.findings) {
+    lines.push(`  ${LABEL[finding.severity]}  ${finding.title}`);
+    if (finding.during) lines.push(`           during "${finding.during}"`);
+    if (finding.detail) lines.push(`           ${finding.detail}`);
+  }
+
+  const quiet = CHECKED.filter((lane) =>
+    lane.keys.every((key) => (trace.metrics[key] ?? 0) === 0),
+  ).map((lane) => lane.label);
+
+  // Saying what was checked and found clean matters as much as the findings. A
+  // report that only ever lists problems gives no signal that the things it did
+  // not mention were looked at.
+  if (quiet.length > 0) {
+    lines.push("");
+    lines.push(`  quiet: ${quiet.join(", ")}`);
+  }
+
+  lines.push("");
+  lines.push(
+    `  frame budget ${frameBudgetMs(hz)}ms · ` +
+      `${trace.metrics["recompose.total"]} recompositions · ` +
+      `${trace.metrics["http.calls"]} calls · ${trace.metrics["db.queries"]} queries`,
+  );
+  if (trace.marks.length > 0) lines.push(`  ${trace.marks.length} marks`);
+  if (trace.driver) lines.push(`  driver: ${trace.driver}`);
+
+  return lines.join("\n") + "\n";
+}
+
+export interface Change {
+  key: string;
+  before: number;
+  after: number;
+  kind: "new" | "regressed" | "improved" | "unchanged";
+}
+
+/** Metrics where a larger number is better. Everything else is the other way. */
+const HIGHER_IS_BETTER = new Set<string>();
+
+/**
+ * Below both of these, a difference is noise.
+ *
+ * Timing metrics move run to run. With only a relative floor a small absolute
+ * change looks enormous; with only an absolute one a large metric never moves
+ * enough. Without both, every run is a regression and the check gets switched
+ * off, which is the real failure mode.
+ */
+const RELATIVE_FLOOR = 0.1;
+const ABSOLUTE_FLOOR = 3;
+
+export function compareMetrics(
+  before: Record<string, number>,
+  after: Record<string, number>,
+): Change[] {
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+
+  return keys.map((key) => {
+    const a = before[key] ?? 0;
+    const b = after[key] ?? 0;
+    const worse = HIGHER_IS_BETTER.has(key) ? b < a : b > a;
+
+    // Categorical, not a drift: the first main-thread query, the first failing
+    // call. No floor should hide one of these.
+    if (a === 0 && b > 0) return { key, before: a, after: b, kind: "new" as const };
+    if (a === b) return { key, before: a, after: b, kind: "unchanged" as const };
+
+    const absolute = Math.abs(b - a);
+    const relative = a === 0 ? 1 : absolute / a;
+    if (absolute < ABSOLUTE_FLOOR || relative < RELATIVE_FLOOR) {
+      return { key, before: a, after: b, kind: "unchanged" as const };
+    }
+
+    return { key, before: a, after: b, kind: worse ? "regressed" : "improved" };
+  });
+}
+
+/** Why two traces cannot honestly be compared, or null if they can. */
+export function comparability(before: Trace, after: Trace): string | null {
+  if (before.scenario !== after.scenario) {
+    return `different scenarios: "${before.scenario}" and "${after.scenario}"`;
+  }
+
+  const a = before.device as Record<string, unknown>;
+  const b = after.device as Record<string, unknown>;
+
+  // Only a known difference counts. A capture that attached to an app already
+  // running may not have seen the device profile, and two absent values are not
+  // a mismatch — compared as numbers they become NaN !== NaN, which refuses
+  // every pair of traces that happen to be missing the same field.
+  const differs = (key: string): boolean => {
+    const left = a[key];
+    const right = b[key];
+    if (left === undefined || right === undefined) return false;
+    return left !== right;
+  };
+
+  if (differs("refreshHz")) {
+    return `different refresh rates: ${a.refreshHz}Hz and ${b.refreshHz}Hz — frame budgets differ`;
+  }
+  if (differs("cores")) {
+    return `different core counts: ${a.cores} and ${b.cores}`;
+  }
+  if (differs("lowRamDevice")) {
+    return "one capture is from a low-RAM device and the other is not";
+  }
+  return null;
+}
+
+export function renderComparison(
+  before: Trace,
+  after: Trace,
+): { text: string; regressed: boolean; refused: boolean } {
+  const blocked = comparability(before, after);
+  if (blocked) {
+    return {
+      text:
+        `refusing to compare: ${blocked}\n\n` +
+        "  A number from two runs that were never comparable is worse than no\n" +
+        "  number, because someone will act on it.\n",
+      regressed: false,
+      refused: true,
+    };
+  }
+
+  const changes = compareMetrics(before.metrics, after.metrics);
+  const notable = changes.filter((c) => c.kind !== "unchanged");
+  const unchanged = changes.length - notable.length;
+  const lines: string[] = [];
+
+  lines.push(`${after.scenario} · against a baseline of ${before.capturedAt}`);
+  lines.push("");
+
+  for (const change of notable) {
+    const label = change.kind === "improved" ? "improved " : change.kind.toUpperCase().padEnd(9);
+    const delta =
+      change.kind === "new"
+        ? "new"
+        : `(${change.after > change.before ? "+" : ""}${Math.round(((change.after - change.before) / (change.before || 1)) * 100)}%)`;
+    lines.push(`  ${label} ${change.key.padEnd(24)} ${change.before} → ${change.after}  ${delta}`);
+  }
+
+  if (notable.length === 0) lines.push("  nothing moved");
+  lines.push("");
+  lines.push(`  unchanged: ${unchanged} other metrics`);
+
+  // An agentic driver reasons between steps and does not walk the same path
+  // twice, so its timings drift for reasons that are not the code's.
+  if (after.driver && after.driver !== before.driver) {
+    lines.push("");
+    lines.push(`  note: drivers differ ("${before.driver ?? "?"}" then "${after.driver}")`);
+  }
+
+  return {
+    text: lines.join("\n") + "\n",
+    regressed: notable.some((c) => c.kind === "regressed" || c.kind === "new"),
+    refused: false,
+  };
+}
