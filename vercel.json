@@ -4,7 +4,7 @@
   "installCommand": null,
   "buildCommand": null,
   "outputDirectory": "site",
-  "trailingSlash": false,
+  "trailingSlash": true,
   "headers": [
     {
       "source": "/",
