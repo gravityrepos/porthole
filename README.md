@@ -773,10 +773,14 @@ Nothing is published yet, but the build is now configured for all three
 registries. Publishing is a deliberate act and needs credentials that are not in
 this repo.
 
+The order is not arbitrary. `portholeUi` launches the timeline with `npx
+--package @gravitylabs/porthole@<version>`, and the plugin points at the AAR
+coordinates, so each step wants the one before it to already exist:
+
 ```bash
+cd mcp && npm publish                              # @gravitylabs/porthole
 ./gradlew publishToMavenCentral                    # the two AARs, staged
 ./gradlew -p gradle-plugin publishPlugins          # the Gradle Plugin Portal
-cd mcp && npm publish                              # @gravitylabs/porthole
 ```
 
 Credentials live in `~/.gradle/gradle.properties` or the environment, never
@@ -797,8 +801,17 @@ Still to do before any of that will succeed:
   `live.gravitylabs` namespace on the Central Portal.
 - A GPG key. `RELEASE_SIGNING_ENABLED=true` means an unsigned release fails
   rather than quietly uploading something Central will reject.
-- A real version. Central takes no `-SNAPSHOT` releases, and the plugin, the
-  AARs and the npm package should go out on the same one.
+The version is settled. It is written once, as `porthole` under `[versions]` in
+`gradle/libs.versions.toml`, and everything else derives from it: the AARs and
+the plugin take it as their project version, and `PortholeVersion.kt` is
+generated from it so the runtime version the plugin hands a consumer cannot be
+stale. `mcp/package.json` is the one copy that is still edited by hand, and
+`VersionConsistencyTest` fails the build if it disagrees.
+
+That test earns its place the same way the AGP one does. A wrong version here
+breaks nothing locally — this build compiles and the publish succeeds — and
+surfaces later as an unresolvable dependency in the build of whoever applied
+the plugin.
 
 `publishToMavenCentral` stages without releasing, and
 `SONATYPE_AUTOMATIC_RELEASE=false` keeps it that way: the staged bundle is
@@ -807,9 +820,12 @@ promoted by hand after you have looked at it.
 To try the consumer path without publishing anywhere:
 
 ```bash
-./gradlew -p gradle-plugin publishToMavenLocal
-./gradlew :runtime:publishToMavenLocal :runtime-noop:publishToMavenLocal
+./gradlew publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false
 ```
+
+The flag is needed because the version is no longer a snapshot: signing is
+skipped for snapshots and required for everything else, so without it a local
+publish fails on a missing signatory rather than on anything you did.
 
 then add `mavenLocal()` to a separate project's `pluginManagement` and
 `dependencyResolutionManagement` repositories and apply the plugin by id. That

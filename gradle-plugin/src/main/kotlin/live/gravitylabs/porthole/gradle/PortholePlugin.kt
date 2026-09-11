@@ -137,9 +137,15 @@ class PortholePlugin : Plugin<Project> {
     companion object {
         const val GROUP = "compose porthole"
         const val DEFAULT_PORT = 8677
-        const val PLUGIN_VERSION = "0.1.0-SNAPSHOT"
 
-        /** npm version of the MCP/UI package. Tracks the plugin, but separately. */
-        const val UI_PACKAGE_VERSION = "0.1.0"
+        /**
+         * The runtime version handed to consumers, and the npm version
+         * `portholeUi` launches. Both are [PORTHOLE_VERSION], generated from
+         * the version catalog — everything Porthole publishes ships together,
+         * and the failure mode for a stale literal here lands in someone
+         * else's build rather than this one.
+         */
+        const val PLUGIN_VERSION = PORTHOLE_VERSION
+        const val UI_PACKAGE_VERSION = PORTHOLE_VERSION
     }
 }

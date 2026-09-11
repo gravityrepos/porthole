@@ -4,7 +4,48 @@ plugins {
 }
 
 group = "live.gravitylabs.porthole"
-version = "0.1.0-SNAPSHOT"
+// The same catalog entry the rest of the build uses. This is an included build
+// and its settings point `libs` at the root file.
+version = libs.versions.porthole.get()
+
+/**
+ * The version, as a constant the plugin can read.
+ *
+ * Generated rather than typed, because the plugin hands this to consumers as
+ * the runtime dependency to resolve. A literal here that disagrees with the
+ * published version does not fail this build or the publish — it fails, later,
+ * in the build of whoever applied the plugin, as an unresolvable artifact with
+ * nothing pointing at the cause.
+ */
+val generateVersion = tasks.register("generatePortholeVersion") {
+    val version = project.version.toString()
+    val uiPackage = "@gravitylabs/porthole"
+    val outputDir = layout.buildDirectory.dir("generated/version")
+
+    inputs.property("version", version)
+    outputs.dir(outputDir)
+
+    doLast {
+        val file = outputDir.get()
+            .file("live/gravitylabs/porthole/gradle/PortholeVersion.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            """
+            // Copyright 2026 Gravity Labs
+            // SPDX-License-Identifier: Apache-2.0
+            //
+            // Generated from `porthole` in gradle/libs.versions.toml. Do not edit.
+            package live.gravitylabs.porthole.gradle
+
+            internal const val PORTHOLE_VERSION: String = "$version"
+            internal const val PORTHOLE_UI_PACKAGE: String = "$uiPackage"
+
+            """.trimIndent(),
+        )
+    }
+}
+
+kotlin.sourceSets.named("main") { kotlin.srcDir(generateVersion) }
 
 dependencies {
     // compileOnly: the consuming build always brings its own AGP, and the
