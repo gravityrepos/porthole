@@ -6,6 +6,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import live.gravitylabs.porthole.protocol.RecompositionNode
 import live.gravitylabs.porthole.protocol.RecompositionReport
 import live.gravitylabs.porthole.protocol.StateWriteCount
@@ -43,9 +46,35 @@ internal class RecompositionCollector(
     private val samples = ArrayDeque<Sample>()
     private val lock = Any()
 
+    /** Recomposition churn as spans in the system trace. See RecomposeBurst. */
+    private val burst = RecomposeBurst()
+
+    /**
+     * Closes a burst once recompositions stop.
+     *
+     * Nothing happens when churn ends, so something has to come looking.
+     * A daemon thread, so it never holds the process open, and one tick
+     * rather than a task per recomposition: the hot path only writes a
+     * field.
+     */
+    private val closer: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "porthole-recompose").apply { isDaemon = true }
+        }.also {
+            it.scheduleWithFixedDelay(
+                { runCatching { burst.tick() } },
+                BURST_TICK_MS,
+                BURST_TICK_MS,
+                TimeUnit.MILLISECONDS,
+            )
+        }
+
     /** Called from a SideEffect, so: on the composition thread, once per pass. */
     fun onRecompose(nodeId: String, name: String, screen: String?, passCount: Int) {
         val t = nowMs()
+        // Before the attribution walk: this is two field writes, and it is
+        // the part that has to survive being called thousands of times.
+        burst.onRecompose()
         val triggers = snapshots.writesBefore(t, attributionWindowMs)
         synchronized(lock) {
             samples.addLast(Sample(nodeId, name, screen, t, triggers))
@@ -124,6 +153,12 @@ internal class RecompositionCollector(
         )
     }
 
+    /** Stops the closer and ends any open span. */
+    fun stop() {
+        burst.close()
+        closer.shutdownNow()
+    }
+
     fun reset() {
         synchronized(lock) { samples.clear() }
         snapshots.clear()
@@ -183,5 +218,13 @@ internal class RecompositionCollector(
 
     companion object {
         private const val SAMPLE_CAPACITY = 8192
+
+        /**
+         * How often to look for a burst that has gone quiet.
+         *
+         * Half the burst's own quiet threshold, so a span closes within about
+         * one threshold of the churn actually stopping rather than up to two.
+         */
+        private const val BURST_TICK_MS = 60L
     }
 }

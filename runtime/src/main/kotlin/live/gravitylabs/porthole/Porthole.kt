@@ -220,6 +220,7 @@ object Porthole {
             s.logs.stop()
             s.frames.stop()
             s.watchdog.stop()
+            s.recompositions.stop()
             s.nav?.unregister()
             session = null
         }
