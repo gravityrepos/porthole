@@ -30,6 +30,19 @@ const BUFFER_LIMIT = 20_000;
  * this talks HTTP and WebSocket to a browser, and the two never cross. The event
  * buffer is shared so the UI and the `timeline` tool see the same history.
  */
+interface OtherTimeline {
+  connected: boolean;
+  app: string | null;
+  device: string | null;
+  devicePort: number;
+}
+
+/** An EADDRINUSE that knows whether the squatter is one of ours and alive. */
+export interface PortInUse extends Error {
+  portholeAlreadyRunning: boolean;
+  url: string;
+}
+
 export class TimelineServer {
   private server: http.Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -99,6 +112,25 @@ export class TimelineServer {
 
     const server = http.createServer(async (req, res) => {
       const path = (req.url ?? "/").split("?")[0];
+
+      // Identifies this server to another instance that finds the port
+      // taken. Sniffing the HTML would answer 'a web server' and not
+      // 'a Porthole, attached to this device, still alive'.
+      if (path === "/api/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            name: "porthole-timeline",
+            uiPort: this.port,
+            devicePort: this.device.port,
+            connected: this.device.state === "connected",
+            app: this.device.hello?.packageName ?? null,
+            device: this.device.hello?.device ?? null,
+            bufferedEvents: this.events.length,
+          }),
+        );
+        return;
+      }
 
       // The inspector proxies to the device rather than holding a copy: the
       // app's tables are the app's, and a cached mirror would go stale the
@@ -193,6 +225,31 @@ export class TimelineServer {
       }
     });
 
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        // Loopback only. The UI is a dev tool and has no business being routable.
+        server.listen(this.port, "127.0.0.1", () => {
+          server.removeListener("error", reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      this.started = false;
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+      const other = await this.probeHealth();
+      const problem = new Error(this.explainPortInUse(other)) as PortInUse;
+      // Lets a caller tell "someone else has the port" from "yours is already
+      // open", which want different answers: one is a failure, one is a URL.
+      problem.portholeAlreadyRunning = other !== null && other.connected;
+      problem.url = this.url();
+      throw problem;
+    }
+
+    // After the bind, not before. Attached to a server that has not
+    // listened, the socket server re-emits the bind failure as its own
+    // unhandled error — which is what turned a taken port into a raw
+    // stack trace, escaping the handler written to explain it.
     this.wss = new WebSocketServer({ server, path: "/ws" });
     this.wss.on("connection", (socket: WebSocket) => {
       socket.send(
@@ -205,17 +262,57 @@ export class TimelineServer {
       );
     });
 
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      // Loopback only. The UI is a dev tool and has no business being routable.
-      server.listen(this.port, "127.0.0.1", () => {
-        server.removeListener("error", reject);
-        resolve();
-      });
-    });
-
     this.server = server;
     return this.url();
+  }
+
+  /**
+   * Who has the port, in a sentence someone can act on.
+   *
+   * Nearly always an older instance of this server that outlived the session
+   * that started it — and it will answer requests, so the failure otherwise
+   * looks like the port being busy when the real problem is that the thing
+   * answering is attached to a device that went away hours ago.
+   */
+  private explainPortInUse(other: OtherTimeline | null): string {
+    if (!other) {
+      return (
+        `Port ${this.port} is already in use by something that is not a Porthole timeline. ` +
+        `Stop it, or start this one on another port.`
+      );
+    }
+    const attached = other.connected
+      ? `attached to ${other.app ?? "an app"}` +
+        (other.device ? ` on ${other.device}` : "") +
+        ` via device port ${other.devicePort}`
+      : "not attached to any device";
+    return (
+      `A Porthole timeline is already running at ${this.url()}, ${attached}. ` +
+      (other.connected
+        ? "Open it rather than starting a second one."
+        : "It is stale — stop it and start again, or it will show nothing.")
+    );
+  }
+
+  /** Null when nothing answers, or answers as something else. */
+  private async probeHealth(): Promise<OtherTimeline | null> {
+    try {
+      const response = await fetch(`http://127.0.0.1:${this.port}/api/health`, {
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (!response.ok) return null;
+      const body = (await response.json()) as Record<string, unknown>;
+      if (body.name !== "porthole-timeline") return null;
+      return {
+        connected: body.connected === true,
+        app: (body.app as string) ?? null,
+        device: (body.device as string) ?? null,
+        devicePort: Number(body.devicePort) || 0,
+      };
+    } catch {
+      // Holding a port without answering HTTP is still "something else".
+      return null;
+    }
   }
 
   stop(): void {

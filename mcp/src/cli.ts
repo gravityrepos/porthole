@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { DeviceClient } from "./device.js";
-import { TimelineServer } from "./timeline.js";
+import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { runAdb } from "./adb.js";
 
@@ -136,10 +136,15 @@ async function ui(argv: string[]): Promise<void> {
   try {
     url = await timeline.start();
   } catch (error) {
-    console.error(
-      `Could not serve the timeline on port ${options.uiPort}: ${(error as Error).message}\n` +
-        "Something else is probably on it; pass --ui-port to move.",
-    );
+    const problem = error as PortInUse;
+    console.error(problem.message);
+    // An instance already serving this device is not a failure — it is the
+    // thing that was asked for. Point at it and stop.
+    if (problem.portholeAlreadyRunning) {
+      if (options.open) openBrowser(problem.url);
+      process.exit(0);
+    }
+    console.error(`Pass --ui-port to use a port other than ${options.uiPort}.`);
     process.exit(1);
   }
 

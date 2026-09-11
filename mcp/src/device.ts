@@ -64,7 +64,7 @@ export class DeviceClient extends EventEmitter {
 
   constructor(
     private readonly host: string,
-    private readonly port: number,
+    readonly port: number,
   ) {
     super();
   }
