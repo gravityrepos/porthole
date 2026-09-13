@@ -27,6 +27,9 @@ import javax.inject.Inject
  * The forward is what makes the device's loopback socket reachable from the
  * workstation, and it is deliberately the only bridge: nothing is exposed on a
  * network interface at any point.
+ *
+ * This task never reports itself up to date, and that is deliberate — see
+ * [connectionFile] for why declaring no outputs is how that is said.
  */
 abstract class PortholeConnectTask : DefaultTask() {
 
@@ -47,7 +50,29 @@ abstract class PortholeConnectTask : DefaultTask() {
     @get:Optional
     abstract val applicationId: Property<String>
 
-    @get:OutputFile
+    /**
+     * Where the connection file is written. Not an `@OutputFile`.
+     *
+     * It is a record of a side effect, not a build output. The side effect is
+     * the forward, and the forward lives in the adb server, not in the file
+     * system: replug a cable, restart the adb server, reboot an emulator or
+     * switch devices and it is gone, while this file and every input above are
+     * byte-for-byte what they were. Declared as an output, that made the task
+     * up to date on its second run and `portholeConnect` reported success
+     * without running adb at all — after which every MCP tool answered with the
+     * not-connected message, whose advice is to run the task that just lied.
+     *
+     * A task that declares no outputs is never up to date, which is the
+     * truthful description of this one: only adb knows whether the forward
+     * exists, so the only safe answer is to ask it again. Nothing in the build
+     * consumes this file — the MCP server reads it, out of process, long after
+     * Gradle has exited — so it loses nothing by not being wired as an
+     * artifact, and `clean` still takes it with the build directory it sits in.
+     * [PortholeDisconnectTask] keeps its `@OutputFile` and stays correct for a
+     * different reason: it deletes the file it declares, so it is never up to
+     * date either.
+     */
+    @get:Internal
     abstract val connectionFile: RegularFileProperty
 
     @TaskAction
