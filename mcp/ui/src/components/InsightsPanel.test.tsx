@@ -55,7 +55,9 @@ afterEach(() => {
 
 describe("FindingsLoader.schedule", () => {
   it("collapses a burst of calls into a single fetch, fired once things settle", async () => {
-    const fetchImpl = vi.fn(async () => okResponse({ findings: [] }));
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
     const loader = new FindingsLoader(callbacks(), { fetchImpl });
 
     // Three view updates in quick succession -- one animation frame apart,
@@ -146,7 +148,9 @@ describe("FindingsLoader.schedule", () => {
 
 describe("FindingsLoader.runNow", () => {
   it("bypasses the debounce and cancels whatever was pending", async () => {
-    const fetchImpl = vi.fn(async () => okResponse({ findings: [] }));
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
     const loader = new FindingsLoader(callbacks(), { fetchImpl, debounceMs: 300 });
 
     loader.schedule(0, 100);
