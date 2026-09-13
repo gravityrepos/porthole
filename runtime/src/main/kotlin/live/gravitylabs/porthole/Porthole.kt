@@ -609,6 +609,7 @@ internal fun blockingReport(
 ): BlockingReport {
     val stalls = watchdog.report(window, limit)
     val queries = inflight.mainThreadQueries(window, limit)
+    // Renders calls that may still be running, so their fields are read live rather than under the writer's lock.
     val calls = inflight.mainThreadHttp(window, limit)
     return BlockingReport(
         stalls = stalls,

@@ -53,10 +53,24 @@ class BlockingWindowTest {
 
     @Test
     fun `a stall and a query at the same instant are answered the same way`() {
-        // Swept across the floor of the window rather than tested at one point,
-        // because the old defect was a few milliseconds wide and a single
-        // sample would have walked straight past it.
-        for (t in 4_980L..5_020L) {
+        // Swept across the membership boundary rather than tested at one point,
+        // because the defect this guards against is a few milliseconds wide and
+        // a single sample would walk straight past it. Which means the sweep is
+        // only worth anything if it is centred on the boundary, so: the seeded
+        // stall and query both span [t, t + 100], and Window.overlaps puts a
+        // span in 5_000..6_000 when it began at or before 6_000 and had not
+        // ended before 5_000 — that is, when t is in [4_900, 6_000]. The
+        // boundary is therefore 4_900, one span-length below the window's
+        // floor, and 4_900 is what this sweep straddles.
+        //
+        // It has been 5_000 before now and must be re-derived whenever the
+        // membership rule or the seeded duration moves. This sweep originally
+        // ran 4_980..5_020, which was centred on the boundary under the old
+        // start-time rule and stopped being centred on anything when matching
+        // changed to overlap: every sampled t sat comfortably inside the window
+        // on both halves, and the sweep could not see a window skew below 81ms.
+        // Centred here it separates the two halves at a skew of 1ms.
+        for (t in 4_880L..4_920L) {
             val watchdog = watchdog()
             val inflight = inflight()
             watchdog.record(t, 100, "at com.example.shop.Cart.load")
