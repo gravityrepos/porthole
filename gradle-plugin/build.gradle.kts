@@ -84,8 +84,10 @@ tasks.test {
     // test itself does. NONE: only the contents decide the answer, never where
     // the files sit on disk.
     inputs.file(layout.projectDirectory.file("../gradle/libs.versions.toml"))
+        .withPropertyName("versionCatalog")
         .withPathSensitivity(PathSensitivity.NONE)
     inputs.file(layout.projectDirectory.file("../mcp/package.json"))
+        .withPropertyName("mcpPackageJson")
         .withPathSensitivity(PathSensitivity.NONE)
 
     // Which Gradle the TestKit builds run on. Unset means the one running this
@@ -141,6 +143,60 @@ gradlePlugin {
             tags.set(listOf("android", "compose", "debugging", "profiling", "mcp"))
         }
     }
+}
+
+// The configuration cache is on for this build on purpose — gradle.properties
+// sets it to match the root's, so `-p gradle-plugin test` and `./gradlew test`
+// agree about what was up to date — and the plugin's own tests are what it buys:
+// TestKit builds are the slowest thing here and reusing the entry is most of the
+// difference. It stays on. These two tasks step outside it, and only these two.
+//
+// Both come from com.gradle.plugin-publish 1.3.1, which holds Project,
+// SourceSet, SourceSetContainer and MavenPublication in its task state — none of
+// which the configuration cache can serialize. Undeclared, that surfaces where
+// it can do the most damage: publishing is a rare, manual, irreversible act
+// against live registries, done in an order that matters, and `publishPlugins`
+// met the person doing it with six configuration-cache problems, a link to a
+// report, and the line "Please report this error, run './gradlew --stop' and try
+// again", before ending on `Configuration cache entry discarded with 6 problems`.
+// Nothing was wrong: Gradle discarded the entry, fell back, and the publish would
+// have worked. `login` was worse — its one problem failed the build outright, so
+// the task that exists to store Portal credentials refused to run at all.
+//
+// Be clear about what declaring this does and does not buy, because the name
+// promises more than the API delivers. On Gradle 8.14.5 it stops problems in
+// these tasks from failing the build; it does not stop them being printed. The
+// entry is discarded either way. So `login` is genuinely fixed — it went from
+// BUILD FAILED to BUILD SUCCESSFUL — while `publishPlugins` prints exactly the
+// six problems it printed before, because it was already being let through: the
+// classloader-encoding error is unrecoverable, so Gradle was already abandoning
+// the entry and falling back rather than failing. Making publishPlugins quiet
+// needs --no-configuration-cache on that one command, which lives in the README,
+// not here.
+//
+// It still earns its place. publishPlugins is non-fatal today by accident, not
+// by design — it survives only because one of its six problems happens to be the
+// unrecoverable kind. Fix that one upstream and leave the Project serialization,
+// and publishPlugins starts failing outright exactly the way login just did, in
+// the middle of a release. This says in advance that we know, and that a failure
+// here is not the build's opinion worth acting on.
+//
+// Per task, not per build: disabling the cache globally would undo the agreement
+// with the root and take the tests' speedup with it. Everything else in the
+// publishing surface was checked and is clean — publishToMavenLocal, publish,
+// validatePlugins, and the vanniktech publishToMavenCentral/publishToMavenLocal
+// in the Android modules all store an entry without complaint. Remove these when
+// plugin-publish is configuration-cache compatible, and not before; they will
+// read as noise long before they stop being true.
+tasks.named("publishPlugins") {
+    notCompatibleWithConfigurationCache(
+        "com.gradle.plugin-publish 1.3.1 serializes Project, SourceSet and MavenPublication",
+    )
+}
+tasks.named("login") {
+    notCompatibleWithConfigurationCache(
+        "com.gradle.plugin-publish 1.3.1 serializes Project",
+    )
 }
 
 kotlin { jvmToolchain(17) }
