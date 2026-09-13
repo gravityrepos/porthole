@@ -56,6 +56,12 @@ dependencies {
     testImplementation(libs.okio)
     testImplementation(libs.mockwebserver)
     testImplementation(libs.ktor.client.core)
+
+    // Porthole.install/shutdown registers real Application callbacks,
+    // BroadcastReceivers and ConnectivityManager callbacks: whether they come
+    // back off is an Android framework question, not a Kotlin one, and
+    // nothing about it can be answered from a plain JVM test double.
+    testImplementation(libs.robolectric)
 }
 
 // The published API is about twenty declarations, and most of them are
