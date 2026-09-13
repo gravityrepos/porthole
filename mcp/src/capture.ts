@@ -80,20 +80,38 @@ export function parseFailOn(raw: string | undefined): CaptureOptions["failOn"] |
  * is `NaN`, and a `NaN` port silently never connects to anything.
  */
 export function parsePort(raw: string | undefined, option: string): number | ParseError {
-  if (raw === undefined) {
+  if (raw === undefined || raw === "") {
     return { message: `${option} needs a port number` };
   }
-  const value = Number(raw);
-  if (!Number.isFinite(value)) {
-    return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+  // A port is a run of decimal digits, nothing else: `Number()` also accepts
+  // " 8677 " (trims whitespace), "1e4" (scientific notation) and "0x2000"
+  // (hex) as finite integers, none of which anyone typed on purpose.
+  if (/^-?\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (value < 1024 || value > 65535) {
+      return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
+    }
+    return value;
   }
-  if (!Number.isInteger(value)) {
+  if (/^-?\d+\.\d+$/.test(raw)) {
     return { message: `${option} ${raw} must be a whole number` };
   }
-  if (value < 1024 || value > 65535) {
-    return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
+  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+}
+
+/**
+ * A required string option's value must actually be there — and must not be
+ * the next flag left dangling because this one's value was omitted.
+ * `--scenario` at the end of the command line and `--scenario --port 8677`
+ * were both silently accepted before: the first became `undefined` with no
+ * complaint, the second swallowed `--port` as the scenario name and left
+ * `8677` to be rejected later as a nonsense option, blaming the wrong flag.
+ */
+export function requiredValue(raw: string | undefined, option: string): string | ParseError {
+  if (raw === undefined || raw === "--" || raw.startsWith("--")) {
+    return { message: `${option} needs a value` };
   }
-  return value;
+  return raw;
 }
 
 /** Thrown by readTrace; the message is written straight to stderr, so it earns its keep alone. */
@@ -277,11 +295,32 @@ export function parseCapture(argv: string[]): CaptureOptions {
     if (arg === "--") {
       options.command = argv.slice(i + 1);
       break;
-    } else if (arg === "--scenario") options.scenario = argv[++i];
-    else if (arg === "--out") options.out = argv[++i];
-    else if (arg === "--driver") options.driver = argv[++i];
-    else if (arg === "--baseline") options.baseline = argv[++i];
-    else if (arg === "--with-events") options.withEvents = true;
+    } else if (arg === "--scenario") {
+      const value = requiredValue(argv[++i], "--scenario");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.scenario = value;
+    } else if (arg === "--out") {
+      // Validated here, before `capture()` is ever called: a bad --out used
+      // to fail only after the recording had already happened, so the run was
+      // lost *and* the operator got a raw stack trace instead of a sentence.
+      const value = requiredValue(argv[++i], "--out");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.out = value;
+    } else if (arg === "--driver") options.driver = argv[++i];
+    else if (arg === "--baseline") {
+      const value = requiredValue(argv[++i], "--baseline");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.baseline = value;
+    } else if (arg === "--with-events") options.withEvents = true;
     else if (arg === "--fail-on") {
       const value = parseFailOn(argv[++i]);
       if (typeof value !== "string") {

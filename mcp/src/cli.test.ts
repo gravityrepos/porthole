@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * cli.ts is the CLI entry point, not a library module: it has no
@@ -19,7 +19,7 @@ process.argv = ["node", "cli.js"];
 const exitDuringImport = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
 const stdoutDuringImport = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
-const { parsePort } = await import("./cli.js");
+const { parse, parsePort } = await import("./cli.js");
 
 process.argv = originalArgv;
 exitDuringImport.mockRestore();
@@ -78,5 +78,85 @@ describe("parsePort", () => {
   it("accepts both range boundaries", () => {
     expect(parsePort("1024", "--port")).toBe(1024);
     expect(parsePort("65535", "--port")).toBe(65535);
+  });
+
+  it("treats an empty value as missing, not as an out-of-range number", () => {
+    // "" used to reach Number("") === 0 and report "out of range"; an empty
+    // value is a missing value, not a number at all.
+    expect(parsePort("", "--port")).toEqual({
+      message: "--port needs a port number",
+    });
+  });
+
+  it("rejects whitespace padding that Number() would silently trim", () => {
+    expect(parsePort(" 8677 ", "--port")).toEqual({
+      message: '--port " 8677 " is not a number',
+    });
+  });
+
+  it("rejects scientific notation", () => {
+    expect(parsePort("1e4", "--port")).toEqual({
+      message: '--port "1e4" is not a number',
+    });
+  });
+
+  it("rejects hex", () => {
+    expect(parsePort("0x2000", "--port")).toEqual({
+      message: '--port "0x2000" is not a number',
+    });
+  });
+});
+
+/**
+ * `parsePort` being correct in isolation proves nothing about `parse()`, the
+ * loop that calls it: mutation testing found that deleting the
+ * `process.exit(2)` branches in that loop did not turn a single test red,
+ * because nothing exercised the loop itself, only the pure helper. These
+ * drive `parse()` the way `porthole ui` actually would, and check that a
+ * refusal from `parsePort` really does stop the program rather than being
+ * quietly absorbed.
+ */
+describe("parse() wiring", () => {
+  let exit: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    exit.mockRestore();
+    stderr.mockRestore();
+  });
+
+  function stderrText(): string {
+    return stderr.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("exits 2 and names --port when the value is missing", () => {
+    expect(() => parse(["--port"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--port needs a port number");
+  });
+
+  it("exits 2 for a --port value out of range", () => {
+    expect(() => parse(["--port", "70000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--port 70000 is out of range");
+  });
+
+  it("exits 2 and names --ui-port specifically, not --port", () => {
+    expect(() => parse(["--ui-port"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--ui-port needs a port number");
+  });
+
+  it("accepts a valid --port without exiting", () => {
+    const options = parse(["--port", "9000", "--no-forward", "--no-open"]);
+    expect(options.port).toBe(9000);
+    expect(exit).not.toHaveBeenCalled();
   });
 });

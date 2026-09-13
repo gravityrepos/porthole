@@ -11,6 +11,7 @@ import {
   parsePort,
   readTrace,
   report,
+  requiredValue,
   TraceReadError,
 } from "./capture.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
@@ -91,6 +92,53 @@ describe("parsePort", () => {
   it("names whichever option asked", () => {
     const result = parsePort(undefined, "--ui-port");
     expect(result).toEqual({ message: "--ui-port needs a port number" });
+  });
+
+  it("treats an empty value as missing, not as an out-of-range number", () => {
+    // "" used to reach Number("") === 0, reported as "out of range" rather
+    // than the missing value it actually is.
+    expect(parsePort("", "--port")).toEqual({ message: "--port needs a port number" });
+  });
+
+  it("rejects whitespace padding that Number() would silently trim", () => {
+    expect(parsePort(" 8677 ", "--port")).toEqual({
+      message: '--port " 8677 " is not a number',
+    });
+  });
+
+  it("rejects scientific notation", () => {
+    expect(parsePort("1e4", "--port")).toEqual({ message: '--port "1e4" is not a number' });
+  });
+
+  it("rejects hex", () => {
+    expect(parsePort("0x2000", "--port")).toEqual({ message: '--port "0x2000" is not a number' });
+  });
+});
+
+describe("requiredValue", () => {
+  it("passes through an ordinary value", () => {
+    expect(requiredValue("checkout", "--scenario")).toBe("checkout");
+  });
+
+  it("refuses a missing value", () => {
+    expect(requiredValue(undefined, "--scenario")).toEqual({
+      message: "--scenario needs a value",
+    });
+  });
+
+  it("refuses the next flag rather than swallowing it as the value", () => {
+    // `--scenario --port 8677` used to set scenario to the literal string
+    // "--port" and leave "8677" to be rejected later as an unknown option —
+    // blaming the wrong flag for the actual mistake.
+    expect(requiredValue("--port", "--scenario")).toEqual({
+      message: "--scenario needs a value",
+    });
+  });
+
+  it("refuses the command separator rather than swallowing it as the value", () => {
+    expect(requiredValue("--", "--scenario")).toEqual({
+      message: "--scenario needs a value",
+    });
   });
 });
 
@@ -265,5 +313,94 @@ describe("parseCapture failOn wiring", () => {
   it("defaults failOn to nothing", () => {
     const options = parseCapture(["--", "true"]);
     expect(options.failOn).toBe("nothing");
+  });
+});
+
+/**
+ * The pure validators above (parsePort, parseFailOn, requiredValue) being
+ * correct proves nothing about parseCapture's own argv loop, which is the
+ * thing that actually decides whether a refusal stops the program. Mutation
+ * testing found that gutting the --fail-on branch here — so a typo silently
+ * became `failOn: "nothing"` — did not turn a single existing test red,
+ * because every test that touched --fail-on called `parseFailOn` directly
+ * and never drove the loop that is supposed to act on its result. These call
+ * `parseCapture` itself and check that a refusal really exits and is never
+ * quietly absorbed into a default.
+ */
+describe("parseCapture wiring", () => {
+  let exit: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    exit.mockRestore();
+    stderr.mockRestore();
+  });
+
+  function stderrText(): string {
+    return stderr.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("exits 2 and lists the accepted values when --fail-on is a typo", () => {
+    expect(() => parseCapture(["--fail-on", "regresion", "--", "true"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--fail-on must be one of: nothing, error, regression");
+  });
+
+  it("exits 2 when --port has no value", () => {
+    expect(() => parseCapture(["--port"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--port needs a port number");
+  });
+
+  it("exits 2 when --out has no value, before any capture could start", () => {
+    expect(() => parseCapture(["--out"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--out needs a value");
+  });
+
+  it("exits 2 when --out is followed by another flag instead of a filename", () => {
+    expect(() => parseCapture(["--out", "--fail-on", "error"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--out needs a value");
+  });
+
+  it("exits 2 when --baseline has no value", () => {
+    expect(() => parseCapture(["--baseline"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--baseline needs a value");
+  });
+
+  it("exits 2 when --scenario has no value", () => {
+    expect(() => parseCapture(["--scenario"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--scenario needs a value");
+  });
+
+  it("exits 2 when --scenario swallows the next flag instead of taking a value", () => {
+    expect(() => parseCapture(["--scenario", "--baseline", "b.json"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--scenario needs a value");
+  });
+
+  it("accepts a fully valid argv without exiting", () => {
+    const options = parseCapture([
+      "--scenario",
+      "checkout",
+      "--out",
+      "trace.json",
+      "--fail-on",
+      "error",
+      "--",
+      "true",
+    ]);
+    expect(options).toMatchObject({ scenario: "checkout", out: "trace.json", failOn: "error" });
+    expect(exit).not.toHaveBeenCalled();
   });
 });

@@ -37,20 +37,23 @@ export interface ParseError {
  * a fraction is a typo, not a port.
  */
 export function parsePort(raw: string | undefined, option: string): number | ParseError {
-  if (raw === undefined) {
+  if (raw === undefined || raw === "") {
     return { message: `${option} needs a port number` };
   }
-  const value = Number(raw);
-  if (!Number.isFinite(value)) {
-    return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+  // A port is a run of decimal digits, nothing else: `Number()` also accepts
+  // " 8677 " (trims whitespace), "1e4" (scientific notation) and "0x2000"
+  // (hex) as finite integers, none of which anyone typed on purpose.
+  if (/^-?\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (value < 1024 || value > 65535) {
+      return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
+    }
+    return value;
   }
-  if (!Number.isInteger(value)) {
+  if (/^-?\d+\.\d+$/.test(raw)) {
     return { message: `${option} ${raw} must be a whole number` };
   }
-  if (value < 1024 || value > 65535) {
-    return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
-  }
-  return value;
+  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
 }
 
 const USAGE = `
@@ -76,7 +79,13 @@ Needs a device or emulator with the debug build running: the porthole lives insi
 the app process, and adb forward is what makes its socket reachable from here.
 `;
 
-function parse(argv: string[]): Options {
+/**
+ * Exported so a test can drive the argv loop itself, not just the pure
+ * validators it calls. A test that only calls `parsePort` directly cannot
+ * tell the difference between this loop checking its result and ignoring it —
+ * deleting the `process.exit(2)` branches below left every prior test green.
+ */
+export function parse(argv: string[]): Options {
   const options: Options = {
     port: 8677,
     uiPort: 8678,
