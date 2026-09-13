@@ -146,6 +146,68 @@ describe("renderReport", () => {
     expect(text).not.toMatch(/quiet:.*http/);
   });
 
+  it("does not call the http lane quiet when calls were still open", () => {
+    // A hang is the loudest thing a capture can hold. Keying the lane on
+    // http.failed alone made a run with three wedged calls print "quiet: http"
+    // directly beneath the warning that named them.
+    const text = renderReport(trace({ metrics: { "http.failed": 0, "http.stillOpen": 3 } }));
+    expect(text).not.toMatch(/quiet:.*http/);
+  });
+
+  it("does not call the db lane quiet when queries were still open", () => {
+    const text = renderReport(trace({ metrics: { "db.onMainThread": 0, "db.stillOpen": 1 } }));
+    expect(text).not.toMatch(/quiet:.*db/);
+  });
+
+  it("does not call the work lane quiet when jobs were still open", () => {
+    const text = renderReport(
+      trace({ metrics: { "work.retries": 0, "work.failures": 0, "work.stillOpen": 2 } }),
+    );
+    expect(text).not.toMatch(/quiet:.*work/);
+  });
+
+  it("still calls a lane quiet when nothing in it was open", () => {
+    const text = renderReport(
+      trace({ metrics: { "http.failed": 0, "http.stillOpen": 0, "db.stillOpen": 4 } }),
+    );
+    expect(text).toMatch(/quiet:.*http/);
+    expect(text).not.toMatch(/quiet:.*db/);
+  });
+
+  it("says how many of the counted calls and queries never finished", () => {
+    // The counts include spans that never ended, so the bare number reads as
+    // completions to anyone who does not know that. The qualifier travels with
+    // it, the same way atLeastMs does.
+    const text = renderReport(
+      trace({
+        metrics: {
+          "http.calls": 12,
+          "http.stillOpen": 3,
+          "db.queries": 40,
+          "db.stillOpen": 1,
+          "recompose.total": 0,
+        },
+      }),
+    );
+    expect(text).toContain("12 calls (3 still open)");
+    expect(text).toContain("40 queries (1 still open)");
+  });
+
+  it("leaves the counts unqualified when everything finished", () => {
+    const text = renderReport(
+      trace({
+        metrics: {
+          "http.calls": 12,
+          "http.stillOpen": 0,
+          "db.queries": 40,
+          "recompose.total": 0,
+        },
+      }),
+    );
+    expect(text).toContain("12 calls · 40 queries");
+    expect(text).not.toContain("still open");
+  });
+
   it("says so plainly when there is nothing to report", () => {
     expect(renderReport(trace())).toContain("nothing worth reporting");
   });
