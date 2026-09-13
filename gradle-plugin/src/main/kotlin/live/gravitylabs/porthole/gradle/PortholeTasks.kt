@@ -12,7 +12,6 @@ import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.Optional
-import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 import java.io.ByteArrayOutputStream
@@ -68,9 +67,8 @@ abstract class PortholeConnectTask : DefaultTask() {
      * consumes this file — the MCP server reads it, out of process, long after
      * Gradle has exited — so it loses nothing by not being wired as an
      * artifact, and `clean` still takes it with the build directory it sits in.
-     * [PortholeDisconnectTask] keeps its `@OutputFile` and stays correct for a
-     * different reason: it deletes the file it declares, so it is never up to
-     * date either.
+     * [PortholeDisconnectTask] says the same of the same file, for the same
+     * reason and in the same words.
      */
     @get:Internal
     abstract val connectionFile: RegularFileProperty
@@ -115,7 +113,16 @@ abstract class PortholeConnectTask : DefaultTask() {
     private fun quote(value: String?): String = if (value == null) "null" else "\"$value\""
 }
 
-/** Removes the forward. Worth running before switching devices. */
+/**
+ * `adb forward --remove tcp:PORT`, then deletes the connection file.
+ *
+ * Removes the forward. Worth running before switching devices, which is also
+ * the case it has to get right: the person running it is about to attach
+ * somewhere else and is relying on this to have let go of where they were.
+ *
+ * This task never reports itself up to date, and that is deliberate — see
+ * [connectionFile] for why declaring no outputs is how that is said.
+ */
 abstract class PortholeDisconnectTask : DefaultTask() {
 
     @get:Inject
@@ -131,18 +138,62 @@ abstract class PortholeDisconnectTask : DefaultTask() {
     @get:Optional
     abstract val serial: Property<String>
 
-    @get:OutputFile
+    /**
+     * The connection file this task deletes. Not an `@OutputFile`.
+     *
+     * The same reasoning as [PortholeConnectTask.connectionFile], arrived at
+     * from the other side. The file is a record of a side effect and the side
+     * effect is the forward, which lives in the adb server; deleting the record
+     * is not what makes the forward go away, and nothing about the file says
+     * whether one is still there.
+     *
+     * Declaring it here looked harmless — the task deletes what it declares, so
+     * the output is absent afterwards and there is nothing stale to reuse — but
+     * absent is precisely what Gradle then finds on the next run as well.
+     * Inputs unchanged, output missing both times: up to date, and a second
+     * `portholeDisconnect` reported success without running adb at all. That
+     * left the workstation's port still wired to a device the console had just
+     * said was let go, and the disagreement is invisible from here, because the
+     * connection file is gone either way and only adb's forward list knows.
+     *
+     * A task that declares no outputs is never up to date, which is the
+     * truthful description of this one too: only adb can say whether the
+     * forward is gone, so the only safe answer is to ask it again. `clean`
+     * still takes the file with the build directory it sits in.
+     */
+    @get:Internal
     abstract val connectionFile: RegularFileProperty
 
     @TaskAction
     fun disconnect() {
         val port = port.get()
-        exec.exec {
+        val output = ByteArrayOutputStream()
+        val result = exec.exec {
             commandLine(adbArgs(adbExecutable.get(), serial.orNull, "forward", "--remove", "tcp:$port"))
+            standardOutput = output
+            errorOutput = output
             isIgnoreExitValue = true
         }
+
+        // Removing a forward that is not there is not a failure. Some
+        // platform-tools versions exit non-zero on it, but the request was
+        // "make sure nothing is forwarded on this port" and that is the state
+        // either way — failing the build would be a disconnect complaining that
+        // there was nothing to disconnect, and would punish exactly the careful
+        // habit of running this before switching devices. adb's own words are
+        // kept at info level so a genuine failure, say an adb that cannot reach
+        // its server, is still recoverable with `--info`.
+        val text = output.toString().trim()
+        if (result.exitValue != 0 && text.isNotEmpty()) {
+            logger.info("[porthole] adb forward --remove exited ${result.exitValue}: $text")
+        }
+
         connectionFile.get().asFile.delete()
-        logger.lifecycle("[porthole] removed the forward on tcp:$port")
+
+        // Not "removed the forward": after this runs there is no forward on the
+        // port, and whether there was one a moment ago is a thing adb does not
+        // reliably say.
+        logger.lifecycle("[porthole] no forward left on tcp:$port")
     }
 }
 

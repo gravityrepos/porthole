@@ -2,14 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.gradle
 
-import org.gradle.testkit.runner.GradleRunner
 import org.gradle.testkit.runner.TaskOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
-import java.io.File
 
 /**
  * `portholeConnect` run twice, against an adb that is a script.
@@ -21,93 +17,16 @@ import java.io.File
  * MCP tool then reports not-connected and tells the user to run the command
  * that just lied to them.
  *
- * The stub is the whole point. Asserting the outcome alone would pass against a
- * task that runs and does nothing; what has to be true is that adb was invoked
- * a second time, so the stub records every invocation and the test counts them.
- * A real adb is never involved — this must give the same answer on a machine
- * with no SDK and no device as on one with both.
- *
- * The task is registered directly rather than through the plugin, because the
- * plugin only registers it on an Android module and that needs AGP, an SDK and
- * the network. [PortholeAgpCompatibilityTest] covers the wiring; this covers the
- * task's own behaviour.
+ * The harness — the stub adb, why it is a stub, and why the task is registered
+ * by hand — is [StubAdbFunctionalTest].
  */
-class PortholeConnectTaskFunctionalTest {
+class PortholeConnectTaskFunctionalTest : StubAdbFunctionalTest() {
 
-    @get:Rule
-    val projectDir = TemporaryFolder()
-
-    private val gradleVersion: String? =
-        System.getProperty("porthole.gradleVersion")?.takeIf(String::isNotBlank)
-
-    private fun build(vararg arguments: String) =
-        GradleRunner.create()
-            .withProjectDir(projectDir.root)
-            .withPluginClasspath()
-            .withArguments(*arguments, "--stacktrace")
-            .apply { gradleVersion?.let(::withGradleVersion) }
-            .build()
-
-    private fun write(path: String, text: String): File {
-        val file = File(projectDir.root, path)
-        file.parentFile.mkdirs()
-        file.writeText(text)
-        return file
-    }
-
-    private fun isWindows(): Boolean =
-        System.getProperty("os.name").orEmpty().lowercase().contains("win")
-
-    /**
-     * An adb that appends its arguments to [log] and succeeds.
-     *
-     * A batch file on Windows and a shell script elsewhere, because that is
-     * what the two platforms can actually execute; the recorded line is the
-     * same either way.
-     */
-    private fun stubAdb(log: File): File {
-        val path = log.absolutePath.replace('\\', '/')
-        return if (isWindows()) {
-            write("stub/adb.bat", "@echo off\r\necho %* >> \"$path\"\r\nexit /b 0\r\n")
-        } else {
-            val script = write("stub/adb", "#!/bin/sh\necho \"$@\" >> \"$path\"\nexit 0\n")
-            script.setExecutable(true)
-            script
-        }
-    }
-
-    /** Lines the stub recorded, ignoring the blank ones `echo` can leave. */
-    private fun invocations(log: File): List<String> =
-        if (log.isFile) log.readLines().map(String::trim).filter(String::isNotEmpty) else emptyList()
-
-    private fun scratchProject(adb: File) {
-        write("settings.gradle.kts", "rootProject.name = \"scratch\"\n")
-        write(
-            "build.gradle.kts",
-            """
-            import live.gravitylabs.porthole.gradle.PortholeConnectTask
-
-            // Applied so that TestKit's injected classpath reaches the build
-            // script and the task type below resolves. On a project with no
-            // Android plugin it registers nothing and only warns.
-            plugins { id("live.gravitylabs.porthole") }
-
-            tasks.register<PortholeConnectTask>("portholeConnect") {
-                adbExecutable.set(${quoted(adb.absolutePath)})
-                port.set(8677)
-                connectionFile.set(layout.buildDirectory.file("porthole/connection.json"))
-            }
-            """.trimIndent(),
-        )
-    }
-
-    /** A Kotlin string literal for a Windows path, backslashes and all. */
-    private fun quoted(path: String): String = "\"" + path.replace("\\", "\\\\") + "\""
+    private fun scratchProject() = scratchProject(connectTask(stubAdb()))
 
     @Test
     fun `runs adb again on the second invocation instead of reporting up to date`() {
-        val log = File(projectDir.root, "adb.log")
-        scratchProject(stubAdb(log))
+        scratchProject()
 
         val first = build("portholeConnect")
         assertEquals(TaskOutcome.SUCCESS, first.task(":portholeConnect")?.outcome)
@@ -120,7 +39,7 @@ class PortholeConnectTaskFunctionalTest {
             second.task(":portholeConnect")?.outcome,
         )
 
-        val recorded = invocations(log)
+        val recorded = invocations()
         assertEquals("expected two adb invocations, got $recorded", 2, recorded.size)
         for (line in recorded) {
             assertTrue("expected a forward, got: $line", line.contains("forward tcp:8677 tcp:8677"))
@@ -131,24 +50,21 @@ class PortholeConnectTaskFunctionalTest {
     fun `runs adb again even when the connection file was left untouched`() {
         // The narrower statement of the same thing: nothing is deleted between
         // the runs, the inputs do not move, and adb is still asked twice.
-        val log = File(projectDir.root, "adb.log")
-        scratchProject(stubAdb(log))
+        scratchProject()
 
         build("portholeConnect")
-        val connection = File(projectDir.root, "build/porthole/connection.json")
-        assertTrue("expected a connection file at ${connection.absolutePath}", connection.isFile)
-        val written = connection.readText()
+        assertTrue("expected a connection file at ${connectionFile.absolutePath}", connectionFile.isFile)
+        val written = connectionFile.readText()
 
         build("portholeConnect")
 
-        assertEquals(2, invocations(log).size)
-        assertEquals("the connection file should be rewritten identically", written, connection.readText())
+        assertEquals(2, invocations().size)
+        assertEquals("the connection file should be rewritten identically", written, connectionFile.readText())
     }
 
     @Test
     fun `stays compatible with the configuration cache`() {
-        val log = File(projectDir.root, "adb.log")
-        scratchProject(stubAdb(log))
+        scratchProject()
 
         val first = build("portholeConnect", "--configuration-cache")
         assertTrue(
@@ -165,6 +81,6 @@ class PortholeConnectTaskFunctionalTest {
             second.output.contains("Configuration cache entry reused"),
         )
         assertEquals(TaskOutcome.SUCCESS, second.task(":portholeConnect")?.outcome)
-        assertEquals(2, invocations(log).size)
+        assertEquals(2, invocations().size)
     }
 }
