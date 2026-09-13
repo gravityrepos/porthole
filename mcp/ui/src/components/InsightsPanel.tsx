@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * What is wrong, from both halves, in one list.
@@ -35,46 +35,145 @@ interface Payload {
   notes: string[];
 }
 
+/** How long a burst of `schedule` calls waits for the view to settle. */
+const DEBOUNCE_MS = 300;
+
+interface FindingsCallbacks {
+  onStart: () => void;
+  onSuccess: (payload: Payload) => void;
+  onError: (message: string) => void;
+}
+
+/**
+ * Turns a stream of `schedule` calls -- one per animation frame while the
+ * user pans the timeline, or once a tick while `following` is on -- into at
+ * most one outstanding `/api/findings` request.
+ *
+ * Three separate guards, because any one alone leaves a gap:
+ *  - debounced: a burst of `schedule` calls before `DEBOUNCE_MS` elapses
+ *    collapses to a single fetch, fired once the view stops moving;
+ *  - cancelled: a fetch still in flight when a newer one starts is aborted,
+ *    so the server is not left computing an answer nobody wants any more;
+ *  - ordered: an aborted fetch's promise can still settle (a test's fake
+ *    fetch, or a runtime that does not wire the signal all the way through),
+ *    so a request id is checked again on the way out -- only the most recent
+ *    `run` is allowed to report its result.
+ *
+ * Kept free of React so it can be constructed once per component instance
+ * and unit-tested directly, the way the rest of this codebase tests plain
+ * classes rather than rendering components.
+ */
+export class FindingsLoader {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private controller: AbortController | null = null;
+  private requestId = 0;
+  private readonly debounceMs: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(
+    private readonly callbacks: FindingsCallbacks,
+    options?: { debounceMs?: number; fetchImpl?: typeof fetch },
+  ) {
+    this.debounceMs = options?.debounceMs ?? DEBOUNCE_MS;
+    this.fetchImpl = options?.fetchImpl ?? fetch;
+  }
+
+  /** Queue a request for this window; a call already waiting is replaced. */
+  schedule(from?: number, to?: number): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = setTimeout(() => void this.run(from, to), this.debounceMs);
+  }
+
+  /** Run immediately, for the manual refresh button. */
+  runNow(from?: number, to?: number): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    void this.run(from, to);
+  }
+
+  /** Stop anything pending; the component is going away. */
+  dispose(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.controller?.abort();
+  }
+
+  private async run(from?: number, to?: number): Promise<void> {
+    this.controller?.abort();
+    const controller = new AbortController();
+    this.controller = controller;
+    const requestId = ++this.requestId;
+
+    this.callbacks.onStart();
+    try {
+      const params = new URLSearchParams();
+      if (from !== undefined) params.set("from", String(from));
+      if (to !== undefined) params.set("to", String(to));
+      const response = await this.fetchImpl(`/api/findings?${params}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`the server answered ${response.status}`);
+      const body = (await response.json()) as Payload;
+      if (this.requestId !== requestId) return; // superseded while we waited
+      this.callbacks.onSuccess(body);
+    } catch (cause) {
+      if (this.requestId !== requestId) return;
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      this.callbacks.onError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+}
+
 const SEVERITY: Record<Finding["severity"], { label: string; className: string }> = {
   error: { label: "ERROR", className: "text-[var(--color-danger)]" },
   warning: { label: "WARN", className: "text-[var(--color-recompose)]" },
   note: { label: "NOTE", className: "text-[var(--color-muted)]" },
 };
 
-export function InsightsPanel({
-  from,
-  to,
-  tracePath,
-}: {
-  from?: number;
-  to?: number;
-  tracePath?: string;
-}) {
+export function InsightsPanel({ from, to }: { from?: number; to?: number }) {
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (from !== undefined) params.set("from", String(Math.round(from)));
-      if (to !== undefined) params.set("to", String(Math.round(to)));
-      if (tracePath) params.set("trace", tracePath);
-      const response = await fetch(`/api/findings?${params}`);
-      if (!response.ok) throw new Error(`the server answered ${response.status}`);
-      setPayload((await response.json()) as Payload);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [from, to, tracePath]);
+  // One loader per component instance, not per render -- it carries its own
+  // timer and AbortController across renders. A ref, not state, since
+  // creating it must never itself trigger a render.
+  const loaderRef = useRef<FindingsLoader | null>(null);
+  if (loaderRef.current === null) {
+    loaderRef.current = new FindingsLoader({
+      onStart: () => {
+        setLoading(true);
+        setError(null);
+      },
+      onSuccess: (body) => {
+        setPayload(body);
+        setLoading(false);
+      },
+      onError: (message) => {
+        setError(message);
+        setLoading(false);
+      },
+    });
+  }
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    return () => loaderRef.current?.dispose();
+  }, []);
+
+  // `from`/`to` move by fractions of a millisecond on every animation frame
+  // while the timeline is being panned or is following live traffic.
+  // Rounding first means those sub-pixel changes never reach the effect
+  // below at all, rather than reaching it and being debounced away --
+  // fewer timers started and cancelled for the same end result.
+  const roundedFrom = from === undefined ? undefined : Math.round(from);
+  const roundedTo = to === undefined ? undefined : Math.round(to);
+
+  useEffect(() => {
+    loaderRef.current?.schedule(roundedFrom, roundedTo);
+  }, [roundedFrom, roundedTo]);
+
+  const refresh = () => loaderRef.current?.runNow(roundedFrom, roundedTo);
 
   const findings = payload?.findings ?? [];
   const fromTrace = findings.filter((f) => f.source === "trace").length;
@@ -87,7 +186,7 @@ export function InsightsPanel({
         </h2>
         <button
           type="button"
-          onClick={() => void load()}
+          onClick={refresh}
           className="font-mono text-[10px] text-[var(--color-muted)] hover:text-[var(--color-fg)]"
         >
           {loading ? "reading…" : "refresh"}
