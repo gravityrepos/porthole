@@ -32,6 +32,21 @@ A trace leaves your control only when you choose to send it — pasting a report
 into a ticket, or handing a window to an assistant with **ask agent**. That is
 the moment the redaction below matters.
 
+`capture_system_trace` is a different kind of artifact from everything else
+here, and worth calling out on its own. It is a Perfetto capture of the whole
+device for the recorded window, not just this app — process names, thread
+names and scheduling for whatever else was running are in it, because
+Perfetto records at the kernel level and none of that is Porthole's to
+filter. What Porthole does control is its own contribution: the spans it
+writes into that same trace are named by shape (`db SELECT cart_items`,
+`http GET api.example.com/checkout`), never by argument or full URL, so
+nothing the redaction below covers reaches the trace through them. The file
+itself is written to disk under `.porthole/traces/`, which makes it a
+persistent artifact rather than something held only in memory until asked
+for — treat it like a screenshot: it stays on your machine, with the rest of
+the device's activity in it, until you choose to open it or hand it to
+someone.
+
 ## What is redacted, before anything leaves the process
 
 - **Query-string values** are replaced with `*`, keeping the parameter names.

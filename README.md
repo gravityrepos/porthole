@@ -30,6 +30,7 @@ them they cover:
 
 | tool | answers |
 | --- | --- |
+| `findings` | start here: what is wrong right now, ranked, each with the tool that shows its evidence |
 | `recompositions` | which composables recomposed, how often, and which state keys were written just before |
 | `semantics_tree` | the semantics tree with an id that stays stable across captures |
 | `nav_state` | back stack, arguments on each entry, and the deep link that got you here |
@@ -39,6 +40,10 @@ them they cover:
 | `blocking` | what held the main thread, with the stack it was stuck in |
 | `logs` | the app's own logcat output, stack traces intact, without touching adb |
 | `timeline` | the raw event stream, for ordering things relative to each other |
+| `what_was_happening` | the narrative for one instant: screen, in-flight work, main thread, state just written |
+| `system_context` | thermal state, CPU governor, busiest processes, memory pressure — the half Porthole cannot see |
+| `capture_system_trace` | records a Perfetto trace, annotated with the app's own spans |
+| `ask_system_trace` | puts a fixed set of questions to a captured trace, to rule causes in or out |
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device |
 
@@ -475,6 +480,64 @@ Start with recompositions {"from": 2057010, "to": 2075089} and logs
 Paste that at your assistant. `recompositions`, `logs` and `timeline` all take
 absolute `from`/`to`, so it asks about the moment you actually saw instead of
 guessing a lookback and hoping the windows overlap.
+
+## System traces
+
+Porthole watches one process. Most of what goes wrong is inside it, but not
+all of it — a stall whose stack bottoms out in a native read, or jank blamed on
+`swapBuffers`, can be the OS's doing rather than the app's. Answering that
+needs the view that watches everything, which is what a Perfetto system trace
+is and Porthole is not.
+
+`system_context` is the live half of that: thermal state, CPU governor and
+clock, the busiest processes, memory pressure, read straight off the device.
+It draws no conclusions — a throttled device is a fact, that it explains your
+regression is a guess this tool leaves to you.
+
+`capture_system_trace` records a trace: `atrace` categories aimed at jank, for
+the duration you give it, pulled off the device when it is done. It does not
+return the trace itself — a ten-second capture is tens of megabytes of
+protobuf, and the useful form is a file you open, not one you read — so it
+lands under `.porthole/traces/`, relative to wherever the MCP server's process
+is running, and the result is a path plus a sentence saying whether it is
+worth opening. The reason to take one here rather than by hand is that the
+runtime's own atrace sections are already inside it: navigations, HTTP calls,
+queries and stalls, so the capture arrives annotated with what the app was
+doing and not only what the kernel was doing. The result says how many of
+those labels it found, which is how you know the annotation actually
+happened.
+
+`ask_system_trace` turns that file into an answer without anyone opening a
+trace viewer. It runs a fixed set of five questions — jank, thread states,
+binder, render, slices — scoped to one window and one process, using
+parameters Porthole already holds: the window off a finding, the package off
+the handshake with the device. Deliberately not a SQL interface: an agent
+handed a hundred tables and no guidance assembles an answer from whichever
+guess came back non-empty, which is the failure this surface exists to avoid.
+What it is for is ruling causes out — CPU starvation, blocked I/O, the runtime
+compiling its own bytecode in the background — and answering yes to one of
+those means the app's own work was never the whole story.
+
+Both need `trace_processor_shell`, Perfetto's own query engine and a large
+platform-specific binary that is not bundled with Porthole: it would multiply
+the size of a Gradle plugin and an npm package for a tool most sessions never
+reach for. `./gradlew portholeTraceProcessor` fetches it instead — a pinned
+release, SHA-256 verified per platform, cached under
+`~/.porthole/trace-processor/<version>/` — which is the same bargain the
+Gradle wrapper makes with `distributionSha256Sum`. The MCP tool finds it there
+without further configuration; an existing copy works too, via
+`PORTHOLE_TRACE_PROCESSOR` or a `traceProcessor` argument. Neither tool needs
+it to exist before you start — the trace is already readable by hand at
+ui.perfetto.dev, and `ask_system_trace` says so, and where to get one, when it
+cannot find a binary.
+
+One clock detail worth knowing before a window looks wrong. Porthole stamps
+everything in `SystemClock.uptimeMillis()`, which stops during deep sleep;
+Perfetto stamps in `CLOCK_BOOTTIME`, which does not. The two drift apart by
+however long the device has slept, so a window handed to `ask_system_trace`
+is converted using the sleep reading in force at the time before it means
+anything to the trace. `what_was_happening` takes a raw `bootMs` reading off a
+Perfetto trace directly, for the same reason.
 
 ## What the numbers actually mean
 
@@ -1067,18 +1130,21 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-280 tests: 159 on the JVM, 121 across the MCP server and the timeline. The
+341 tests: 129 on the JVM, 212 across the MCP server and the timeline. The
 runtime's arithmetic is covered where it has been wrong before — a long freeze
 counted in refreshes rather than in relaxed deadlines, and a stalled thread's
 stack ordered so the app's own frames lead. A parity test compares the public
 surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
-integration. Two of the 159 are the AGP compatibility pair, which skips unless
+integration. Two of the 129 are the AGP compatibility pair, which skips unless
 given a version to check, since it needs an SDK and the network.
 
 **Verified on a device:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
-the database inspector, restart, and automatic view model naming.
+the database inspector, restart, automatic view model naming, a captured
+system trace holding the runtime's own atrace spans, and the fixed
+system-trace questions interpreted from trace_processor's real output
+against it.
 
 **Not verified on a device:** `PortholeBackStack` for Navigation 3. The sample
 is on Navigation 2, and adding an alpha dependency to prove a six-line wrapper
