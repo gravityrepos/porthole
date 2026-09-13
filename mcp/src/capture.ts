@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { renderComparison, renderReport } from "./report.js";
-import { buildTrace, type Trace } from "./trace.js";
+import { buildTrace, TRACE_VERSION, type Trace } from "./trace.js";
 
 /**
  * Recording a run with nobody watching.
@@ -50,6 +50,114 @@ porthole capture — record a run and write a trace
 The command runs to completion with the porthole recording. Its exit code is
 passed through unless --fail-on fires first.
 `;
+
+/** A parse failure that names what was wrong, for the caller to print and exit on. */
+export interface ParseError {
+  message: string;
+}
+
+const FAIL_ON_VALUES = ["nothing", "error", "regression"] as const;
+
+/**
+ * `--fail-on` used to be `argv[++i] as CaptureOptions["failOn"]` — a cast, not
+ * a check. A typo like `regresion` compiled, ran, and turned the CI gate off
+ * without saying a word: the worst failure mode here is a green build. This
+ * validates against the real union and names the accepted values so the typo
+ * is caught at the command line instead of at the postmortem.
+ */
+export function parseFailOn(raw: string | undefined): CaptureOptions["failOn"] | ParseError {
+  if (raw !== undefined && (FAIL_ON_VALUES as readonly string[]).includes(raw)) {
+    return raw as CaptureOptions["failOn"];
+  }
+  return {
+    message: `--fail-on must be one of: ${FAIL_ON_VALUES.join(", ")} (got ${JSON.stringify(raw ?? null)})`,
+  };
+}
+
+/**
+ * A port a capture can plausibly reach. Missing, non-numeric, fractional and
+ * out-of-range values were all previously accepted as-is — `Number(undefined)`
+ * is `NaN`, and a `NaN` port silently never connects to anything.
+ */
+export function parsePort(raw: string | undefined, option: string): number | ParseError {
+  if (raw === undefined || raw === "") {
+    return { message: `${option} needs a port number` };
+  }
+  // A port is a run of decimal digits, nothing else: `Number()` also accepts
+  // " 8677 " (trims whitespace), "1e4" (scientific notation) and "0x2000"
+  // (hex) as finite integers, none of which anyone typed on purpose.
+  if (/^-?\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (value < 1024 || value > 65535) {
+      return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
+    }
+    return value;
+  }
+  if (/^-?\d+\.\d+$/.test(raw)) {
+    return { message: `${option} ${raw} must be a whole number` };
+  }
+  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+}
+
+/**
+ * A required string option's value must actually be there — and must not be
+ * the next flag left dangling because this one's value was omitted.
+ * `--scenario` at the end of the command line and `--scenario --port 8677`
+ * were both silently accepted before: the first became `undefined` with no
+ * complaint, the second swallowed `--port` as the scenario name and left
+ * `8677` to be rejected later as a nonsense option, blaming the wrong flag.
+ */
+export function requiredValue(raw: string | undefined, option: string): string | ParseError {
+  if (raw === undefined || raw === "--" || raw.startsWith("--")) {
+    return { message: `${option} needs a value` };
+  }
+  return raw;
+}
+
+/** Thrown by readTrace; the message is written straight to stderr, so it earns its keep alone. */
+export class TraceReadError extends Error {}
+
+/**
+ * Reads and validates a trace file, refusing anything that is not one, rather
+ * than letting a missing file, truncated JSON, or a trace from a version this
+ * build does not understand fall through as an unhandled rejection and a raw
+ * stack trace — which is what a CI operator would have gotten instead of the
+ * one sentence they need.
+ */
+export async function readTrace(file: string): Promise<Trace> {
+  let content: string;
+  try {
+    content = await readFile(file, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new TraceReadError(`no such file: ${file}`);
+    throw new TraceReadError(`could not read ${file}: ${(error as Error).message}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new TraceReadError(`${file} is not valid JSON`);
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>).porthole !== "number"
+  ) {
+    throw new TraceReadError(`${file} is not a porthole trace (missing "porthole" version field)`);
+  }
+
+  const version = (parsed as Trace).porthole;
+  if (version !== TRACE_VERSION) {
+    throw new TraceReadError(
+      `${file} is trace version ${version}, which this build (version ${TRACE_VERSION}) does not understand`,
+    );
+  }
+
+  return parsed as Trace;
+}
 
 /** Waits for the device to answer, so a capture does not silently record nothing. */
 async function awaitConnection(device: DeviceClient, timeoutMs = 10_000): Promise<boolean> {
@@ -103,10 +211,19 @@ export async function capture(options: CaptureOptions): Promise<number> {
 
   let regressed = false;
   if (options.baseline) {
-    const before = JSON.parse(await readFile(options.baseline, "utf8")) as Trace;
-    const comparison = renderComparison(before, trace);
-    process.stderr.write(`\n${comparison.text}`);
-    regressed = comparison.regressed;
+    try {
+      const before = await readTrace(options.baseline);
+      const comparison = renderComparison(before, trace);
+      process.stderr.write(`\n${comparison.text}`);
+      regressed = comparison.regressed;
+    } catch (error) {
+      // Same hazard as `porthole compare` reading its two files, just reached
+      // from a capture that asked to be checked against a baseline inline. A
+      // baseline we could not read is not evidence either way, so it is
+      // reported and the comparison is skipped rather than crashing the run
+      // that was otherwise recorded successfully.
+      process.stderr.write(`${(error as Error).message}\n`);
+    }
   }
 
   const hasError = trace.findings.some((finding) => finding.severity === "error");
@@ -133,14 +250,27 @@ function run(command: string[]): Promise<number> {
 }
 
 export async function report(file: string): Promise<number> {
-  const trace = JSON.parse(await readFile(file, "utf8")) as Trace;
+  let trace: Trace;
+  try {
+    trace = await readTrace(file);
+  } catch (error) {
+    process.stderr.write(`${(error as Error).message}\n`);
+    return 2;
+  }
   process.stdout.write(renderReport(trace));
   return 0;
 }
 
 export async function compare(baseline: string, file: string): Promise<number> {
-  const before = JSON.parse(await readFile(baseline, "utf8")) as Trace;
-  const after = JSON.parse(await readFile(file, "utf8")) as Trace;
+  let before: Trace;
+  let after: Trace;
+  try {
+    before = await readTrace(baseline);
+    after = await readTrace(file);
+  } catch (error) {
+    process.stderr.write(`${(error as Error).message}\n`);
+    return 2;
+  }
   const comparison = renderComparison(before, after);
   process.stdout.write(comparison.text);
   // A refusal is not a pass. Exiting 0 would turn a gate that compared nothing
@@ -165,14 +295,47 @@ export function parseCapture(argv: string[]): CaptureOptions {
     if (arg === "--") {
       options.command = argv.slice(i + 1);
       break;
-    } else if (arg === "--scenario") options.scenario = argv[++i];
-    else if (arg === "--out") options.out = argv[++i];
-    else if (arg === "--driver") options.driver = argv[++i];
-    else if (arg === "--baseline") options.baseline = argv[++i];
-    else if (arg === "--with-events") options.withEvents = true;
-    else if (arg === "--fail-on") options.failOn = argv[++i] as CaptureOptions["failOn"];
-    else if (arg === "--port") options.port = Number(argv[++i]);
-    else if (arg === "--serial") options.serial = argv[++i];
+    } else if (arg === "--scenario") {
+      const value = requiredValue(argv[++i], "--scenario");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.scenario = value;
+    } else if (arg === "--out") {
+      // Validated here, before `capture()` is ever called: a bad --out used
+      // to fail only after the recording had already happened, so the run was
+      // lost *and* the operator got a raw stack trace instead of a sentence.
+      const value = requiredValue(argv[++i], "--out");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.out = value;
+    } else if (arg === "--driver") options.driver = argv[++i];
+    else if (arg === "--baseline") {
+      const value = requiredValue(argv[++i], "--baseline");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.baseline = value;
+    } else if (arg === "--with-events") options.withEvents = true;
+    else if (arg === "--fail-on") {
+      const value = parseFailOn(argv[++i]);
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.failOn = value;
+    } else if (arg === "--port") {
+      const value = parsePort(argv[++i], "--port");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.port = value;
+    } else if (arg === "--serial") options.serial = argv[++i];
     else if (arg === "--no-forward") options.forward = false;
     else if (arg === "--help" || arg === "-h") {
       process.stdout.write(CAPTURE_USAGE);
