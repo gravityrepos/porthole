@@ -110,7 +110,8 @@ internal class RecompositionCollector(
      * Absolute bounds exist so that a moment seen on the timeline can be named
      * rather than approximated: every event carries the same uptime clock, so
      * "the spike at t=24100" is expressible instead of "about twenty seconds
-     * ago, roughly".
+     * ago, roughly". [Window.resolve] is where those three arguments are turned
+     * into a span, for every tool on the surface rather than only this one.
      */
     fun report(
         screen: String?,
@@ -120,20 +121,14 @@ internal class RecompositionCollector(
         /** Busiest N nodes. The tail of a recomposition report is rarely the answer. */
         limit: Int? = null,
     ): RecompositionReport {
-        val current = now()
-        val start = when {
-            from != null -> from
-            sinceMs != null -> (current - sinceMs).coerceAtLeast(0L)
-            else -> 0L
-        }
-        val end = to ?: current
+        val window = Window.resolve(sinceMs, from, to, now())
 
-        val window = synchronized(lock) {
-            samples.filter { it.t >= start && it.t <= end && (screen == null || matches(it, screen)) }
+        val inWindow = synchronized(lock) {
+            samples.filter { it.t in window && (screen == null || matches(it, screen)) }
         }
 
         val byNode = LinkedHashMap<String, MutableList<Sample>>()
-        for (s in window) byNode.getOrPut(s.nodeId) { mutableListOf() } += s
+        for (s in inWindow) byNode.getOrPut(s.nodeId) { mutableListOf() } += s
 
         val nodes = byNode.values
             .map { group ->
@@ -158,14 +153,14 @@ internal class RecompositionCollector(
         val kept = nodes.take(cap)
         val dropped = nodes.size - kept.size
 
-        val attributed = window.flatMapTo(HashSet()) { it.triggers }
-        val unattributed = snapshots.writesBetween(start, end)
+        val attributed = inWindow.flatMapTo(HashSet()) { it.triggers }
+        val unattributed = snapshots.writesBetween(window.first, window.last)
             .filterKeys { it !in attributed }
             .toWriteCounts()
 
         return RecompositionReport(
-            since = start,
-            now = end,
+            since = window.first,
+            now = window.last,
             nodes = kept,
             totalNodes = nodes.size,
             truncated = dropped > 0,

@@ -9,7 +9,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.FrameMetrics
-import android.view.Window
+// Aliased because this package now has a `Window` of its own — the resolver
+// that says what a time window means. The platform's Window is the one an
+// Activity draws into; they are unrelated and should not read as if they were.
+import android.view.Window as AndroidWindow
 import androidx.annotation.RequiresApi
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -27,8 +30,8 @@ import java.util.concurrent.atomic.AtomicLong
  * count is only interesting because of what it does to frame time, and until
  * now the tool measured the cause and left you to infer the effect.
  *
- * Uses [Window.addOnFrameMetricsAvailableListener], which reports on frames the
- * system actually drew. The obvious alternative — reposting a Choreographer
+ * Uses [AndroidWindow.addOnFrameMetricsAvailableListener], which reports on
+ * frames the system actually drew. The obvious alternative — reposting a Choreographer
  * frame callback — requests a vsync on every frame, so an idle app never idles
  * and the measurement changes the thing being measured.
  *
@@ -96,7 +99,7 @@ internal class FrameCollector(private val ring: EventRing) {
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
-    private val listener = Window.OnFrameMetricsAvailableListener { _, metrics, droppedSoFar ->
+    private val listener = AndroidWindow.OnFrameMetricsAvailableListener { _, metrics, droppedSoFar ->
         // The FrameMetrics instance is recycled after this returns, so every
         // value has to be read now rather than held on to.
         val totalNanos = metrics.getMetric(FrameMetrics.TOTAL_DURATION)
@@ -194,14 +197,14 @@ internal class FrameCollector(private val ring: EventRing) {
         return name
     }
 
-    fun report(sinceMs: Long?, from: Long?, to: Long?, limit: Int): FrameReport {
-        val now = nowMs()
-        val start = from ?: sinceMs?.let { now - it }
-        val end = to ?: now
+    /** See [Window.resolve] for what the three window arguments mean. */
+    fun report(sinceMs: Long?, from: Long?, to: Long?, limit: Int): FrameReport =
+        report(Window.resolve(sinceMs, from, to, nowMs()), limit)
 
-        val window = synchronized(lock) {
-            recent.filter { (start == null || it.at >= start) && it.at <= end }
-        }
+    fun report(window: LongRange, limit: Int): FrameReport {
+        // A frame is stamped at its vsync, which is when it was, so membership
+        // is the plain one: was this frame drawn inside the window.
+        val inWindow = synchronized(lock) { recent.filter { it.at in window } }
 
         val notes = buildList {
             if (total.get() == 0L) {
@@ -218,7 +221,7 @@ internal class FrameCollector(private val ring: EventRing) {
             jankyFrames = janky.get(),
             droppedBySystem = dropped.get(),
             frameIntervalMs = frameIntervalNanos.toMillis(),
-            worst = window.sortedByDescending { it.totalMs }.take(limit),
+            worst = inWindow.sortedByDescending { it.totalMs }.take(limit),
             notes = notes,
         )
     }

@@ -23,7 +23,20 @@ import java.util.concurrent.atomic.AtomicLong
  * live set rather than a log you have to reconstruct. WorkManager is polled at
  * request time because its state lives in another process anyway.
  */
-internal class InflightCollector(private val ring: EventRing) {
+internal class InflightCollector(
+    private val ring: EventRing,
+    /** Substitutable for the same reason the event ring's clock is. */
+    private val now: () -> Long = ::nowMs,
+    /**
+     * Whether the caller is on the main thread. Identity, not the thread's
+     * name: a background thread can be called "main" and the name proves
+     * nothing either way. Substitutable because a static Looper lookup is the
+     * one thing standing between this collector and a unit test.
+     */
+    private val isMainThread: () -> Boolean = {
+        Looper.myLooper() != null && Looper.myLooper() == Looper.getMainLooper()
+    },
+) {
 
     private class OpenHttp(
         val id: String,
@@ -32,6 +45,15 @@ internal class InflightCollector(private val ring: EventRing) {
         val startedAt: Long,
         @Volatile var phase: String,
     ) {
+        /**
+         * When the call finished, or null while it is still running. An open
+         * call has no elapsed time of its own — it has however long it has been
+         * going by the time somebody asks — and the difference matters to the
+         * window: work that has not ended overlaps every window that opened
+         * after it began.
+         */
+        @Volatile var endedAt: Long? = null
+
         @Volatile var status: Int? = null
         @Volatile var requestHeaders: Map<String, String> = emptyMap()
         @Volatile var responseHeaders: Map<String, String> = emptyMap()
@@ -62,7 +84,7 @@ internal class InflightCollector(private val ring: EventRing) {
             method = method,
             url = url,
             startedAt = startedAt,
-            elapsedMs = now - startedAt,
+            elapsedMs = (endedAt ?: now) - startedAt,
             phase = phase,
             onMainThread = onMainThread,
             status = status,
@@ -92,13 +114,32 @@ internal class InflightCollector(private val ring: EventRing) {
     private val recentHttp = ArrayDeque<HttpCall>()
     /** Queries that ran on the main thread, kept because each one is a defect. */
     private val mainThreadQueries = ArrayDeque<DbQuery>()
-    private val mainThreadHttp = ArrayDeque<HttpCall>()
+
+    /**
+     * The live objects, not snapshots of them.
+     *
+     * A main-thread call is noticed the moment the interceptor runs, which is
+     * long before it finishes, so the DTO taken at that moment recorded an
+     * elapsed time of about zero and never learned better — it also predated
+     * the response headers and the body. Holding the open call means the report
+     * shows what it has cost so far while it is still costing it, which is the
+     * whole point of noticing.
+     */
+    private val mainThreadHttp = ArrayDeque<OpenHttp>()
     private val mainThreadLock = Any()
     private val recentLock = Any()
     private val ids = AtomicLong(0)
 
-    fun mainThreadQueries(from: Long?, to: Long?, limit: Int): List<DbQuery> = synchronized(mainThreadLock) {
-        mainThreadQueries.filter { (from == null || it.startedAt >= from) && (to == null || it.startedAt <= to) }
+    /** See [Window.resolve] for what the three window arguments mean. */
+    fun mainThreadQueries(sinceMs: Long?, from: Long?, to: Long?, limit: Int): List<DbQuery> =
+        mainThreadQueries(Window.resolve(sinceMs, from, to, now()), limit)
+
+    /**
+     * Matched by overlap rather than by start time — see [Window.overlaps].
+     * A query is only recorded here once it has ended, so its span is known.
+     */
+    fun mainThreadQueries(window: LongRange, limit: Int): List<DbQuery> = synchronized(mainThreadLock) {
+        mainThreadQueries.filter { Window.overlaps(window, it.startedAt, it.startedAt + it.elapsedMs) }
     }.sortedByDescending { it.elapsedMs }.take(limit)
 
     fun clearMainThreadQueries() {
@@ -117,7 +158,7 @@ internal class InflightCollector(private val ring: EventRing) {
     // -- http --------------------------------------------------------------
 
     fun httpStart(token: Any, method: String, url: String) {
-        val call = OpenHttp(nextId("http"), method, redact(url), nowMs(), "queued")
+        val call = OpenHttp(nextId("http"), method, redact(url), now(), "queued")
         http[token] = call
         emit("http_start", call.id, mapOf("method" to method, "url" to call.url))
 
@@ -155,15 +196,28 @@ internal class InflightCollector(private val ring: EventRing) {
         call.onMainThread = onMainThread
         if (onMainThread) {
             synchronized(mainThreadLock) {
-                mainThreadHttp.addLast(call.toDto(nowMs()))
+                mainThreadHttp.addLast(call)
                 while (mainThreadHttp.size > MAIN_THREAD_CAPACITY) mainThreadHttp.removeFirst()
             }
         }
     }
 
-    fun mainThreadHttp(from: Long?, to: Long?, limit: Int): List<HttpCall> = synchronized(mainThreadLock) {
-        mainThreadHttp.filter { (from == null || it.startedAt >= from) && (to == null || it.startedAt <= to) }
-    }.sortedByDescending { it.elapsedMs }.take(limit)
+    /** See [Window.resolve] for what the three window arguments mean. */
+    fun mainThreadHttp(sinceMs: Long?, from: Long?, to: Long?, limit: Int): List<HttpCall> =
+        mainThreadHttp(Window.resolve(sinceMs, from, to, now()), limit)
+
+    /**
+     * Matched by overlap rather than by start time — see [Window.overlaps]. A
+     * call still in flight has no end, so it belongs to every window that had
+     * not already closed when it began: the request blocking the main thread
+     * right now is not one to hide because it started before you asked.
+     */
+    fun mainThreadHttp(window: LongRange, limit: Int): List<HttpCall> {
+        val at = now()
+        return synchronized(mainThreadLock) {
+            mainThreadHttp.filter { Window.overlaps(window, it.startedAt, it.endedAt) }.map { it.toDto(at) }
+        }.sortedByDescending { it.elapsedMs }.take(limit)
+    }
 
     /**
      * Registers a body that is still being written. The provider is asked each
@@ -185,8 +239,15 @@ internal class InflightCollector(private val ring: EventRing) {
     fun httpEnd(token: Any, phase: String, detail: String? = null) {
         val call = http.remove(token) ?: return
         Atrace.end(call.traceName, call.traceCookie)
-        val now = nowMs()
-        val dto = call.toDto(now, phase)
+        val endedAt = now()
+        // Freeze the body before the provider goes: it reads a buffer that
+        // belongs to a request now over, and the main-thread deque holds this
+        // object rather than a copy of it, so the reference would otherwise
+        // outlive its usefulness.
+        call.requestBody = call.resolvedRequestBody()
+        call.requestBodyProvider = null
+        call.endedAt = endedAt
+        val dto = call.toDto(endedAt, phase)
 
         synchronized(recentLock) {
             recentHttp.addLast(dto)
@@ -200,7 +261,7 @@ internal class InflightCollector(private val ring: EventRing) {
                 put("method", call.method)
                 put("url", call.url)
                 put("phase", phase)
-                put("elapsedMs", (now - call.startedAt).toString())
+                put("elapsedMs", (endedAt - call.startedAt).toString())
                 call.status?.let { put("status", it.toString()) }
                 // Only a snippet on the timeline: full previews live in
                 // `inflight.recentHttp`, so the event ring stays small.
@@ -215,14 +276,12 @@ internal class InflightCollector(private val ring: EventRing) {
 
     fun queryStart(sql: String, args: List<String>, kind: String = "read"): String {
         val id = nextId("db")
-        // Identity, not the thread's name: a background thread can be called
-        // "main" and the name proves nothing either way.
-        val onMain = Looper.myLooper() != null && Looper.myLooper() == Looper.getMainLooper()
+        val onMain = isMainThread()
         val open = OpenQuery(
             id = id,
             sql = sql,
             args = args,
-            startedAt = nowMs(),
+            startedAt = now(),
             thread = Thread.currentThread().name,
             kind = kind,
             onMainThread = onMain,
@@ -252,7 +311,7 @@ internal class InflightCollector(private val ring: EventRing) {
     fun queryEnd(id: String, result: Long? = null, error: String? = null) {
         val q = queries.remove(id) ?: return
         Atrace.end(q.traceName, q.traceCookie)
-        val elapsed = nowMs() - q.startedAt
+        val elapsed = now() - q.startedAt
         if (q.onMainThread) {
             synchronized(mainThreadLock) {
                 mainThreadQueries.addLast(q.toDto(elapsed, done = true))
@@ -278,7 +337,7 @@ internal class InflightCollector(private val ring: EventRing) {
     // -- report ------------------------------------------------------------
 
     fun capture(): Inflight {
-        val now = nowMs()
+        val at = now()
         val work = runCatching { workSupplier?.invoke() ?: emptyList() }
         val notes = buildList {
             if (http.isEmpty() && queries.isEmpty() && work.getOrNull().isNullOrEmpty()) {
@@ -291,11 +350,11 @@ internal class InflightCollector(private val ring: EventRing) {
         }
 
         return Inflight(
-            capturedAt = now,
-            http = http.values.sortedBy { it.startedAt }.map { it.toDto(now) },
+            capturedAt = at,
+            http = http.values.sortedBy { it.startedAt }.map { it.toDto(at) },
             queries = queries.values
                 .sortedBy { it.startedAt }
-                .map { it.toDto(now - it.startedAt, done = false) },
+                .map { it.toDto(at - it.startedAt, done = false) },
             work = work.getOrDefault(emptyList()),
             recentHttp = synchronized(recentLock) { recentHttp.toList() },
             notes = notes,

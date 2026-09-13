@@ -202,14 +202,15 @@ internal class LogCollector(
         to: Long?,
         limit: Int,
     ): LogPage {
-        val floor = from ?: sinceMs?.let { nowMs() - it }
-        val ceiling = to
+        // This collector used to leave the ceiling open when `to` was absent,
+        // which made `logs` the one tool whose "last five seconds" was a
+        // different span from everybody else's. See [Window.resolve].
+        val window = Window.resolve(sinceMs, from, to, nowMs())
         val minRank = minLevel?.let { rank(it.uppercase().first()) } ?: 0
 
         val matched = synchronized(lock) {
             entries.filter { entry ->
-                (floor == null || entry.t >= floor) &&
-                    (ceiling == null || entry.t <= ceiling) &&
+                entry.t in window &&
                     rank(entry.level.first()) >= minRank &&
                     (tag == null || entry.tag.contains(tag, ignoreCase = true)) &&
                     (contains == null || entry.message.contains(contains, ignoreCase = true))
