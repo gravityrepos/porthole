@@ -54,28 +54,66 @@ afterEach(() => {
 });
 
 describe("FindingsLoader.schedule", () => {
-  it("collapses a burst of calls into a single fetch, fired once things settle", async () => {
+  it("collapses a burst of calls into a single fetch, fired debounceMs after the burst began", async () => {
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
       okResponse({ findings: [] }),
     );
     const loader = new FindingsLoader(callbacks(), { fetchImpl });
 
     // Three view updates in quick succession -- one animation frame apart,
-    // the way `following` mode or a fast pan produces them.
+    // the way `following` mode or a fast pan produces them. All three land
+    // inside the same debounce window, so this is one batch: its deadline
+    // is fixed relative to the first call (see the class doc comment for
+    // why it cannot instead be relative to the last), not to whichever call
+    // happened to be most recent when a test author looked at the clock.
     loader.schedule(0, 100);
     await vi.advanceTimersByTimeAsync(100);
     loader.schedule(0, 150);
     await vi.advanceTimersByTimeAsync(100);
     loader.schedule(0, 200);
 
-    // Not yet: the last call hasn't waited out the debounce window.
-    await vi.advanceTimersByTimeAsync(299);
+    // Not yet: 300ms have not yet passed since the first call in the batch.
+    await vi.advanceTimersByTimeAsync(99);
     expect(fetchImpl).not.toHaveBeenCalled();
 
-    // Now it has, and only the final window is asked for.
+    // Now they have, and only the final window is asked for.
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(String(fetchImpl.mock.calls[0][0])).toContain("to=200");
+  });
+
+  it("keeps servicing a view that never stops moving, rather than starving", async () => {
+    // This is what `following` mode actually does against a live device: a
+    // new `schedule` call on every animation frame, indefinitely, for as
+    // long as traffic keeps arriving. A plain trailing debounce -- restart
+    // the timer on every call -- would never fire at all here, because the
+    // calls never stop. Caught by running exactly this against a live
+    // device's browser: the panel went stale the moment `following` was
+    // turned on and stayed that way, with zero further requests, not "a few
+    // a second".
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
+    const loader = new FindingsLoader(callbacks(), { fetchImpl, debounceMs: 300 });
+
+    // One `schedule` call every 50ms for a full second -- twenty of them,
+    // none of them ever 300ms apart.
+    for (let i = 0; i < 20; i++) {
+      loader.schedule(0, i);
+      await vi.advanceTimersByTimeAsync(50);
+    }
+
+    // Three requests in that second, not zero and not twenty: each batch's
+    // deadline is fixed when the batch starts, so continuous scheduling
+    // still gets serviced roughly every debounceMs, each one carrying
+    // whichever window was most recently asked for for when its deadline
+    // arrived.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining("to=5"),
+      expect.stringContaining("to=11"),
+      expect.stringContaining("to=17"),
+    ]);
   });
 
   it("cancels the in-flight request when a newer one is scheduled", async () => {

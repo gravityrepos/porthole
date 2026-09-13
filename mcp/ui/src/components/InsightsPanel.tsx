@@ -35,7 +35,8 @@ interface Payload {
   notes: string[];
 }
 
-/** How long a burst of `schedule` calls waits for the view to settle. */
+/** How long a burst of `schedule` calls waits for the view to settle, and the
+ * longest a continuously-moving view is ever allowed to go unasked. */
 const DEBOUNCE_MS = 300;
 
 interface FindingsCallbacks {
@@ -47,17 +48,36 @@ interface FindingsCallbacks {
 /**
  * Turns a stream of `schedule` calls -- one per animation frame while the
  * user pans the timeline, or once a tick while `following` is on -- into at
- * most one outstanding `/api/findings` request.
+ * most one outstanding `/api/findings` request every `debounceMs`.
  *
- * Three separate guards, because any one alone leaves a gap:
- *  - debounced: a burst of `schedule` calls before `DEBOUNCE_MS` elapses
- *    collapses to a single fetch, fired once the view stops moving;
+ * That "every", not "after", matters and was not obvious until this was
+ * tried against a live device: `following` mode calls `schedule` on every
+ * animation frame for as long as traffic keeps arriving, which is
+ * indefinitely. A plain trailing debounce -- reset the timer on every call,
+ * fire when the calls stop -- never fires at all under that load, because
+ * the calls never stop; the panel would go stale the moment `following` was
+ * turned on and stay that way. So a batch, once started, has a deadline
+ * fixed at `debounceMs` from its first call, not from its most recent one:
+ * further calls before the deadline still update which window gets asked
+ * for, but they no longer push the deadline itself back. Panning briefly and
+ * releasing still settles onto one request, `debounceMs` after the pan
+ * began; continuous motion gets serviced roughly every `debounceMs` instead
+ * of not at all.
+ *
+ * Three further guards, because any one alone leaves a gap:
  *  - cancelled: a fetch still in flight when a newer one starts is aborted,
  *    so the server is not left computing an answer nobody wants any more;
  *  - ordered: an aborted fetch's promise can still settle (a test's fake
  *    fetch, or a runtime that does not wire the signal all the way through),
  *    so a request id is checked again on the way out -- only the most recent
- *    `run` is allowed to report its result.
+ *    `run` is allowed to report its result;
+ *  - bound to the right `this`: `fetch` is a Window method, not a free
+ *    function, and browsers check that it is invoked with `this === window`.
+ *    Storing the bare reference and calling it as `this.fetchImpl(...)`
+ *    rebinds `this` to the loader, which a live device's browser caught
+ *    immediately as "Failed to execute 'fetch' on 'Window': Illegal
+ *    invocation" -- Node's fetch does not enforce this, so no unit test
+ *    here would have. Bound to `globalThis` once, in the constructor.
  *
  * Kept free of React so it can be constructed once per component instance
  * and unit-tested directly, the way the rest of this codebase tests plain
@@ -65,6 +85,10 @@ interface FindingsCallbacks {
  */
 export class FindingsLoader {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** When the current batch's deadline falls; null between batches. */
+  private batchDeadline: number | null = null;
+  private pendingFrom: number | undefined;
+  private pendingTo: number | undefined;
   private controller: AbortController | null = null;
   private requestId = 0;
   private readonly debounceMs: number;
@@ -75,13 +99,27 @@ export class FindingsLoader {
     options?: { debounceMs?: number; fetchImpl?: typeof fetch },
   ) {
     this.debounceMs = options?.debounceMs ?? DEBOUNCE_MS;
-    this.fetchImpl = options?.fetchImpl ?? fetch;
+    this.fetchImpl = options?.fetchImpl ?? fetch.bind(globalThis);
   }
 
-  /** Queue a request for this window; a call already waiting is replaced. */
+  /** Queue a request for this window; a call already waiting is replaced,
+   * but the batch's deadline is only ever brought closer, never pushed out. */
   schedule(from?: number, to?: number): void {
+    this.pendingFrom = from;
+    this.pendingTo = to;
+
+    const now = Date.now();
+    if (this.batchDeadline === null) this.batchDeadline = now + this.debounceMs;
+
     if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.run(from, to), this.debounceMs);
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        this.batchDeadline = null;
+        void this.run(this.pendingFrom, this.pendingTo);
+      },
+      Math.max(0, this.batchDeadline - now),
+    );
   }
 
   /** Run immediately, for the manual refresh button. */
@@ -90,12 +128,15 @@ export class FindingsLoader {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    this.batchDeadline = null;
     void this.run(from, to);
   }
 
   /** Stop anything pending; the component is going away. */
   dispose(): void {
     if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.batchDeadline = null;
     this.controller?.abort();
   }
 
