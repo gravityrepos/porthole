@@ -51,12 +51,18 @@ internal class FrameCollector(private val ring: EventRing) {
     @Volatile private var handler: Handler? = null
     @Volatile private var frameIntervalNanos: Long = DEFAULT_INTERVAL_NANOS
 
+    // Kept so stop() can hand the same object back to the Application. An
+    // anonymous object registered inline is registered forever: nothing holds
+    // it, so nothing can unregister it, and every install/shutdown cycle left
+    // one more listener attached — on devices, not only in tests.
+    private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+
     fun install(app: Application): Boolean {
         val worker = HandlerThread("porthole-frames").apply { start() }
         thread = worker
         handler = Handler(worker.looper)
 
-        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) = attach(activity)
             override fun onActivityStopped(activity: Activity) = detach(activity)
             override fun onActivityCreated(activity: Activity, bundle: Bundle?) = Unit
@@ -64,11 +70,15 @@ internal class FrameCollector(private val ring: EventRing) {
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, bundle: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
-        })
+        }
+        app.registerActivityLifecycleCallbacks(callbacks)
+        lifecycleCallbacks = callbacks
         return true
     }
 
-    fun stop() {
+    fun stop(app: Application) {
+        lifecycleCallbacks?.let { runCatching { app.unregisterActivityLifecycleCallbacks(it) } }
+        lifecycleCallbacks = null
         thread?.quitSafely()
         thread = null
         handler = null

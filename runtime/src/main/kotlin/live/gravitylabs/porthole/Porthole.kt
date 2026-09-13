@@ -231,7 +231,7 @@ object Porthole {
             s.server.stop()
             s.snapshots.stop()
             s.logs.stop()
-            s.frames.stop()
+            s.frames.stop(s.app)
             s.memory.stop()
             s.deviceContext.stop(s.app)
             s.autoWire.stop()
