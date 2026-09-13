@@ -10,6 +10,14 @@ import type { DeviceEvent } from "./device.js";
  * a number it can compare. Both come from here.
  */
 
+/**
+ * The shape of the trace file.
+ *
+ * Nothing validates against it on read, so it is a label rather than a gate.
+ * Adding an optional field or a new metric key is therefore compatible by
+ * construction — `compare` fills a key the other side lacks with zero — and does
+ * not move this number. Removing or repurposing one would.
+ */
 export const TRACE_VERSION = 1;
 
 export type Severity = "error" | "warning" | "note";
@@ -65,6 +73,11 @@ const str = (value: unknown, fallback = ""): string =>
  * Percentiles rather than means throughout: a mean frame time is the one number
  * guaranteed to hide the problem, because the frames anyone cares about are the
  * tail.
+ *
+ * Only ever fed completed work. A span that was still open has a floor under
+ * its duration and not a duration, and a floor mixed into a distribution of
+ * completions drags the tail *down* — the longest wait in the run would make
+ * the p95 look better. Open spans are counted and named separately instead.
  */
 function percentile(values: number[], share: number): number {
   if (values.length === 0) return 0;
@@ -73,21 +86,82 @@ function percentile(values: number[], share: number): number {
   return Math.round(sorted[index]);
 }
 
-function spans(
-  events: DeviceEvent[],
-  prefix: string,
-): Array<{ ms: number; data: Record<string, unknown> }> {
-  const open = new Map<string, number>();
-  const out: Array<{ ms: number; data: Record<string, unknown> }> = [];
+/** A span whose end arrived: `ms` is how long it took. */
+export interface CompletedSpan {
+  open: false;
+  ms: number;
+  data: Record<string, unknown>;
+}
+
+/** A span that was still running when the events ran out. */
+export interface OpenSpan {
+  open: true;
+  /**
+   * A floor under how long it ran, in ms — it had lasted at least this when the
+   * last event arrived, and the real figure is larger and unknowable from here.
+   *
+   * Named for what it is rather than `ms`, because a number that is silently a
+   * lower bound gets averaged, plotted and regression-gated as though it were a
+   * measurement, and no caller ever finds out.
+   */
+  atLeastMs: number;
+  /** When it started, which is the only timestamp it has. */
+  startedAt: number;
+  data: Record<string, unknown>;
+}
+
+export type Span = CompletedSpan | OpenSpan;
+
+// Predicates rather than inline `!s.open`, so the narrowing survives `filter`
+// and the compiler is the thing that stops `atLeastMs` reaching a percentile.
+const isCompleted = (span: Span): span is CompletedSpan => !span.open;
+const isOpen = (span: Span): span is OpenSpan => span.open;
+
+/**
+ * Start/end pairs recovered from the event stream — including the ones with no
+ * end.
+ *
+ * A span still open when the recording stops is the shape of a hang: a request
+ * that never returns, a query that never completes, a job wedged on a lock. It
+ * used to be dropped here, which meant the trace reported fewer calls than were
+ * made, no percentile influence, and no finding about the one that mattered —
+ * the run that most needed investigating came back looking like the quietest on
+ * record. They are emitted instead, marked `open`, carrying a floor under their
+ * duration measured to the last event seen.
+ *
+ * An end with no start is the mirror case and is not a hang: that is a capture
+ * that attached mid-call. It keeps the device's own `elapsedMs`.
+ */
+function spans(events: DeviceEvent[], prefix: string): Span[] {
+  const open = new Map<string, { at: number; data: Record<string, unknown> }>();
+  const out: Span[] = [];
+  let lastAt = 0;
+
   for (const event of events) {
+    lastAt = Math.max(lastAt, event.t);
     const id = str(event.data.id);
-    if (event.event === `${prefix}_start`) open.set(id, event.t);
-    else if (event.event === `${prefix}_end`) {
+    if (event.event === `${prefix}_start`) {
+      // Not an unconditional `set`. A repeated id is the device contradicting
+      // itself, and overwriting would silently discard the earlier start — the
+      // same class of defect as dropping open spans. Keeping the first start
+      // keeps the floor conservative and invents nothing.
+      if (!open.has(id)) open.set(id, { at: event.t, data: event.data });
+    } else if (event.event === `${prefix}_end`) {
       const started = open.get(id);
       open.delete(id);
-      const ms = started === undefined ? num(event.data.elapsedMs) : event.t - started;
-      out.push({ ms, data: event.data });
+      const ms = started === undefined ? num(event.data.elapsedMs) : event.t - started.at;
+      out.push({ open: false, ms, data: event.data });
     }
+  }
+
+  // Insertion order, so these come out oldest first.
+  for (const started of open.values()) {
+    out.push({
+      open: true,
+      atLeastMs: lastAt - started.at,
+      startedAt: started.at,
+      data: started.data,
+    });
   }
   return out;
 }
@@ -120,20 +194,27 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
     "mainThread.worstMs": stalls.reduce((worst, e) => Math.max(worst, num(e.data.durationMs)), 0),
     "mainThread.blockedMs": stalls.reduce((sum, e) => sum + num(e.data.durationMs), 0),
 
+    // Counts are over everything that started, percentiles over what finished.
+    // A query that never came back still happened, and still cost the user the
+    // wait; it just has no duration to put in a distribution.
     "db.queries": db.length,
+    "db.stillOpen": db.filter(isOpen).length,
     "db.onMainThread": db.filter(
       (q) => q.data.onMainThread === "true" || q.data.onMainThread === true,
     ).length,
+    // Over completed queries only — see `percentile`.
     "db.p95Ms": percentile(
-      db.map((q) => q.ms),
+      db.filter(isCompleted).map((q) => q.ms),
       0.95,
     ),
 
     "http.calls": http.length,
+    "http.stillOpen": http.filter(isOpen).length,
     "http.failed": http.filter((c) => num(c.data.status) >= 400 || c.data.error !== undefined)
       .length,
+    // Over completed calls only — see `percentile`.
     "http.p95Ms": percentile(
-      http.map((c) => c.ms),
+      http.filter(isCompleted).map((c) => c.ms),
       0.95,
     ),
 
@@ -145,6 +226,7 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
     "memory.blockingGcMs": gc.reduce((sum, e) => sum + num(e.data.pausedMs), 0),
 
     "work.runs": work.length,
+    "work.stillOpen": work.filter(isOpen).length,
     "work.retries": work.filter((w) => w.data.retrying === "true").length,
     "work.failures": work.filter((w) => str(w.data.state) === "FAILED").length,
   };
@@ -171,6 +253,43 @@ export function frameBudgetMs(refreshHz: number): number {
   return Math.round((1000 / hz) * 10) / 10;
 }
 
+/**
+ * What was still running when the recording stopped.
+ *
+ * Its own finding rather than a line folded into the counts, because an
+ * unfinished call is not a slow call and the two want different responses. The
+ * wording carries "at least" into the title and the detail on purpose: the
+ * number is a floor, and a reader who copies it into a bug report should copy
+ * that qualifier with it.
+ */
+function stillOpenFinding(
+  lane: Span[],
+  id: string,
+  noun: { one: string; many: string },
+  describe: (data: Record<string, unknown>) => { label: string; evidence: Record<string, unknown> },
+  marks: Trace["marks"],
+): Finding | undefined {
+  const open = lane.filter(isOpen);
+  if (open.length === 0) return undefined;
+
+  const oldest = open.reduce((a, b) => (a.atLeastMs >= b.atLeastMs ? a : b));
+  const { label, evidence } = describe(oldest.data);
+  const count = open.length;
+
+  return {
+    id,
+    severity: "warning",
+    confidence: "observed",
+    title:
+      `${count} ${count === 1 ? noun.one : noun.many} ${count === 1 ? "was" : "were"} ` +
+      `still open when the capture ended, the oldest for at least ${oldest.atLeastMs}ms`,
+    detail: `oldest: ${label} — at least, not exactly: it had not finished, so that is a floor under the wait`,
+    count,
+    during: markAt(marks, oldest.startedAt),
+    evidence: { oldestAtLeastMs: oldest.atLeastMs, ...evidence },
+  };
+}
+
 export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
@@ -181,7 +300,14 @@ export function findingsOf(
   const http = spans(events, "http");
   const work = spans(events, "work");
 
-  const onMain = db.filter((q) => q.data.onMainThread === "true" || q.data.onMainThread === true);
+  // Completed queries only, and not merely to have an `ms` to sort on: which
+  // thread a query ran on is reported by the *end* event, so an open span has
+  // nothing to answer the question with. A query still running on the main
+  // thread when the capture stopped is reported by `db-still-open` instead,
+  // which is the more alarming finding of the two anyway.
+  const onMain = db
+    .filter(isCompleted)
+    .filter((q) => q.data.onMainThread === "true" || q.data.onMainThread === true);
   if (onMain.length > 0) {
     const worst = onMain.reduce((a, b) => (a.ms >= b.ms ? a : b));
     findings.push({
@@ -227,6 +353,42 @@ export function findingsOf(
       count: failed.length,
     });
   }
+
+  // The hang lanes. A capture is most often run *because* something hung, so
+  // these are the findings least able to afford being absent.
+  const open = [
+    stillOpenFinding(
+      http,
+      "http-still-open",
+      { one: "HTTP call", many: "HTTP calls" },
+      (data) => ({
+        label: `${str(data.method)} ${str(data.url)}`.trim() || "unidentified call",
+        evidence: { method: str(data.method), url: str(data.url) },
+      }),
+      marks,
+    ),
+    stillOpenFinding(
+      db,
+      "db-still-open",
+      { one: "database query", many: "database queries" },
+      (data) => ({
+        label: str(data.sql).slice(0, 80) || "unidentified query",
+        evidence: { sql: str(data.sql) },
+      }),
+      marks,
+    ),
+    stillOpenFinding(
+      work,
+      "work-still-open",
+      { one: "background job", many: "background jobs" },
+      (data) => ({
+        label: str(data.name) || str(data.id) || "unidentified job",
+        evidence: { name: str(data.name), id: str(data.id) },
+      }),
+      marks,
+    ),
+  ].filter((finding): finding is Finding => finding !== undefined);
+  findings.push(...open);
 
   const frames = events.filter((e) => e.event === "frame");
   if (frames.length > 0) {
