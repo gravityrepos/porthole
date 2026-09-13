@@ -184,6 +184,38 @@ describe("FindingsLoader.schedule", () => {
   });
 });
 
+describe("FindingsLoader constructor", () => {
+  it("binds the default fetch to globalThis, not to the loader instance", async () => {
+    // `fetch` is a Window/globalThis method, not a free function: a browser
+    // throws "Illegal invocation" if it is ever invoked with some other
+    // receiver. The constructor guards against that by binding once, up
+    // front (`fetch.bind(globalThis)`), rather than storing the bare
+    // reference and letting `this.fetchImpl(...)` call it as a method of the
+    // loader. Node's own fetch does not enforce the receiver check, so
+    // nothing here would fail just by calling it -- the receiver has to be
+    // inspected directly, which is what this test does by installing a spy
+    // in fetch's place and reading vitest's own record of what `this` was
+    // for each call, rather than aliasing `this` by hand.
+    const originalFetch = globalThis.fetch;
+    const spy = vi.fn(() => Promise.resolve(okResponse({ findings: [] })));
+    globalThis.fetch = spy as unknown as typeof fetch;
+
+    try {
+      // No `fetchImpl` override -- this exercises the constructor's own
+      // `?? fetch.bind(globalThis)` default, which is the line the receiver
+      // check depends on.
+      const loader = new FindingsLoader(callbacks(), { debounceMs: 10 });
+      loader.schedule(0, 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.contexts[0]).not.toBe(loader);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe("FindingsLoader.runNow", () => {
   it("bypasses the debounce and cancels whatever was pending", async () => {
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
@@ -223,5 +255,31 @@ describe("FindingsLoader.dispose", () => {
     loader.dispose();
 
     expect(pending[0].signal.aborted).toBe(true);
+  });
+
+  it("swallows the AbortError from the request it just cancelled, silently", async () => {
+    // "aborts a request already in flight" above only proves the signal
+    // fires; it says nothing about what happens when that abort's rejection
+    // actually lands, which is the case the `AbortError` branch in `run`'s
+    // catch exists for. It is the one abort whose `requestId` still matches
+    // the loader's current request (nothing newer has been scheduled to
+    // bump it), so the ordering guard above it in the same catch does not
+    // short-circuit first -- this rejection reaches the `AbortError` check
+    // for real. Without that check, a component unmounted mid-request would
+    // have `onError` fire, and report an error, after it is gone.
+    const { fetchImpl, pending } = deferredFetch();
+    const cb = callbacks();
+    const loader = new FindingsLoader(cb, { fetchImpl, debounceMs: 10 });
+
+    loader.schedule(0, 100);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pending).toHaveLength(1);
+
+    loader.dispose();
+    pending[0].reject(new DOMException("Aborted", "AbortError"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(cb.onError).not.toHaveBeenCalled();
+    expect(cb.onSuccess).not.toHaveBeenCalled();
   });
 });

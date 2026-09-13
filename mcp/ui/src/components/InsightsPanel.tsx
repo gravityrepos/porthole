@@ -172,6 +172,17 @@ const SEVERITY: Record<Finding["severity"], { label: string; className: string }
   note: { label: "NOTE", className: "text-[var(--color-muted)]" },
 };
 
+// This panel used to also take a `tracePath` prop and forward it to
+// `/api/findings?trace=...`, but nothing in the UI ever named a trace file to
+// put there -- no picker, no setup state, nothing -- so the prop was always
+// undefined and the trace half of `findings` was unreachable from here. It
+// was removed rather than wired up: building a trace-file picker was not
+// part of this fix and has no design. The server-side `trace` query
+// parameter this fed is untouched; an agent still populates it by calling
+// `capture_system_trace` then `ask_system_trace` (or hitting
+// `/api/findings?trace=<path>` directly), and this component renders
+// whatever `findings` comes back either way. If `tracePath` reappears here,
+// it needs an actual source for the path first.
 export function InsightsPanel({ from, to }: { from?: number; to?: number }) {
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -291,8 +302,9 @@ export function InsightsPanel({ from, to }: { from?: number; to?: number }) {
 
       {payload && fromTrace === 0 && !payload.notes.length && (
         <p className="text-[11px] leading-snug text-[var(--color-dim)]">
-          Only the app's own view so far. Record a system trace and pass it to see what the rest
-          of the device was doing — which is mostly how a cause gets ruled out.
+          Only the app's own view so far. Ask the agent to capture a system trace and correlate
+          it against this window to see what the rest of the device was doing — which is mostly
+          how a cause gets ruled out.
         </p>
       )}
     </section>
