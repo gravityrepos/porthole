@@ -3,13 +3,22 @@
 import type { Finding, Trace } from "./trace.js";
 import { frameBudgetMs } from "./trace.js";
 
-/** Lanes a reader should be told were checked and found quiet. */
+/**
+ * Lanes a reader should be told were checked and found quiet.
+ *
+ * Every key a lane can raise a finding from has to be listed here, or the
+ * footer ends up contradicting the list above it: a capture with three wedged
+ * HTTP calls printed "quiet: http" directly beneath the warning that named
+ * them, because the lane keyed on `http.failed` alone and a call that never
+ * returns never fails. The two must be added together, so a new lane metric is
+ * only half-added until it appears in this table.
+ */
 const CHECKED: Array<{ label: string; keys: string[] }> = [
-  { label: "http", keys: ["http.failed"] },
-  { label: "db", keys: ["db.onMainThread"] },
+  { label: "http", keys: ["http.failed", "http.stillOpen"] },
+  { label: "db", keys: ["db.onMainThread", "db.stillOpen"] },
   { label: "main thread", keys: ["mainThread.stalls"] },
   { label: "frames", keys: ["frames.missed"] },
-  { label: "work", keys: ["work.retries", "work.failures"] },
+  { label: "work", keys: ["work.retries", "work.failures", "work.stillOpen"] },
   { label: "memory", keys: ["memory.blockingGcMs"] },
 ];
 
@@ -18,6 +27,22 @@ const LABEL: Record<Finding["severity"], string> = {
   warning: "WARNING",
   note: "NOTE   ",
 };
+
+/**
+ * One of the footer counts, saying how many of them never finished.
+ *
+ * The counts deliberately include spans that were still open when the capture
+ * ended — a query that never came back still happened and still cost the wait.
+ * But "40 queries" reads as forty completions to anyone who does not know that,
+ * and this line is the part of the report people quote. The qualifier travels
+ * with the number, the same way `atLeastMs` carries its own. It is left off
+ * entirely when nothing was open, which is almost every run.
+ */
+function counted(trace: Trace, total: string, open: string, noun: string): string {
+  const stillOpen = trace.metrics[open] ?? 0;
+  const suffix = stillOpen > 0 ? ` (${stillOpen} still open)` : "";
+  return `${trace.metrics[total]} ${noun}${suffix}`;
+}
 
 export function renderReport(trace: Trace): string {
   const lines: string[] = [];
@@ -65,7 +90,8 @@ export function renderReport(trace: Trace): string {
   lines.push(
     `  frame budget ${frameBudgetMs(hz)}ms · ` +
       `${trace.metrics["recompose.total"]} recompositions · ` +
-      `${trace.metrics["http.calls"]} calls · ${trace.metrics["db.queries"]} queries`,
+      `${counted(trace, "http.calls", "http.stillOpen", "calls")} · ` +
+      `${counted(trace, "db.queries", "db.stillOpen", "queries")}`,
   );
   if (trace.marks.length > 0) lines.push(`  ${trace.marks.length} marks`);
   if (trace.driver) lines.push(`  driver: ${trace.driver}`);
