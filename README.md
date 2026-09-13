@@ -1082,7 +1082,12 @@ That is how the tools and the timeline UI were verified.
 ## CI
 
 `.github/workflows/pr.yml` runs on every pull request and on every push to
-`main`, and is required to merge. Two jobs, both required:
+`main`. It is meant to end up required to merge — both jobs are intended as
+required status checks on `main` — but requiring a check is a
+branch-protection setting on the repository itself, not something a workflow
+file can grant, and nobody has switched it on yet. The workflow also has not
+had a run anywhere yet for that setting to point at; the founder turns it on
+once the first run exists. Two jobs, meant to both be required:
 
 - **Gradle checks** (ubuntu) — `./gradlew check`, which since GRA-75 reaches
   the plugin's tests too (see [Building](#building) above). Test reports
@@ -1108,7 +1113,7 @@ wired into `check`) fails the PR instead of drifting in silently.
 
 No job in this workflow ever runs a publish task, and the workflow has no
 secrets — the emulator, the AGP compatibility matrix and anything nightly are
-separate, slower checks that do not block a PR.
+separate, slower checks that live outside this workflow entirely.
 
 ## Wire protocol
 
