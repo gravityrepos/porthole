@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -431,44 +431,300 @@ export interface AskResult {
   unanswered: string[];
 }
 
+const MARKER_PREFIX = "porthole:";
+
 /**
- * Puts the three questions to a trace, scoped to one window and one process.
+ * How long one trace_processor invocation gets before it is presumed wedged.
  *
- * Substitution rather than bound parameters because trace_processor's shell
- * takes a file of SQL and no bindings. The package is the only string that
- * reaches it and it is quoted here; the bounds are numbers by the time they
- * arrive.
+ * 60s is generous against the numbers actually observed: the real pinned
+ * v58.2 binary loaded a 10.96MB capture in 0.27s (about 40MB/s), so even a
+ * 150MB capture — the "order of magnitude bigger than 10-16MB" a 120s
+ * recording was said to produce — should load in a handful of seconds.
+ * Overridable per call, and by PORTHOLE_TRACE_TIMEOUT_MS for whoever needs a
+ * shorter fuse without recompiling.
  */
-export function askTrace(options: {
+const DEFAULT_TIMEOUT_MS = Number(process.env.PORTHOLE_TRACE_TIMEOUT_MS) || 60_000;
+
+export interface HoistedQuestion {
+  id: string;
+  asks: string;
+  /** The question's SELECT, with its own `INCLUDE PERFETTO MODULE` lines removed. */
+  sql: string;
+}
+
+export interface Hoisted {
+  /** Deduplicated module names, in first-seen order across the question set. */
+  modules: string[];
+  questions: HoistedQuestion[];
+}
+
+/** A fresh copy each call: `.replace` on a shared `g` regex leaves `lastIndex` behind it. */
+function includeModulePattern(): RegExp {
+  return /^\s*INCLUDE\s+PERFETTO\s+MODULE\s+([\w.]+)\s*;\s*$/gim;
+}
+
+/**
+ * Pulls every `INCLUDE PERFETTO MODULE` out of the questions and deduplicates
+ * them, so a batched script declares each module once no matter how many
+ * questions need it — today that is `slices.with_context`, wanted by both
+ * `render` and `slices`.
+ *
+ * This is its own named, tested function rather than a side effect of
+ * building the batch script because it is not incidental cleanup: GRA-61
+ * (five more trace questions) and GRA-85 (a project's own question) both add
+ * to the question set, and both need this exact hoisting to keep working.
+ * Get it wrong here — say, by hoisting only the first module a question
+ * declares — and the failure will not show up until one of those tickets
+ * adds a question with two.
+ */
+export function hoistModules(questions: Question[]): Hoisted {
+  const modules: string[] = [];
+  const seen = new Set<string>();
+  const hoisted = questions.map((question): HoistedQuestion => {
+    let match: RegExpExecArray | null;
+    const finder = includeModulePattern();
+    while ((match = finder.exec(question.sql))) {
+      if (!seen.has(match[1])) {
+        seen.add(match[1]);
+        modules.push(match[1]);
+      }
+    }
+    return { id: question.id, asks: question.asks, sql: question.sql.replace(includeModulePattern(), "").trim() };
+  });
+  return { modules, questions: hoisted };
+}
+
+/** `$from`/`$to`/`$package` substitution, factored out so batching and a single question share it. */
+function substitute(sql: string, packageName: string, fromNs: number, toNs: number): string {
+  return sql
+    .replace(/\$from/g, String(Math.round(fromNs)))
+    .replace(/\$to/g, String(Math.round(toNs)))
+    .replace(/\$package/g, `'${packageName.replace(/'/g, "''")}'`);
+}
+
+/**
+ * One script: the hoisted modules, then every question preceded by a marker
+ * that names it.
+ *
+ * The marker is its own statement — `SELECT 'porthole:<id>' AS marker` — not
+ * an extra column tacked onto the question's own SELECT. Tacking it on was
+ * the tempting shortcut and the one the sentinel-row approach is named for
+ * gone wrong: a column of literal values sits in the same CSV stream as
+ * whatever the question actually returns, and trace_processor's CSV neither
+ * escapes an embedded quote nor distinguishes a NULL from the literal text
+ * `[NULL]`. A slice name containing a quote, or a row that is `[NULL]` in
+ * every selected column, is indistinguishable from the marker under that
+ * scheme. Giving the marker its own statement instead means it is always its
+ * own block — one column literally named `marker`, one row, nothing a real
+ * question could produce by accident.
+ */
+function buildScript(
+  modules: string[],
+  questions: HoistedQuestion[],
+  packageName: string,
+  fromNs: number,
+  toNs: number,
+): string {
+  const lines: string[] = [];
+  for (const module of modules) lines.push(`INCLUDE PERFETTO MODULE ${module};`);
+  for (const question of questions) {
+    lines.push(`SELECT '${MARKER_PREFIX}${question.id}' AS marker;`);
+    lines.push(`${substitute(question.sql, packageName, fromNs, toNs)};`);
+  }
+  return lines.join("\n");
+}
+
+function splitBlocks(stdout: string): string[] {
+  return stdout
+    .split(/\r?\n\r?\n/)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+}
+
+interface BatchMatch {
+  rows: Map<string, Array<Record<string, unknown>>>;
+  /** How many leading ids, in order, got a complete marker-then-data pair. */
+  answered: number;
+}
+
+/**
+ * Walks the blocks trace_processor printed against the ids that were asked
+ * for, in lockstep.
+ *
+ * Confirmed against the real v58.2 binary before relying on it: every
+ * statement in a script — including a bare `SELECT '...' AS marker`, and
+ * including one that returns zero rows — prints its own CSV block, and
+ * consecutive blocks are separated by exactly one blank line. That makes the
+ * blocks self-describing without needing to trust that all five questions
+ * even compiled: this function stops the moment a block is not the marker it
+ * expected next, and `answered` tells the caller how many leading ids to
+ * trust. A marker with no data block after it — the block list simply ends —
+ * is what a mid-script failure or a killed process both look like from here;
+ * telling those apart is `askTrace`'s job, not this function's.
+ */
+function matchBatch(stdout: string, ids: string[]): BatchMatch {
+  const blocks = splitBlocks(stdout);
+  const rows = new Map<string, Array<Record<string, unknown>>>();
+  let blockIndex = 0;
+  let questionIndex = 0;
+  while (questionIndex < ids.length) {
+    const markerLines = blocks[blockIndex]?.split(/\r?\n/) ?? [];
+    const expected = `"${MARKER_PREFIX}${ids[questionIndex]}"`;
+    if (markerLines[0] !== '"marker"' || markerLines[1] !== expected) break;
+    const data = blocks[blockIndex + 1];
+    if (data === undefined) break;
+    rows.set(ids[questionIndex], parseRows(data));
+    blockIndex += 2;
+    questionIndex += 1;
+  }
+  return { rows, answered: questionIndex };
+}
+
+interface RunResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  elapsedMs: number;
+  spawnError?: Error;
+}
+
+/**
+ * One trace_processor_shell invocation, run asynchronously so it cannot
+ * freeze the rest of the server while the trace loads.
+ *
+ * `spawn`, not the `spawnSync` this replaced: the old code blocked Node's one
+ * thread for the entire run, which meant nothing read the device socket,
+ * nothing answered MCP, and the timeline WebSocket went silent for as long as
+ * loading took — five times, once per question, with no way back from a
+ * wedged binary except killing the server. The timeout below is that way
+ * back: no output within `timeoutMs` and the child is killed and the caller
+ * is told how long it waited and against which trace, rather than left to
+ * keep waiting on something that will never answer.
+ */
+function runScript(binary: string, trace: string, sql: string, timeoutMs: number): Promise<RunResult> {
+  return new Promise((resolvePromise) => {
+    const start = Date.now();
+    const child = spawn(binary, ["query", "-f", "-", trace]);
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk));
+    // Writing to a child that never started, or that the timer above has
+    // already killed, throws EPIPE on the stream itself rather than through
+    // the promise this function returns — unhandled, that crashes the whole
+    // process over a condition 'close'/'error' below already report. This
+    // listener's only job is to stop node treating the write as a second,
+    // uncaught failure.
+    child.stdin.on("error", () => {});
+    child.stdin.write(sql);
+    child.stdin.end();
+
+    const finish = (result: Omit<RunResult, "elapsedMs">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise({ ...result, elapsedMs: Date.now() - start });
+    };
+
+    child.on("close", (code) => finish({ code, stdout, stderr, timedOut }));
+    child.on("error", (error) => finish({ code: null, stdout, stderr, timedOut, spawnError: error }));
+  });
+}
+
+export interface AskTraceOptions {
   binary: string;
   trace: string;
   packageName: string;
   fromNs: number;
   toNs: number;
-}): AskResult {
+  /** Overrides the 60s default. A retry after a failing question gets a fresh budget, not a shared one. */
+  timeoutMs?: number;
+}
+
+/**
+ * Puts the five questions to a trace, scoped to one window and one process,
+ * in one trace_processor_shell invocation rather than five.
+ *
+ * Trace loading, not querying, is what a real capture costs — the fixtures
+ * in this repo are 10-16MB and the ticket that prompted this said a 120s
+ * capture runs an order of magnitude bigger. The code this replaced paid
+ * that load five times, once per question, synchronously, which is the
+ * compounding version of the same mistake: it also froze the one thread the
+ * rest of the MCP server runs on for as long as each load took.
+ *
+ * Substitution rather than bound parameters, as before: trace_processor's
+ * shell takes a file of SQL and no bindings. The package name is the only
+ * string that reaches it and it is quoted; the window bounds are numbers by
+ * the time they arrive.
+ *
+ * One script cannot isolate a failure by itself — confirmed against the real
+ * binary, not assumed: it aborts the entire run on the first statement that
+ * errors, so a naive concatenation answers zero of the four questions after
+ * a failing one, not four. That is why this is a loop rather than one spawn:
+ * a failure removes the failed question from the batch, keeps whatever
+ * already answered, and reruns only the remainder. The trace reloads again,
+ * but only once per failure — the common case, all five compile, is still
+ * one load, and a bad question costs one extra load for the rest rather
+ * than four lost answers.
+ *
+ * A timeout is a different kind of event and is handled differently on
+ * purpose: it does not mean one question was bad, it means trace_processor
+ * itself is wedged, and rerunning the remainder would just wedge again. So a
+ * timeout ends the whole call — everything still pending is reported
+ * unanswered with one shared reason naming the trace and how long it
+ * waited — rather than retrying into the same hang one question at a time.
+ */
+export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const { modules, questions } = hoistModules(QUESTIONS);
+
+  let pending = questions;
   const rows: Rows = {};
   const unanswered: string[] = [];
 
-  for (const question of QUESTIONS) {
-    const sql = question.sql
-      .replace(/\$from/g, String(Math.round(options.fromNs)))
-      .replace(/\$to/g, String(Math.round(options.toNs)))
-      .replace(/\$package/g, `'${options.packageName.replace(/'/g, "''")}'`);
+  while (pending.length > 0) {
+    const script = buildScript(modules, pending, options.packageName, options.fromNs, options.toNs);
+    const result = await runScript(options.binary, options.trace, script, timeoutMs);
 
-    // `query -f -` and not `-q /dev/stdin`: the latter is read by reopening
-    // /proc/self/fd/0, which does not exist on Windows, so every question came
-    // back unanswered there while looking like a problem with the SQL.
-    const result = spawnSync(options.binary, ["query", "-f", "-", options.trace], {
-      input: sql,
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-    });
-
-    if (result.status !== 0) {
-      unanswered.push(`${question.asks} — ${why(result.stderr, result.error)}`);
-      continue;
+    if (result.spawnError) {
+      // The binary itself did not run — a bad path, not a bad question.
+      // Every question in this batch is equally unanswered and retrying
+      // would fail the same way, so say so once each and stop.
+      for (const question of pending) {
+        unanswered.push(`${question.asks} — could not run trace_processor: ${result.spawnError.message}`);
+      }
+      break;
     }
-    (rows as Record<string, unknown>)[question.id] = parseRows(result.stdout);
+
+    const { rows: batchRows, answered } = matchBatch(result.stdout, pending.map((q) => q.id));
+    for (const [id, questionRows] of batchRows) {
+      (rows as Record<string, unknown>)[id] = questionRows;
+    }
+
+    if (answered >= pending.length) break;
+
+    if (result.timedOut) {
+      for (const question of pending.slice(answered)) {
+        unanswered.push(
+          `${question.asks} — trace_processor did not answer within ${result.elapsedMs}ms querying ` +
+            `${options.trace}; it may be wedged, so nothing after it was retried`,
+        );
+      }
+      break;
+    }
+
+    const failed = pending[answered];
+    unanswered.push(`${failed.asks} — ${why(result.stderr, undefined)}`);
+    pending = pending.slice(answered + 1);
   }
 
   return { findings: interpret(rows), unanswered };

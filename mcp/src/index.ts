@@ -414,7 +414,7 @@ server.registerTool(
       toNs: (span.to + sleepMs) * 1e6,
     };
 
-    const { findings: traceFindings, unanswered } = askTrace({
+    const { findings: traceFindings, unanswered } = await askTrace({
       binary,
       trace,
       packageName: app,
