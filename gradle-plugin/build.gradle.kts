@@ -62,6 +62,32 @@ dependencies {
 tasks.test {
     useJUnit()
 
+    // VersionConsistencyTest's whole job is to compare `porthole` in
+    // gradle/libs.versions.toml against `version` in mcp/package.json, and it
+    // does that by reading both files at runtime. Gradle cannot see a file a
+    // test opens for itself, so without these two lines the subject of the
+    // check is not an input to the check: editing mcp/package.json leaves
+    // `test` UP-TO-DATE and the drift ships under a green build. The build
+    // cache makes it worse rather than better — the cache key is built from
+    // the declared inputs, so the passing entry and the state that should fail
+    // share a key, and the guard gets handed its own stale pass FROM-CACHE. A
+    // check whose subject is not its input is a check that can be cached past
+    // the exact failure it exists to catch.
+    //
+    // The catalog half looks covered already, but only by accident: editing it
+    // regenerates PortholeVersion.kt and recompiles the test classpath. That is
+    // a side effect of a different task's wiring, not a promise about this one,
+    // so both files are declared explicitly.
+    //
+    // This is an included build, so layout.projectDirectory is gradle-plugin/
+    // and both files are one level up — the same `user.dir`-and-parent walk the
+    // test itself does. NONE: only the contents decide the answer, never where
+    // the files sit on disk.
+    inputs.file(layout.projectDirectory.file("../gradle/libs.versions.toml"))
+        .withPathSensitivity(PathSensitivity.NONE)
+    inputs.file(layout.projectDirectory.file("../mcp/package.json"))
+        .withPathSensitivity(PathSensitivity.NONE)
+
     // Which Gradle the TestKit builds run on. Unset means the one running this
     // build; a value makes TestKit fetch that distribution, which is how the
     // plugin gets checked against Gradle versions newer than it was built with.
