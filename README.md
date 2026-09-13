@@ -1040,13 +1040,25 @@ consumer is most likely to be looking for. It carries Dokka's HTML now.
 ## Building
 
 ```bash
-./gradlew build                          # everything, including lint
+./gradlew test                           # runtime, no-op and the Gradle plugin
+./gradlew check                          # the same, plus Android lint
+./gradlew build                          # check, and the artifacts — Android modules only
 ./gradlew :runtime:testDebugUnitTest     # runtime
 ./gradlew :runtime-noop:testDebugUnitTest  # api parity with the runtime
-./gradlew -p gradle-plugin test          # plugin, ProjectBuilder and TestKit
+./gradlew -p gradle-plugin test          # plugin alone, ProjectBuilder and TestKit
 cd mcp && npm install && npm run build   # ui and server
 cd mcp/ui && npm test                    # timeline logic
 ```
+
+The plugin is a separate Gradle build, pulled in by `includeBuild` from the
+`pluginManagement` block in `settings.gradle.kts`. An included build's lifecycle
+tasks are not reachable from the including build's, so the root `test` and
+`check` name the plugin's explicitly; without that they walk the three Android
+modules and stop, which is what they used to do. `build` is the exception — it
+still covers the Android modules only, so `check` is the command that verifies
+everything the JVM side can. Two of the plugin's tests, the AGP pair, skip unless
+you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and need the network,
+which is why they are opt-in.
 
 The runtime tests run the request-body tee against a real client and a real
 socket via MockWebServer. The property they exist to hold down is the boring
