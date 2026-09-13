@@ -247,6 +247,36 @@ describe("who the server answers", () => {
     expect(response.status).toBe(200);
   });
 
+  it("refuses an Origin the request was not also addressed to", async () => {
+    // The dev port is allowed, which for a while meant allowed on its own:
+    // a page served from :5273 could address this server directly and have
+    // its `Origin` pass, because both spellings were in one flat list. The
+    // two halves have to agree — a caller may only claim an origin it also
+    // claims to have been addressed to — and here they do not.
+    const response = await timeline.send("/api/events", {
+      headers: { host: `127.0.0.1:${timeline.port}`, origin: "http://localhost:5273" },
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("refuses the mirror image, addressed to the dev port from ours", async () => {
+    const response = await timeline.send("/api/events", {
+      headers: { host: "localhost:5273", origin: `http://127.0.0.1:${timeline.port}` },
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("refuses two loopback spellings of this same server as disagreement", async () => {
+    // `localhost` and `127.0.0.1` are the same machine, and the first test in
+    // this file says so about `Host`. They are still different origins to a
+    // browser, which will never send this pair; only something hand-rolling
+    // headers can, and it gets no benefit of the doubt.
+    const response = await timeline.send("/api/events", {
+      headers: { host: `127.0.0.1:${timeline.port}`, origin: `http://localhost:${timeline.port}` },
+    });
+    expect(response.status).toBe(403);
+  });
+
   it("explains itself in one line and quotes nothing back", async () => {
     const response = await timeline.send("/api/health", {
       headers: { host: "evil.example.com", origin: "https://attacker.example/secret-path" },
@@ -424,6 +454,46 @@ describe("the websocket", () => {
     const result = await connect(timeline.port, { headers: { host: "evil.example.com" } });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("403");
+  });
+
+  it("refuses an upgrade from a page on the dev port, addressed to us", async () => {
+    // The one that got through. A page served from http://localhost:5273 —
+    // and the Vite dev server is not the only thing that can hold that port —
+    // opening `ws://127.0.0.1:<ours>/ws` produces exactly this pair: our own
+    // `Host`, its allowed `Origin`, and, because it is an upgrade, no
+    // `Sec-Fetch-*` header of any kind. Chrome 152 sends none on a handshake,
+    // so the third check never runs and the `Origin` check was the only one
+    // left; with the dev port in a flat allowlist it passed, and the socket
+    // replied with the whole event buffer. Note the headers below: no
+    // sec-fetch-site, deliberately, because that is what the browser does.
+    timeline.device.emit("event", event(1, "http", { header: "CANARY-SECRET" }));
+    const result = await connect(timeline.port, {
+      headers: { origin: "http://localhost:5273" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("403");
+    if (result.ok) expect(result.message).not.toContain("CANARY-SECRET");
+  });
+
+  it("allows an upgrade through the Vite dev proxy, where both halves say :5273", async () => {
+    // The capability the allowance exists for, on the path that carries the
+    // data. `npm run dev` forwards `Host` and `Origin` untouched for /ws as
+    // well as /api, so this is what hot reload actually looks like on the
+    // wire, and refusing it would take the live timeline away from the dev UI.
+    const result = await connect(timeline.port, {
+      headers: { host: "localhost:5273", origin: "http://localhost:5273" },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.message).type).toBe("init");
+  });
+
+  it("allows an upgrade where Host and Origin are both this server", async () => {
+    // The direct UI, served by this process on its own port.
+    const result = await connect(timeline.port, {
+      headers: { origin: `http://127.0.0.1:${timeline.port}` },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.message).type).toBe("init");
   });
 
   it("has nothing to say on any other path", async () => {

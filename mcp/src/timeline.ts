@@ -48,9 +48,18 @@ const DB_ROUTES: Record<string, string> = {
  * the dev UI arrives here addressed to :5273. Verified, not assumed: with the
  * repo's own vite.config.ts, `Host: localhost:5273` and
  * `Origin: http://localhost:5273` are what land on the target socket, for the
- * WebSocket upgrade as well as for `/api`. Allowing that port costs nothing
- * against the attack this gate exists for — a page on the open web cannot make
- * a browser send a loopback `Host` — and refusing it would break hot reload.
+ * WebSocket upgrade as well as for `/api`.
+ *
+ * The port is safe to allow only because `refuse` also requires the two halves
+ * to agree. As a bare entry in an allowlist it was a hole, and the hole was
+ * the WebSocket: nothing stops some other page from being served on :5273 —
+ * the dev server is not the only thing that can hold a port, and a developer
+ * who visits it has given that page this origin. Such a page opening
+ * `ws://127.0.0.1:8678/ws` produced an upgrade carrying this server's own
+ * `Host` and that page's allowed `Origin`, which passed, and the socket
+ * answered with the entire event buffer. Requiring agreement refuses that
+ * pair — the two halves name different ports — while still admitting the
+ * proxy's, where both say :5273.
  */
 const VITE_DEV_PORT = 5273;
 
@@ -86,8 +95,9 @@ export class TimelineServer {
   private started = false;
 
   /**
-   * Every authority this server will answer to, and every origin it will take
-   * a request from. Compared whole, lower-cased, never parsed.
+   * Every authority this server will answer to. Compared whole, lower-cased,
+   * never parsed. There is no matching list of origins: an `Origin` is checked
+   * against the one authority `Host` names, not against a list of its own.
    *
    * `Host` and `Origin` are text the caller chose, and every parser of them has
    * a seam — `user@host`, a trailing dot, an embedded slash, a bracketed v6
@@ -95,18 +105,16 @@ export class TimelineServer {
    * list of strings has no seam: `127.0.0.1.evil.com` is simply not in it.
    */
   private readonly authorities: Set<string>;
-  private readonly origins: Set<string>;
 
   constructor(
     private readonly device: DeviceClient,
     private readonly port: number,
     private readonly serial?: string,
   ) {
-    const authorities = [...loopbackAuthorities(port), ...loopbackAuthorities(VITE_DEV_PORT)];
-    this.authorities = new Set(authorities);
-    // http only: this server has no certificate and never will, so an https
-    // origin claiming to be us is someone else.
-    this.origins = new Set(authorities.map((authority) => `http://${authority}`));
+    this.authorities = new Set([
+      ...loopbackAuthorities(port),
+      ...loopbackAuthorities(VITE_DEV_PORT),
+    ]);
 
     device.on("event", (event: DeviceEvent) => this.record(event));
     device.on("state", (state: string) => this.broadcast({ type: "state", state }));
@@ -165,17 +173,32 @@ export class TimelineServer {
    *
    * The socket is loopback-only, which keeps the network out but not the
    * browser: every page the developer has open can reach 127.0.0.1, and a
-   * simple cross-origin POST lands whether or not the attacker can read the
-   * reply. Three cheap questions close that, and all three are about the
-   * browser's own account of the request rather than about its body:
+   * cross-origin POST — or a WebSocket upgrade — lands whether or not the
+   * attacker can read the reply. Three questions close that, and all three are
+   * about the browser's own account of the request rather than about its body:
    *
    * `Host` is what the URL said, and a page on the open web cannot forge it —
    * which is also the answer to DNS rebinding, where a name the attacker owns
    * resolves to 127.0.0.1 and arrives here as `Host: evil.example.com`.
+   *
    * `Origin` is who asked, sent on every cross-origin request and on
-   * same-origin POSTs. `Sec-Fetch-Site` is the browser's own verdict, and only
-   * a browser sends it — so its absence has to pass, or curl, the MCP server's
-   * own health probe and anything older than 2020 stop working.
+   * same-origin POSTs, and it must name the authority `Host` already named: a
+   * caller may only claim an origin it also claims to have been addressed to.
+   * That is a stronger rule than membership of a list, and a cheaper one to
+   * check by eye. It is also what makes the dev-port allowance safe rather than
+   * merely convenient, since :5273 is then admitted only when both halves say
+   * :5273 — the Vite proxy — and refused when `Origin` alone does, which is a
+   * page that happens to have been served from that port.
+   *
+   * `Sec-Fetch-Site` is the browser's own verdict, and it backstops nothing on
+   * the path that matters. Current Chrome — 152, observed, not assumed — sends
+   * no `Sec-Fetch-*` header of any kind on a WebSocket handshake, and the
+   * handshake is the request that answers with the whole event buffer. Every
+   * ordinary fetch from the same page carried `sec-fetch-site: cross-site`; the
+   * upgrade beside it carried nothing, so this check simply did not run. Its
+   * absence has to pass anyway, or curl, the MCP server's own health probe and
+   * anything older than 2020 stop working. Take it as a third opinion where a
+   * browser offers one, never as a defence the other two can lean on.
    */
   private refuse(req: http.IncomingMessage): string | null {
     const host = req.headers.host?.toLowerCase();
@@ -183,13 +206,15 @@ export class TimelineServer {
       return "Refused: this is a loopback debug server, and that is not one of its own addresses.";
     }
 
+    // `http://` and nothing else: this server has no certificate and never
+    // will, so an https origin claiming to be us is someone else.
     const origin = req.headers.origin?.toLowerCase();
-    if (origin !== undefined && !this.origins.has(origin)) {
+    if (origin !== undefined && origin !== `http://${host}`) {
       return "Refused: this debug server answers only its own page, and that request came from elsewhere.";
     }
 
-    const site = req.headers["sec-fetch-site"];
-    if (typeof site === "string" && site !== "same-origin" && site !== "none") {
+    const site = req.headers["sec-fetch-site"]?.toString().toLowerCase();
+    if (site !== undefined && site !== "same-origin" && site !== "none") {
       return "Refused: the browser reports this request did not come from this server's own page.";
     }
 
