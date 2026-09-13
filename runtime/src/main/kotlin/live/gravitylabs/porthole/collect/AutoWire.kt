@@ -30,9 +30,11 @@ internal class AutoWire(
 
     private val seen = HashSet<Int>()
     private val main = Handler(Looper.getMainLooper())
+    private var callbacks: Application.ActivityLifecycleCallbacks? = null
+    private var app: Application? = null
 
     fun install(app: Application): Boolean {
-        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+        val lifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 attachView(activity)
                 scanRepeatedly(activity)
@@ -44,8 +46,24 @@ internal class AutoWire(
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, out: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
-        })
+        }
+        this.app = app
+        this.callbacks = lifecycleCallbacks
+        app.registerActivityLifecycleCallbacks(lifecycleCallbacks)
         return true
+    }
+
+    /**
+     * Undoes [install]: unregisters the lifecycle callback and drops the
+     * pending rescans, so nothing this class scheduled outlives the session
+     * that created it.
+     */
+    fun stop() {
+        callbacks?.let { cb -> app?.let { runCatching { it.unregisterActivityLifecycleCallbacks(cb) } } }
+        callbacks = null
+        app = null
+        main.removeCallbacksAndMessages(null)
+        seen.clear()
     }
 
     /**

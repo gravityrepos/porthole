@@ -102,6 +102,7 @@ object Porthole {
         val frames: FrameCollector,
         val memory: MemoryCollector,
         val deviceContext: DeviceCollector,
+        val autoWire: AutoWire,
         val watchdog: MainThreadWatchdog,
         val nav: NavCollector?,
         val nav3: BackStackCollector,
@@ -147,6 +148,7 @@ object Porthole {
             val frames = FrameCollector(ring)
             val memory = MemoryCollector(ring)
             val deviceContext = DeviceCollector(ring)
+            val autoWire = AutoWire(semantics, state)
             val watchdog = MainThreadWatchdog(ring, appPackages)
 
             val collectors = mutableListOf("recompositions", "semantics_tree", "state", "inflight", "logs")
@@ -166,6 +168,21 @@ object Porthole {
                 if (WorkManagerPorthole.install(app, inflight, ring)) collectors += "workmanager"
             }
 
+            snapshots.start()
+            logs.start()
+            memory.start()
+            collectors += "memory"
+            if (deviceContext.install(app)) collectors += "device"
+            if (autoWire.install(app)) collectors += "autowire"
+
+            // Snapshotted rather than handed over live: Session used to receive
+            // this same mutable list and rely on every append above already
+            // having happened by the time anything read `collectors` back, which
+            // held only because nothing had made a copy yet. Building the final
+            // list before Session exists means that is no longer something a
+            // later reordering could quietly break.
+            val finalCollectors = collectors.toList()
+
             val server = PortholeSocketServer(port, ring)
             val s = Session(
                 app = app,
@@ -181,24 +198,19 @@ object Porthole {
                 frames = frames,
                 memory = memory,
                 deviceContext = deviceContext,
+                autoWire = autoWire,
                 watchdog = watchdog,
                 nav = nav,
                 nav3 = BackStackCollector(ring),
                 server = server,
                 startedAt = nowMs(),
-                collectors = collectors,
+                collectors = finalCollectors,
             )
             registerMethods(s)
-            snapshots.start()
-            logs.start()
-            memory.start()
-            collectors += "memory"
-            if (deviceContext.install(app)) collectors += "device"
-            if (AutoWire(semantics, state).install(app)) collectors += "autowire"
             server.start()
             writeConnectionFile(app, port)
             session = s
-            Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${collectors.joinToString()}")
+            Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
             // After the app has had a chance to build its clients. Asking
             // now would report everything as missing.
             Handler(Looper.getMainLooper()).postDelayed({ Setup.log() }, SETUP_REPORT_DELAY_MS)
@@ -220,6 +232,9 @@ object Porthole {
             s.snapshots.stop()
             s.logs.stop()
             s.frames.stop()
+            s.memory.stop()
+            s.deviceContext.stop(s.app)
+            s.autoWire.stop()
             s.watchdog.stop()
             s.recompositions.stop()
             s.nav?.unregister()
