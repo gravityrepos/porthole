@@ -28,6 +28,7 @@ import live.gravitylabs.porthole.collect.RecompositionCollector
 import live.gravitylabs.porthole.collect.SemanticsCollector
 import live.gravitylabs.porthole.collect.SnapshotWatcher
 import live.gravitylabs.porthole.collect.StateCollector
+import live.gravitylabs.porthole.collect.Window
 import live.gravitylabs.porthole.integration.WorkManagerPorthole
 import live.gravitylabs.porthole.protocol.BlockingReport
 import live.gravitylabs.porthole.protocol.FrameReport
@@ -489,48 +490,23 @@ object Porthole {
         }
 
         method("blocking") { params ->
-            val from = params.long("from") ?: params.long("sinceMs")?.let { nowMs() - it }
-            val to = params.long("to")
-            val limit = params.int("limit") ?: 20
-            val stalls = s.watchdog.report(
+            // One reading of the clock for the whole answer.
+            //
+            // This used to work the window out twice — once inside the watchdog
+            // and once here for the inflight collector — from two calls to
+            // nowMs() a few milliseconds apart. A single `blocking` answer
+            // therefore reported stalls and main-thread queries over two windows
+            // that did not line up, and nothing in the output said so, which is
+            // not something anybody was ever going to debug from the result.
+            val window = Window.resolve(
                 sinceMs = params.long("sinceMs"),
                 from = params.long("from"),
-                to = to,
-                limit = limit,
+                to = params.long("to"),
+                now = nowMs(),
             )
-            val queries = s.inflight.mainThreadQueries(from, to, limit)
-            val calls = s.inflight.mainThreadHttp(from, to, limit)
             encode(
                 BlockingReport.serializer(),
-                BlockingReport(
-                    stalls = stalls,
-                    mainThreadQueries = queries,
-                    mainThreadHttp = calls,
-                    stallThresholdMs = 100L,
-                    notes = buildList {
-                        if (calls.isNotEmpty()) {
-                            add(
-                                "HTTP on the main thread is normally impossible: OkHttp throws " +
-                                    "NetworkOnMainThreadException for it. These calls went around " +
-                                    "that somehow and are worth looking at closely.",
-                            )
-                        }
-                        if (stalls.isEmpty() && queries.isEmpty() && calls.isEmpty()) {
-                            add("Nothing blocked the main thread in this window.")
-                        }
-                        add(
-                            "A stall is the main thread failing to answer a ping for longer than " +
-                                "the threshold; the stack is where it was at that moment. Shorter " +
-                                "hitches show up in `frames` instead.",
-                        )
-                        if (queries.isNotEmpty()) {
-                            add(
-                                "Database work on the main thread is a defect regardless of how " +
-                                    "fast it was: it is a disk read in the frame loop.",
-                            )
-                        }
-                    },
-                ),
+                blockingReport(s.watchdog, s.inflight, window, params.int("limit") ?: 20),
             )
         }
 
@@ -610,4 +586,62 @@ object Porthole {
     }
 
     private const val RES_PORT = "porthole_port"
+}
+
+/**
+ * The `blocking` answer, assembled from one window.
+ *
+ * Outside the RPC handler so that the two properties that matter here can be
+ * checked without a device. Both halves of the report are drawn from the same
+ * [window] — they used to be drawn from two, resolved milliseconds apart — and
+ * the threshold it quotes comes off the watchdog that enforces it rather than
+ * from a literal written alongside. A literal was what it had, and the two
+ * numbers were free to drift apart in the one field that tells an agent what
+ * "nothing blocked the main thread in this window" means. A report saying 100ms
+ * while the watchdog waited 250 is worse than no threshold at all, because it
+ * reads as precision.
+ */
+internal fun blockingReport(
+    watchdog: MainThreadWatchdog,
+    inflight: InflightCollector,
+    window: LongRange,
+    limit: Int,
+): BlockingReport {
+    val stalls = watchdog.report(window, limit)
+    val queries = inflight.mainThreadQueries(window, limit)
+    val calls = inflight.mainThreadHttp(window, limit)
+    return BlockingReport(
+        stalls = stalls,
+        mainThreadQueries = queries,
+        mainThreadHttp = calls,
+        stallThresholdMs = watchdog.stallThresholdMs,
+        notes = buildList {
+            if (calls.isNotEmpty()) {
+                add(
+                    "HTTP on the main thread is normally impossible: OkHttp throws " +
+                        "NetworkOnMainThreadException for it. These calls went around " +
+                        "that somehow and are worth looking at closely.",
+                )
+            }
+            if (stalls.isEmpty() && queries.isEmpty() && calls.isEmpty()) {
+                add("Nothing blocked the main thread in this window.")
+            }
+            add(
+                "A stall is the main thread failing to answer a ping for longer than " +
+                    "the threshold; the stack is where it was at that moment. Shorter " +
+                    "hitches show up in `frames` instead.",
+            )
+            if (queries.isNotEmpty()) {
+                add(
+                    "Database work on the main thread is a defect regardless of how " +
+                        "fast it was: it is a disk read in the frame loop.",
+                )
+            }
+            add(
+                "Work that began before this window and was still running inside it is " +
+                    "included: a query that started early and held the main thread is the " +
+                    "cause you are looking for, not an entry to filter out.",
+            )
+        },
+    )
 }

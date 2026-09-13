@@ -30,10 +30,26 @@ internal class MainThreadWatchdog(
     private val ring: EventRing,
     /** Package prefixes belonging to the app, so its frames can be shown first. */
     private val appPackages: List<String> = emptyList(),
+    /**
+     * The line between a hitch and a stall, in milliseconds.
+     *
+     * Held here rather than reached for as a constant at the point of use,
+     * because the number is also *reported*: `blocking` carries it as
+     * `stallThresholdMs`, and that field is what tells an agent what "nothing
+     * blocked the main thread in this window" actually means. It used to be
+     * written out twice — once here and once as a literal in the report — so
+     * changing the watchdog left the report quietly lying about it.
+     */
+    val stallThresholdMs: Long = STALL_MS,
+    /** Substitutable for the same reason the event ring's clock is. */
+    private val now: () -> Long = ::nowMs,
 ) {
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val mainThread = Looper.getMainLooper().thread
+    // Lazy so that constructing a watchdog does not need a main looper. Nothing
+    // here is touched until start() runs, and deferring them is what lets the
+    // reporting side be exercised off a device.
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val mainThread by lazy { Looper.getMainLooper().thread }
 
     private val stalls = ArrayDeque<MainThreadStall>()
     private val lock = Any()
@@ -61,7 +77,7 @@ internal class MainThreadWatchdog(
 
     private fun loop() {
         while (running) {
-            val postedAt = nowMs()
+            val postedAt = now()
             val answered = booleanArrayOf(false)
             mainHandler.post { answered[0] = true }
 
@@ -74,11 +90,11 @@ internal class MainThreadWatchdog(
                 } catch (_: InterruptedException) {
                     return
                 }
-                waited = nowMs() - postedAt
+                waited = now() - postedAt
                 // Sampled once, at the moment it becomes a stall. Sampling
                 // repeatedly would mostly re-capture the same frames, and
                 // Thread.getStackTrace on a running thread is not free.
-                if (waited >= STALL_MS && stack == null) {
+                if (waited >= stallThresholdMs && stack == null) {
                     stack = captureMainStack()
                     // Opened at detection rather than at the start of the stall,
                     // which has already passed and cannot be drawn. The slice
@@ -95,7 +111,7 @@ internal class MainThreadWatchdog(
                 record(postedAt, waited, stack)
             }
 
-            val remaining = INTERVAL_MS - (nowMs() - postedAt)
+            val remaining = INTERVAL_MS - (now() - postedAt)
             if (remaining > 0) {
                 try {
                     Thread.sleep(remaining)
@@ -106,7 +122,7 @@ internal class MainThreadWatchdog(
         }
     }
 
-    private fun record(startedAt: Long, durationMs: Long, stack: String) {
+    internal fun record(startedAt: Long, durationMs: Long, stack: String) {
         val stall = MainThreadStall(at = startedAt, durationMs = durationMs, stack = stack)
         synchronized(lock) {
             stalls.addLast(stall)
@@ -137,20 +153,28 @@ internal class MainThreadWatchdog(
         StackFormat.render(StackFormat.order(frames.toList(), appPackages))
     }.getOrDefault("(stack capture failed)")
 
-    fun report(sinceMs: Long?, from: Long?, to: Long?, limit: Int): List<MainThreadStall> {
-        val now = nowMs()
-        val start = from ?: sinceMs?.let { now - it }
-        val end = to ?: now
-        return synchronized(lock) {
-            stalls.filter { (start == null || it.at >= start) && it.at <= end }
+    /** See [Window.resolve] for what the three window arguments mean. */
+    fun report(sinceMs: Long?, from: Long?, to: Long?, limit: Int): List<MainThreadStall> =
+        report(Window.resolve(sinceMs, from, to, now()), limit)
+
+    /**
+     * A stall is a span, not an instant, so it is matched by overlap: one that
+     * began just before the window and was still holding the main thread inside
+     * it is the whole reason the window was drawn there. `at` is when the ping
+     * was posted and `durationMs` how long it went unanswered, so the span runs
+     * from one to the other. Every stall recorded here has ended by definition —
+     * it is only recorded once the main thread answers.
+     */
+    fun report(window: LongRange, limit: Int): List<MainThreadStall> =
+        synchronized(lock) {
+            stalls.filter { Window.overlaps(window, it.at, it.at + it.durationMs) }
         }.sortedByDescending { it.durationMs }.take(limit)
-    }
 
     fun reset() {
         synchronized(lock) { stalls.clear() }
     }
 
-    private companion object {
+    internal companion object {
         /** One ping per this long. Cheap enough to leave on for a whole session. */
         const val INTERVAL_MS = 300L
 
