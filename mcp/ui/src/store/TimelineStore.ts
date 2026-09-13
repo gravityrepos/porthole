@@ -47,6 +47,10 @@ export class TimelineStore {
       case "event": {
         this.events.push(message.event);
         if (this.events.length > MAX_EVENTS) {
+          // An O(n) memmove per event once the buffer is full. A ring buffer
+          // would avoid it, but every reader here — the canvas, the lanes, the
+          // fold below — wants a plain array in arrival order, and handing them
+          // a ring means touching all of them. Left as it is deliberately.
           this.events.splice(0, this.events.length - MAX_EVENTS);
         }
         if (message.event.event === "log_append") this.foldAppend(message.event);
@@ -79,18 +83,46 @@ export class TimelineStore {
    * parent grows in place. Replayed over the whole buffer after a backfill,
    * because otherwise a trace only ever assembles for whoever was watching
    * when it happened.
+   *
+   * The parents are indexed once for the pass. Resolving each one with a scan
+   * instead made this quadratic: a full 20 000-event buffer from a log-heavy
+   * app is tens of millions of comparisons, spent on the frame the socket
+   * delivers `init` or `reset` — and `reset` fires after every reconnect, which
+   * for an app being reinstalled all day is not a rare event.
    */
   private foldLogAppends(): void {
+    const logs = new Map<number, DeviceEvent>();
     for (const event of this.events) {
-      if (event.event === "log_append") this.foldAppend(event);
+      // First one wins, as the scan this replaces did. Sequence numbers are
+      // unique in anything the device actually emits, so it only decides a
+      // malformed stream — but it keeps the fold behaving exactly as before.
+      if (event.event === "log" && !logs.has(event.seq)) logs.set(event.seq, event);
+    }
+    for (const event of this.events) {
+      if (event.event === "log_append") this.foldAppend(event, logs);
     }
   }
 
-  private foldAppend(event: DeviceEvent): void {
+  /**
+   * Folds one append's text onto its parent, or drops it.
+   *
+   * A missing parent is not an error: the append outlived the line it belonged
+   * to, which is what eviction does to the oldest end of the buffer. Marking it
+   * applied regardless is what stops a second fold from retrying it forever.
+   *
+   * `logs` is the index a fold pass builds; when it is there it is complete,
+   * so a miss means evicted and must not fall back to a scan — that would put
+   * the quadratic cost straight back for exactly the appends that have no
+   * parent. A single streamed append has no index and scans, one pass over the
+   * buffer for the occasional event that carries a stack trace.
+   */
+  private foldAppend(event: DeviceEvent, logs?: Map<number, DeviceEvent>): void {
     if (event.applied) return;
     event.applied = true;
     const seq = num(event.data.seq, -1);
-    const target = this.events.find((item) => item.event === "log" && item.seq === seq);
+    const target = logs
+      ? logs.get(seq)
+      : this.events.find((item) => item.event === "log" && item.seq === seq);
     if (!target) return;
     target.data.message = str(target.data.message) + "\n" + str(event.data.text);
   }
