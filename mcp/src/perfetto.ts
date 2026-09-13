@@ -431,7 +431,8 @@ export interface AskResult {
   unanswered: string[];
 }
 
-const MARKER_PREFIX = "porthole:";
+/** Exported so tests can build a marker line without duplicating the format. */
+export const MARKER_PREFIX = "porthole:";
 
 /**
  * How long one trace_processor invocation gets before it is presumed wedged.
@@ -562,7 +563,7 @@ interface BatchMatch {
  * is what a mid-script failure or a killed process both look like from here;
  * telling those apart is `askTrace`'s job, not this function's.
  */
-function matchBatch(stdout: string, ids: string[]): BatchMatch {
+export function matchBatch(stdout: string, ids: string[]): BatchMatch {
   const blocks = splitBlocks(stdout);
   const rows = new Map<string, Array<Record<string, unknown>>>();
   let blockIndex = 0;
@@ -580,7 +581,7 @@ function matchBatch(stdout: string, ids: string[]): BatchMatch {
   return { rows, answered: questionIndex };
 }
 
-interface RunResult {
+export interface RunResult {
   code: number | null;
   stdout: string;
   stderr: string;
@@ -601,11 +602,19 @@ interface RunResult {
  * back: no output within `timeoutMs` and the child is killed and the caller
  * is told how long it waited and against which trace, rather than left to
  * keep waiting on something that will never answer.
+ *
+ * Takes `args` rather than assuming `["query", "-f", "-", trace]` itself so
+ * this function can be exercised directly, against a real process, without
+ * needing a trace_processor-shaped binary to do it: the tests drive it with
+ * plain `cmd.exe`, which Windows will spawn directly the way `askTrace`
+ * spawns the real binary, and which can be told to succeed, fail or hang on
+ * demand. `askTrace` is still the only caller that decides what those args
+ * actually are for a real trace.
  */
-function runScript(binary: string, trace: string, sql: string, timeoutMs: number): Promise<RunResult> {
+export function runScript(binary: string, args: string[], sql: string, timeoutMs: number): Promise<RunResult> {
   return new Promise((resolvePromise) => {
     const start = Date.now();
-    const child = spawn(binary, ["query", "-f", "-", trace]);
+    const child = spawn(binary, args);
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -650,50 +659,39 @@ export interface AskTraceOptions {
   timeoutMs?: number;
 }
 
-/**
- * Puts the five questions to a trace, scoped to one window and one process,
- * in one trace_processor_shell invocation rather than five.
- *
- * Trace loading, not querying, is what a real capture costs — the fixtures
- * in this repo are 10-16MB and the ticket that prompted this said a 120s
- * capture runs an order of magnitude bigger. The code this replaced paid
- * that load five times, once per question, synchronously, which is the
- * compounding version of the same mistake: it also froze the one thread the
- * rest of the MCP server runs on for as long as each load took.
- *
- * Substitution rather than bound parameters, as before: trace_processor's
- * shell takes a file of SQL and no bindings. The package name is the only
- * string that reaches it and it is quoted; the window bounds are numbers by
- * the time they arrive.
- *
- * One script cannot isolate a failure by itself — confirmed against the real
- * binary, not assumed: it aborts the entire run on the first statement that
- * errors, so a naive concatenation answers zero of the four questions after
- * a failing one, not four. That is why this is a loop rather than one spawn:
- * a failure removes the failed question from the batch, keeps whatever
- * already answered, and reruns only the remainder. The trace reloads again,
- * but only once per failure — the common case, all five compile, is still
- * one load, and a bad question costs one extra load for the rest rather
- * than four lost answers.
- *
- * A timeout is a different kind of event and is handled differently on
- * purpose: it does not mean one question was bad, it means trace_processor
- * itself is wedged, and rerunning the remainder would just wedge again. So a
- * timeout ends the whole call — everything still pending is reported
- * unanswered with one shared reason naming the trace and how long it
- * waited — rather than retrying into the same hang one question at a time.
- */
-export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { modules, questions } = hoistModules(QUESTIONS);
+/** Whatever runs one script and reports back — real for production, fake in tests. */
+export type RunFn = (binary: string, args: string[], sql: string, timeoutMs: number) => Promise<RunResult>;
 
+/**
+ * The batching loop itself, taking `run` as a parameter rather than calling
+ * `runScript` directly.
+ *
+ * Everything this loop needs to prove — that a batch answers everything in
+ * one call when it can, that a failing question does not take the other four
+ * with it, that a timeout stops the whole call instead of retrying into the
+ * same hang — is a property of this loop, not of `spawn` or of
+ * trace_processor_shell. Testing it against the real binary is what caught
+ * the mid-script-abort behaviour in the first place, and a couple of tests
+ * still do that against a real capture. But a suite that can only prove
+ * "the other four still answer" by shipping a broken query at a 77MB
+ * platform-specific download is not a suite that runs everywhere the code
+ * does, so `run` is swappable: production wires up the real `runScript`,
+ * tests wire up a plain async function that speaks the same marker protocol
+ * without spawning anything trace_processor-shaped at all.
+ */
+export async function runBatch(
+  questions: HoistedQuestion[],
+  modules: string[],
+  options: { binary: string; trace: string; packageName: string; fromNs: number; toNs: number; timeoutMs: number },
+  run: RunFn,
+): Promise<{ rows: Rows; unanswered: string[] }> {
   let pending = questions;
   const rows: Rows = {};
   const unanswered: string[] = [];
 
   while (pending.length > 0) {
     const script = buildScript(modules, pending, options.packageName, options.fromNs, options.toNs);
-    const result = await runScript(options.binary, options.trace, script, timeoutMs);
+    const result = await run(options.binary, ["query", "-f", "-", options.trace], script, options.timeoutMs);
 
     if (result.spawnError) {
       // The binary itself did not run — a bad path, not a bad question.
@@ -727,5 +725,45 @@ export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
     pending = pending.slice(answered + 1);
   }
 
+  return { rows, unanswered };
+}
+
+/**
+ * Puts the five questions to a trace, scoped to one window and one process,
+ * in one trace_processor_shell invocation rather than five.
+ *
+ * Trace loading, not querying, is what a real capture costs — the fixtures
+ * in this repo are 10-16MB and the ticket that prompted this said a 120s
+ * capture runs an order of magnitude bigger. The code this replaced paid
+ * that load five times, once per question, synchronously, which is the
+ * compounding version of the same mistake: it also froze the one thread the
+ * rest of the MCP server runs on for as long as each load took.
+ *
+ * Substitution rather than bound parameters, as before: trace_processor's
+ * shell takes a file of SQL and no bindings. The package name is the only
+ * string that reaches it and it is quoted; the window bounds are numbers by
+ * the time they arrive.
+ *
+ * One script cannot isolate a failure by itself — confirmed against the real
+ * binary, not assumed: it aborts the entire run on the first statement that
+ * errors, so a naive concatenation answers zero of the four questions after
+ * a failing one, not four. That is why `runBatch` is a loop rather than one
+ * spawn: a failure removes the failed question from the batch, keeps
+ * whatever already answered, and reruns only the remainder. The trace
+ * reloads again, but only once per failure — the common case, all five
+ * compile, is still one load, and a bad question costs one extra load for
+ * the rest rather than four lost answers.
+ *
+ * A timeout is a different kind of event and is handled differently on
+ * purpose: it does not mean one question was bad, it means trace_processor
+ * itself is wedged, and rerunning the remainder would just wedge again. So a
+ * timeout ends the whole call — everything still pending is reported
+ * unanswered with one shared reason naming the trace and how long it
+ * waited — rather than retrying into the same hang one question at a time.
+ */
+export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const { modules, questions } = hoistModules(QUESTIONS);
+  const { rows, unanswered } = await runBatch(questions, modules, { ...options, timeoutMs }, runScript);
   return { findings: interpret(rows), unanswered };
 }

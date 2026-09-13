@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { interpret, parseRows, type Rows } from "./perfetto.js";
+import { interpret, matchBatch, parseRows, type Rows } from "./perfetto.js";
 
 /**
  * The other fixtures are JSON exported from the trace viewer. These are the
@@ -141,5 +141,48 @@ describe("interpret, on what trace_processor prints", () => {
     // Five questions, five interpretations: a regression in any single query
     // shows up here as a missing finding rather than as silence.
     expect(findings.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+/**
+ * GRA-82 stopped running the five questions as five separate invocations and
+ * started running them as one script, each preceded by a `SELECT
+ * 'porthole:<id>' AS marker`. This is the same real stdout used above — real
+ * trace_processor output for a real 16MB capture, not invented rows — but
+ * wrapped in the marker shape a batched script actually produces, and
+ * concatenated in question order the way `buildScript` emits them.
+ *
+ * The property this pins is the one the ticket called out as most at risk
+ * from batching: that the five results still land keyed onto the right id in
+ * `Rows`, not shifted onto their neighbour, and that `interpret` produces the
+ * identical findings from the batched shape as from the five separate ones
+ * tested above.
+ */
+describe("matchBatch, on the five real fixtures concatenated in question order", () => {
+  const ids = ["jank", "thread_states", "binder", "render", "slices"];
+  const batched = ids.map((id) => `"marker"\n"porthole:${id}"\n\n${stdout(id).trimEnd()}`).join("\n\n");
+  const { rows: matched, answered } = matchBatch(batched, ids);
+
+  it("answers all five from one concatenated script", () => {
+    expect(answered).toBe(5);
+  });
+
+  it("keys every question's real rows onto its own id, not a neighbour's", () => {
+    for (const id of ids) {
+      expect(matched.get(id)).toEqual(rows(id));
+    }
+  });
+
+  it("produces the same findings batched as it does unbatched", () => {
+    const batchedRows = Object.fromEntries(matched) as Rows;
+    const batchedFindings = interpret(batchedRows);
+    const unbatchedFindings = interpret({
+      jank: rows("jank"),
+      thread_states: rows("thread_states"),
+      binder: rows("binder"),
+      render: rows("render"),
+      slices: rows("slices"),
+    });
+    expect(batchedFindings).toEqual(unbatchedFindings);
   });
 });

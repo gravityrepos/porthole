@@ -4,7 +4,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findTraceProcessor, interpret, QUESTIONS, type Rows } from "./perfetto.js";
+import {
+  findTraceProcessor,
+  hoistModules,
+  interpret,
+  matchBatch,
+  QUESTIONS,
+  runBatch,
+  runScript,
+  type HoistedQuestion,
+  type Rows,
+  type RunFn,
+} from "./perfetto.js";
 
 /**
  * The fixtures are real: three exports taken from Perfetto's own UI against a
@@ -202,4 +213,285 @@ describe("findTraceProcessor", () => {
   it("survives there being no cache at all", () => {
     expect(findTraceProcessor()).toBeNull();
   });
+});
+
+/**
+ * `hoistModules` is what GRA-61 (five more trace questions) and GRA-85 (a
+ * project's own question) will both extend, so it is tested against the
+ * real `QUESTIONS` array rather than a hand-built stand-in: a test against a
+ * toy input would keep passing even if a future question's module stopped
+ * being pulled out correctly, which is precisely the failure this exists to
+ * catch.
+ */
+describe("hoistModules", () => {
+  const { modules, questions } = hoistModules(QUESTIONS);
+
+  it("declares a module shared by two questions once, not twice", () => {
+    // render and slices both need slices.with_context.
+    expect(modules.filter((m) => m === "slices.with_context")).toHaveLength(1);
+  });
+
+  it("still declares a module only one question needs", () => {
+    expect(modules).toContain("android.binder");
+  });
+
+  it("strips every question's own INCLUDE line, module or not", () => {
+    for (const q of questions) {
+      expect(q.sql).not.toMatch(/INCLUDE\s+PERFETTO\s+MODULE/i);
+    }
+  });
+
+  it("leaves a question with nothing to hoist otherwise unchanged", () => {
+    const jank = questions.find((q) => q.id === "jank");
+    expect(jank?.sql).toContain("actual_frame_timeline_slice");
+  });
+
+  it("carries every question's id and asks text through unchanged", () => {
+    expect(questions.map((q) => q.id)).toEqual(QUESTIONS.map((q) => q.id));
+    expect(questions.map((q) => q.asks)).toEqual(QUESTIONS.map((q) => q.asks));
+  });
+});
+
+describe("matchBatch", () => {
+  const markerBlock = (id: string) => `"marker"\n"porthole:${id}"`;
+
+  it("pairs each marker with the data block that follows it, in order", () => {
+    const stdout = [
+      `${markerBlock("a")}\n\n"x"\n"1"`,
+      `${markerBlock("b")}\n\n"y"\n"2"`,
+    ].join("\n\n");
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    expect(answered).toBe(2);
+    expect(rows.get("a")).toEqual([{ x: "1" }]);
+    expect(rows.get("b")).toEqual([{ y: "2" }]);
+  });
+
+  it("does not mistake a data row with an embedded quote for a marker", () => {
+    // trace_processor does not escape a quote inside a quoted field, so a
+    // slice name like `he said "hi"` prints as `"he said "hi""`. That is
+    // exactly the shape that breaks a split which goes looking for a magic
+    // string anywhere in the byte stream; here the marker is a whole separate
+    // statement; this row is just data, whatever it contains.
+    const stdout = [
+      `${markerBlock("a")}\n\n"name"\n"he said "hi""`,
+      `${markerBlock("b")}\n\n"y"\n"2"`,
+    ].join("\n\n");
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    expect(answered).toBe(2);
+    expect(rows.get("a")).toEqual([{ name: 'he said "hi"' }]);
+    expect(rows.get("b")).toEqual([{ y: "2" }]);
+  });
+
+  it("does not mistake an all-[NULL] row for a missing block", () => {
+    // trace_processor writes NULL as the literal, quoted "[NULL]". A row that
+    // is [NULL] in its one column is still a real, present data block — the
+    // risk named on the ticket for this work was confusing that with "no
+    // block at all", which is what a failed or killed question looks like.
+    const stdout = [
+      `${markerBlock("a")}\n\n"io_wait"\n"[NULL]"`,
+      `${markerBlock("b")}\n\n"y"\n"2"`,
+    ].join("\n\n");
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    expect(answered).toBe(2);
+    expect(rows.get("a")).toEqual([{ io_wait: null }]);
+  });
+
+  it("stops at the first id whose marker has no data block after it", () => {
+    // What a mid-script failure and a killed process both look like: the
+    // marker for the next question printed, and then nothing.
+    const stdout = `${markerBlock("a")}\n\n"x"\n"1"\n\n${markerBlock("b")}`;
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    expect(answered).toBe(1);
+    expect(rows.get("a")).toEqual([{ x: "1" }]);
+    expect(rows.has("b")).toBe(false);
+  });
+});
+
+/**
+ * A hand-written stand-in for `runScript` that speaks the same marker
+ * protocol a real trace_processor_shell batch does, without spawning
+ * anything. `runBatch`'s job — answer everything in one call when it can,
+ * isolate a failing question instead of losing the rest, stop rather than
+ * retry on a timeout — is a property of this loop, not of the OS process
+ * underneath it, so this is what lets that job be tested on every machine
+ * this suite runs on rather than only where a 77MB binary has been fetched.
+ */
+function fakeRun(
+  plan: Record<string, { rows?: Array<Record<string, string | number | null>>; fail?: string }>,
+): { run: RunFn; callCount: () => number } {
+  let calls = 0;
+  const run: RunFn = async (_binary, _args, sql) => {
+    calls++;
+    const ids = [...sql.matchAll(/SELECT 'porthole:([\w.]+)' AS marker;/g)].map((m) => m[1]);
+    let stdout = "";
+    for (const id of ids) {
+      stdout += `"marker"\n"porthole:${id}"\n\n`;
+      const spec = plan[id] ?? { rows: [] };
+      if (spec.fail) {
+        return { code: 1, stdout, stderr: spec.fail, timedOut: false, elapsedMs: 1 };
+      }
+      const rows = spec.rows ?? [];
+      const columns = rows.length > 0 ? Object.keys(rows[0]) : ["value"];
+      stdout += columns.map((c) => `"${c}"`).join(",") + "\n";
+      for (const row of rows) {
+        stdout += columns.map((c) => (row[c] === null ? '"[NULL]"' : `"${row[c]}"`)).join(",") + "\n";
+      }
+      stdout += "\n";
+    }
+    return { code: 0, stdout, stderr: "", timedOut: false, elapsedMs: 1 };
+  };
+  return { run, callCount: () => calls };
+}
+
+describe("runBatch", () => {
+  const question = (id: string): HoistedQuestion => ({ id, asks: `asks about ${id}`, sql: "SELECT 1" });
+  const questions = [question("a"), question("b"), question("c")];
+  const options = {
+    binary: "unused",
+    trace: "some.pftrace",
+    packageName: "com.example.shop",
+    fromNs: 0,
+    toNs: 1,
+    timeoutMs: 5_000,
+  };
+
+  it("answers everything in one call when nothing fails", async () => {
+    const { run, callCount } = fakeRun({
+      a: { rows: [{ x: "1" }] },
+      b: { rows: [{ x: "2" }] },
+      c: { rows: [{ x: "3" }] },
+    });
+    const { rows, unanswered } = await runBatch(questions, [], options, run);
+    expect(callCount()).toBe(1);
+    expect(unanswered).toEqual([]);
+    expect((rows as Record<string, unknown>).a).toEqual([{ x: "1" }]);
+    expect((rows as Record<string, unknown>).c).toEqual([{ x: "3" }]);
+  });
+
+  it("keeps the other two when one fails, at the cost of one extra call", async () => {
+    const { run, callCount } = fakeRun({
+      a: { rows: [{ x: "1" }] },
+      b: { fail: "no such table: bogus" },
+      c: { rows: [{ x: "3" }] },
+    });
+    const { rows, unanswered } = await runBatch(questions, [], options, run);
+    expect(callCount()).toBe(2);
+    expect(unanswered).toHaveLength(1);
+    expect(unanswered[0]).toContain("asks about b");
+    expect(unanswered[0]).toContain("no such table: bogus");
+    expect((rows as Record<string, unknown>).a).toEqual([{ x: "1" }]);
+    expect((rows as Record<string, unknown>).c).toEqual([{ x: "3" }]);
+    expect((rows as Record<string, unknown>).b).toBeUndefined();
+  });
+
+  it("keeps whatever answered before two failures in a row, at the cost of one extra call each", async () => {
+    // Three questions, both b and c broken: the first call answers a and
+    // fails on b; the second call (just [c], since b is dropped rather than
+    // retried) fails again. Two calls in total, not three — the point of
+    // dropping the failed question rather than reattempting it.
+    const { run, callCount } = fakeRun({
+      a: { rows: [{ x: "1" }] },
+      b: { fail: "first failure" },
+      c: { fail: "second failure" },
+    });
+    const { rows, unanswered } = await runBatch(questions, [], options, run);
+    expect(callCount()).toBe(2);
+    expect(unanswered).toHaveLength(2);
+    expect(unanswered[0]).toContain("first failure");
+    expect(unanswered[1]).toContain("second failure");
+    expect((rows as Record<string, unknown>).a).toEqual([{ x: "1" }]);
+  });
+
+  it("stops entirely on a timeout rather than retrying into the same hang", async () => {
+    let calls = 0;
+    const run: RunFn = async () => {
+      calls++;
+      return { code: null, stdout: "", stderr: "", timedOut: true, elapsedMs: 5_000 };
+    };
+    const { unanswered } = await runBatch(questions, [], options, run);
+    expect(calls).toBe(1);
+    expect(unanswered).toHaveLength(3);
+    for (const u of unanswered) {
+      expect(u).toContain("5000ms");
+      expect(u).toContain(options.trace);
+    }
+  });
+
+  it("stops entirely when the binary itself cannot be run", async () => {
+    let calls = 0;
+    const run: RunFn = async () => {
+      calls++;
+      return {
+        code: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        elapsedMs: 1,
+        spawnError: new Error("ENOENT: no such file"),
+      };
+    };
+    const { unanswered } = await runBatch(questions, [], options, run);
+    expect(calls).toBe(1);
+    expect(unanswered).toHaveLength(3);
+    for (const u of unanswered) expect(u).toContain("ENOENT");
+  });
+});
+
+/**
+ * `runScript` itself, against a real spawned process rather than a fake —
+ * proving the timeout actually kills something, and that the event loop
+ * stays free while it waits, needs an OS process on the other end, not a
+ * hand-written stand-in that could just declare victory. `cmd.exe` fills
+ * that role: it is a real, always-present executable Windows will spawn
+ * directly (unlike a `.cmd`/`.bat` file, which needs `shell: true` and is
+ * not what production ever passes), and it can be told to succeed, fail or
+ * hang on demand.
+ */
+describe("runScript, against a real process", () => {
+  const isWindows = process.platform === "win32";
+  const binary = isWindows ? "cmd.exe" : "/bin/sh";
+  const args = (command: string) => (isWindows ? ["/d", "/s", "/c", command] : ["-c", command]);
+  // An infinite loop cmd.exe runs itself, not one it hands to a child
+  // process: `ping` was tried first and did not work for this — killing
+  // cmd.exe left the ping.exe it had started still holding the output pipe
+  // open, so the pipe never closed and the test hung for the real 30s
+  // regardless of the timeout. TerminateProcess only ever reaches the one
+  // process handle Node holds, which is exactly the situation trace_processor_
+  // shell is in (a single process, nothing it spawns further) but is not what
+  // `cmd.exe /c ping` is.
+  const hang = isWindows ? "for /l %i in () do @rem" : "sleep 30";
+  const short = isWindows ? "ping -n 2 127.0.0.1 >nul" : "sleep 1";
+
+  it("captures a real process's stdout and a clean exit", async () => {
+    const result = await runScript(binary, args("echo hello"), "", 5_000);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("hello");
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("reports a nonzero exit without treating it as a timeout", async () => {
+    const result = await runScript(binary, args("exit 7"), "", 5_000);
+    expect(result.code).toBe(7);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("kills a wedged process and says how long it waited", async () => {
+    const started = Date.now();
+    const result = await runScript(binary, args(hang), "", 200);
+    const elapsed = Date.now() - started;
+    expect(result.timedOut).toBe(true);
+    // The real proof this was killed rather than left running: the test
+    // returns in a small fraction of the 30s the command asked to hang for.
+    expect(elapsed).toBeLessThan(10_000);
+  }, 15_000);
+
+  it("keeps the event loop free while the child runs", async () => {
+    const order: string[] = [];
+    const running = runScript(binary, args(short), "", 10_000).then(() => order.push("run"));
+    const timer = new Promise<void>((resolve) => setTimeout(resolve, 30)).then(() => order.push("timer"));
+    await Promise.all([running, timer]);
+    // `short` runs for roughly a second; a 30ms timer that fires first is
+    // only possible if the child is not blocking the thread it runs on.
+    expect(order[0]).toBe("timer");
+  }, 15_000);
 });
