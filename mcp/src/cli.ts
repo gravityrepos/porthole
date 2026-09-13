@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import path from "node:path";
+import { spawn } from "node:child_process";
 import { DeviceClient } from "./device.js";
 import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
@@ -73,43 +71,6 @@ function parse(argv: string[]): Options {
   return options;
 }
 
-/** adb, in the order a developer would look for it. Mirrors the Gradle plugin. */
-function findAdb(): string {
-  const binary = process.platform === "win32" ? "adb.exe" : "adb";
-  for (const variable of ["ANDROID_HOME", "ANDROID_SDK_ROOT"]) {
-    const root = process.env[variable];
-    if (!root) continue;
-    const candidate = path.join(root, "platform-tools", binary);
-    if (existsSync(candidate)) return candidate;
-  }
-  return binary;
-}
-
-function forwardPort(options: Options): void {
-  const adb = findAdb();
-  const args = options.serial ? ["-s", options.serial] : [];
-  args.push("forward", `tcp:${options.port}`, `tcp:${options.port}`);
-
-  const result = spawnSync(adb, args, { encoding: "utf8" });
-  if (result.error) {
-    console.error(
-      `Could not run adb (${result.error.message}).\n` +
-        "Set ANDROID_HOME, or put adb on your PATH, or pass --no-forward if the\n" +
-        "bridge is already up.",
-    );
-    return;
-  }
-  if (result.status !== 0) {
-    const message = (result.stderr || result.stdout || "").trim();
-    console.error(`adb forward failed: ${message}`);
-    if (message.includes("more than one")) {
-      console.error("Pass --serial <id>; 'adb devices' lists them.");
-    }
-    return;
-  }
-  console.error(`forwarded 127.0.0.1:${options.port} to the device`);
-}
-
 function openBrowser(url: string): void {
   const [command, args] =
     process.platform === "win32"
@@ -126,7 +87,21 @@ function openBrowser(url: string): void {
 
 async function ui(argv: string[]): Promise<void> {
   const options = parse(argv);
-  if (options.forward) forwardPort(options);
+  if (options.forward) {
+    // Same call `porthole capture` makes, through the same runAdb: this used to
+    // be a second copy of adb discovery and a second copy of the advice to pass
+    // --serial, and the copy here was the one that could not find the SDK.
+    const forwarded = runAdb(
+      ["forward", `tcp:${options.port}`, `tcp:${options.port}`],
+      options.serial,
+    );
+    if (forwarded.ok) {
+      console.error(`forwarded 127.0.0.1:${options.port} to the device`);
+    } else {
+      console.error(forwarded.output);
+      console.error("Pass --no-forward if the bridge is already up.");
+    }
+  }
 
   const device = new DeviceClient("127.0.0.1", options.port);
   const timeline = new TimelineServer(device, options.uiPort, options.serial);
