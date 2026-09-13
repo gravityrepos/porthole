@@ -4,7 +4,7 @@ import { restartApp } from "./adb.js";
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { extname, resolve } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent } from "./device.js";
 import { askTrace, findTraceProcessor } from "./perfetto.js";
@@ -24,6 +24,40 @@ const CONTENT_TYPES: Record<string, string> = {
 
 /** Roughly ten minutes of a busy app. The device ring is smaller; this is the wider view. */
 const BUFFER_LIMIT = 20_000;
+
+/**
+ * The database calls the inspector may make, by exact path.
+ *
+ * A map rather than a chain of comparisons ending in `db_query`, because that
+ * chain had a fall-through: every path under `/api/db/` that was not `tables`
+ * or `rows` — `/api/db/`, `/api/db/nonsense`, anything — became a `db_query`
+ * carrying whatever `sql` the query string held. Unknown paths are now a 404.
+ */
+const DB_ROUTES: Record<string, string> = {
+  "/api/db/tables": "db_tables",
+  "/api/db/rows": "db_rows",
+  "/api/db/query": "db_query",
+};
+
+/**
+ * Vite's dev port, which this server also answers to. See `authorities`.
+ *
+ * `npm run dev` in `mcp/ui` serves the UI from :5273 and proxies `/api` and
+ * `/ws` here. Vite's proxy leaves `Host` and `Origin` exactly as the browser
+ * wrote them (`changeOrigin` is off by default), so a same-origin request from
+ * the dev UI arrives here addressed to :5273. Verified, not assumed: with the
+ * repo's own vite.config.ts, `Host: localhost:5273` and
+ * `Origin: http://localhost:5273` are what land on the target socket, for the
+ * WebSocket upgrade as well as for `/api`. Allowing that port costs nothing
+ * against the attack this gate exists for — a page on the open web cannot make
+ * a browser send a loopback `Host` — and refusing it would break hot reload.
+ */
+const VITE_DEV_PORT = 5273;
+
+/** Loopback spellings of one port, as they appear in a `Host` header. */
+function loopbackAuthorities(port: number): string[] {
+  return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
+}
 
 /**
  * Serves the timeline UI and streams events to it.
@@ -51,11 +85,29 @@ export class TimelineServer {
   private events: DeviceEvent[] = [];
   private started = false;
 
+  /**
+   * Every authority this server will answer to, and every origin it will take
+   * a request from. Compared whole, lower-cased, never parsed.
+   *
+   * `Host` and `Origin` are text the caller chose, and every parser of them has
+   * a seam — `user@host`, a trailing dot, an embedded slash, a bracketed v6
+   * literal — where two readers disagree about which part is the name. A fixed
+   * list of strings has no seam: `127.0.0.1.evil.com` is simply not in it.
+   */
+  private readonly authorities: Set<string>;
+  private readonly origins: Set<string>;
+
   constructor(
     private readonly device: DeviceClient,
     private readonly port: number,
     private readonly serial?: string,
   ) {
+    const authorities = [...loopbackAuthorities(port), ...loopbackAuthorities(VITE_DEV_PORT)];
+    this.authorities = new Set(authorities);
+    // http only: this server has no certificate and never will, so an https
+    // origin claiming to be us is someone else.
+    this.origins = new Set(authorities.map((authority) => `http://${authority}`));
+
     device.on("event", (event: DeviceEvent) => this.record(event));
     device.on("state", (state: string) => this.broadcast({ type: "state", state }));
     device.on("hello", (hello: unknown) => {
@@ -108,11 +160,65 @@ export class TimelineServer {
     }
   }
 
+  /**
+   * Why this request is not ours to answer, or null if it is.
+   *
+   * The socket is loopback-only, which keeps the network out but not the
+   * browser: every page the developer has open can reach 127.0.0.1, and a
+   * simple cross-origin POST lands whether or not the attacker can read the
+   * reply. Three cheap questions close that, and all three are about the
+   * browser's own account of the request rather than about its body:
+   *
+   * `Host` is what the URL said, and a page on the open web cannot forge it —
+   * which is also the answer to DNS rebinding, where a name the attacker owns
+   * resolves to 127.0.0.1 and arrives here as `Host: evil.example.com`.
+   * `Origin` is who asked, sent on every cross-origin request and on
+   * same-origin POSTs. `Sec-Fetch-Site` is the browser's own verdict, and only
+   * a browser sends it — so its absence has to pass, or curl, the MCP server's
+   * own health probe and anything older than 2020 stop working.
+   */
+  private refuse(req: http.IncomingMessage): string | null {
+    const host = req.headers.host?.toLowerCase();
+    if (host === undefined || !this.authorities.has(host)) {
+      return "Refused: this is a loopback debug server, and that is not one of its own addresses.";
+    }
+
+    const origin = req.headers.origin?.toLowerCase();
+    if (origin !== undefined && !this.origins.has(origin)) {
+      return "Refused: this debug server answers only its own page, and that request came from elsewhere.";
+    }
+
+    const site = req.headers["sec-fetch-site"];
+    if (typeof site === "string" && site !== "same-origin" && site !== "none") {
+      return "Refused: the browser reports this request did not come from this server's own page.";
+    }
+
+    return null;
+  }
+
+  /** A refusal, as a response. */
+  private refused(res: http.ServerResponse, reason: string): void {
+    // The reason names the rule and never the header that broke it. Everything
+    // this server holds is captured from someone's running app, and a 403 that
+    // quoted the caller's own text back would be one more place where a value
+    // that went in comes out again.
+    res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+    res.end(`${reason}\n`);
+  }
+
   async start(): Promise<string> {
     if (this.started) return this.url();
     this.started = true;
 
     const server = http.createServer(async (req, res) => {
+      // Admission first, before any routing, so that adding an endpoint below
+      // cannot accidentally add one that is reachable from a web page.
+      const refusal = this.refuse(req);
+      if (refusal) {
+        this.refused(res, refusal);
+        return;
+      }
+
       const path = (req.url ?? "/").split("?")[0];
 
       // Identifies this server to another instance that finds the port
@@ -209,13 +315,13 @@ export class TimelineServer {
       // app's tables are the app's, and a cached mirror would go stale the
       // moment it mattered.
       if (path.startsWith("/api/db/")) {
+        const method = DB_ROUTES[path];
+        if (!method) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "No such database endpoint." }));
+          return;
+        }
         const query = new URL(req.url ?? "/", "http://localhost");
-        const method =
-          path === "/api/db/tables"
-            ? "db_tables"
-            : path === "/api/db/rows"
-              ? "db_rows"
-              : "db_query";
         const params: Record<string, unknown> = {
           database: query.searchParams.get("database") ?? undefined,
           table: query.searchParams.get("table") ?? undefined,
@@ -235,16 +341,40 @@ export class TimelineServer {
         return;
       }
 
-      if (path === "/api/tools/restart" && req.method === "POST") {
-        const packageName = (this.device.hello as { packageName?: string } | null)?.packageName;
-        if (!packageName) {
-          res.writeHead(409, { "content-type": "application/json" });
-          res.end(JSON.stringify({ ok: false, output: "The app has not said hello yet." }));
+      // Everything under /api/tools does something to the device, so none of it
+      // may be reachable by a method a page can issue without meaning to. A GET
+      // here used to fall through to the static handler and quietly return
+      // index.html, which made a typo look like a working link.
+      if (path.startsWith("/api/tools/")) {
+        if (req.method !== "POST") {
+          res.writeHead(405, { "content-type": "application/json", allow: "POST" });
+          res.end(JSON.stringify({ ok: false, output: "This endpoint takes POST." }));
           return;
         }
-        const result = restartApp(packageName, this.serial);
-        res.writeHead(result.ok ? 200 : 502, { "content-type": "application/json" });
-        res.end(JSON.stringify(result));
+
+        // A session token belongs here: minted at start, printed by the CLI in
+        // the URL it opens, required on every call below. It would add nothing
+        // against another origin — the admission check already refuses those —
+        // and everything against a same-origin page loaded by accident, which
+        // is the one caller a same-origin check cannot tell from the real UI.
+        // It needs cli.ts to print it and the UI to carry it, so it is deferred
+        // to the tickets that own those files.
+
+        if (path === "/api/tools/restart") {
+          const packageName = (this.device.hello as { packageName?: string } | null)?.packageName;
+          if (!packageName) {
+            res.writeHead(409, { "content-type": "application/json" });
+            res.end(JSON.stringify({ ok: false, output: "The app has not said hello yet." }));
+            return;
+          }
+          const result = restartApp(packageName, this.serial);
+          res.writeHead(result.ok ? 200 : 502, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+          return;
+        }
+
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, output: "No such tool." }));
         return;
       }
 
@@ -273,7 +403,12 @@ export class TimelineServer {
       // link still boots the app rather than 404ing.
       const requested = path === "/" ? "index.html" : path.replace(/^\/+/, "");
       const resolved = resolve(UI_DIR, requested);
-      const target = resolved.startsWith(resolve(UI_DIR))
+      // The separator matters: `resolve` strips the trailing one, so a bare
+      // prefix test would also accept a sibling whose name merely starts with
+      // the UI directory's — `dist-backup` next to `dist`. No such sibling
+      // exists today, which is exactly the kind of fact that stops being true
+      // without anyone noticing.
+      const target = resolved.startsWith(resolve(UI_DIR) + sep)
         ? resolved
         : resolve(UI_DIR, "index.html");
 
@@ -323,7 +458,28 @@ export class TimelineServer {
     // listened, the socket server re-emits the bind failure as its own
     // unhandled error — which is what turned a taken port into a raw
     // stack trace, escaping the handler written to explain it.
-    this.wss = new WebSocketServer({ server, path: "/ws" });
+    //
+    // `noServer` rather than handing it the server, because letting ws own the
+    // upgrade would leave the upgrade ungated: a WebSocket handshake is a
+    // request a page can make cross-origin with no preflight, and this one
+    // answers with the whole event buffer. The HTTP gate would be closed and
+    // the socket beside it open.
+    const wss = new WebSocketServer({ noServer: true });
+    this.wss = wss;
+    server.on("upgrade", (req, socket, head) => {
+      const refusal = this.refuse(req);
+      if (refusal) {
+        socket.end(
+          `HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n${refusal}\n`,
+        );
+        return;
+      }
+      if ((req.url ?? "/").split("?")[0] !== "/ws") {
+        socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n");
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (client) => wss.emit("connection", client, req));
+    });
     this.wss.on("connection", (socket: WebSocket) => {
       socket.send(
         JSON.stringify({
