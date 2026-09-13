@@ -1,3 +1,15 @@
+// The same toolchain resolver the root settings declares. This is an included
+// build with its own settings file, so it inherits nothing from the root: build
+// the plugin on its own and it auto-provisions a JDK 17 blind and warns about it
+// exactly as the root build used to. Both halves have to be here.
+//
+// The version is a literal rather than a catalog reference because a settings
+// script's `plugins` block is evaluated before `dependencyResolutionManagement`
+// creates `libs` below. Kept identical to the root's by hand; pin it exactly.
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 dependencyResolutionManagement {
     repositories {
         google()
