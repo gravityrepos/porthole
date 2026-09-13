@@ -1,8 +1,9 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+
 import type { Finding } from "./trace.js";
 
 /**
@@ -58,14 +59,15 @@ export const QUESTIONS: Question[] = [
   {
     id: "thread_states",
     asks: "whether the app was running, waiting for a CPU, or blocked",
-    sql: `SELECT thread.name AS thread_name, thread_state.state AS state,
+    sql: `SELECT thread.name AS thread_name, thread.is_main_thread AS is_main_thread,
+                 thread_state.state AS state, thread_state.io_wait AS io_wait,
                  COUNT(*) AS COUNT, SUM(thread_state.dur) AS "SUM(dur)"
           FROM thread_state
           JOIN thread USING(utid)
           JOIN process USING(upid)
           WHERE thread_state.ts >= $from AND thread_state.ts <= $to
             AND process.name = $package
-          GROUP BY 1, 2 ORDER BY SUM(thread_state.dur) DESC`,
+          GROUP BY 1, 2, 3, 4 ORDER BY SUM(thread_state.dur) DESC`,
   },
   {
     id: "binder",
@@ -73,41 +75,41 @@ export const QUESTIONS: Question[] = [
     // android_binder_txns lives in the standard library, not the base schema,
     // so the module has to be pulled in or the query fails to compile.
     sql: `INCLUDE PERFETTO MODULE android.binder;
-          SELECT COALESCE(server_process.name, 'unknown') AS target,
-                 COUNT(*) AS COUNT, SUM(binder.dur) AS "SUM(dur)",
-                 MAX(binder.dur) AS "MAX(dur)"
-          FROM android_binder_txns AS binder
-          LEFT JOIN process AS server_process ON binder.server_upid = server_process.upid
-          JOIN process AS client_process ON binder.client_upid = client_process.upid
-          WHERE binder.ts >= $from AND binder.ts <= $to
-            AND client_process.name = $package
-          GROUP BY target ORDER BY SUM(binder.dur) DESC LIMIT 20`,
+          SELECT COALESCE(server_process, 'unknown') AS target,
+                 COUNT(*) AS COUNT, SUM(client_dur) AS "SUM(dur)",
+                 MAX(client_dur) AS "MAX(dur)"
+          FROM android_binder_txns
+          WHERE client_ts >= $from AND client_ts <= $to
+            AND client_process = $package
+          GROUP BY target ORDER BY SUM(client_dur) DESC LIMIT 20`,
   },
   {
     id: "render",
     asks: "what the render thread and the GPU were doing",
-    sql: `SELECT slice.name AS name, thread.name AS thread_name,
-                 COUNT(*) AS COUNT, SUM(slice.dur) AS "SUM(dur)"
-          FROM slice
-          JOIN thread_track ON slice.track_id = thread_track.id
-          JOIN thread USING(utid)
-          JOIN process USING(upid)
-          WHERE slice.ts >= $from AND slice.ts <= $to
-            AND process.name = $package
-            AND thread.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
-          GROUP BY 1, 2 ORDER BY SUM(slice.dur) DESC LIMIT 30`,
+    sql: `INCLUDE PERFETTO MODULE slices.with_context;
+          SELECT name, thread_name, COUNT(*) AS COUNT, SUM(dur) AS "SUM(dur)"
+          FROM thread_slice
+          WHERE ts >= $from AND ts <= $to
+            AND process_name = $package
+            AND thread_name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1')
+          GROUP BY 1, 2 ORDER BY SUM(dur) DESC LIMIT 30`,
   },
   {
     id: "slices",
     asks: "what the app was actually doing, by total time",
-    sql: `SELECT name, COUNT(*) AS COUNT, SUM(dur) AS "SUM(dur)",
-                 SUM(self_dur) AS "SUM(self_dur)"
-          FROM slice
-          JOIN thread_track ON slice.track_id = thread_track.id
-          JOIN thread USING(utid)
-          JOIN process USING(upid)
-          WHERE slice.ts >= $from AND slice.ts <= $to AND process.name = $package
-          GROUP BY name ORDER BY SUM(dur) DESC LIMIT 200`,
+    // self_dur is not a column, though the trace viewer shows it as one: it
+    // is dur minus whatever the slice's children took. Without it a parent
+    // that did nothing but call two slow children looks like the slow thing.
+    sql: `INCLUDE PERFETTO MODULE slices.with_context;
+          SELECT s.name AS name, COUNT(*) AS COUNT, SUM(s.dur) AS "SUM(dur)",
+                 SUM(
+                   s.dur - COALESCE(
+                     (SELECT SUM(child.dur) FROM slice AS child WHERE child.parent_id = s.id), 0
+                   )
+                 ) AS "SUM(self_dur)"
+          FROM thread_slice AS s
+          WHERE s.ts >= $from AND s.ts <= $to AND s.process_name = $package
+          GROUP BY 1 ORDER BY SUM(s.dur) DESC LIMIT 200`,
   },
 ];
 
@@ -171,10 +173,8 @@ export function interpret(rows: Rows): Finding[] {
 
   // --- what the scheduler says, which is mostly used to rule things out ---
   const states = rows.thread_states ?? [];
-  const mainRunnable = states.filter(
-    (r) => isMainThread(r) && String(r.state ?? "").startsWith("Runnable"),
-  );
-  const mainIo = states.filter((r) => isMainThread(r) && /Uninterruptible Sleep \(IO\)/i.test(String(r.state ?? "")));
+  const mainRunnable = states.filter((r) => isMainThread(r) && isRunnable(r.state));
+  const mainIo = states.filter((r) => isMainThread(r) && isIoWait(r));
   const runnableMs = ms(mainRunnable.reduce((sum, r) => sum + n(r["SUM(dur)"]), 0));
   const ioMs = ms(mainIo.reduce((sum, r) => sum + n(r["SUM(dur)"]), 0));
 
@@ -261,14 +261,45 @@ export function interpret(rows: Rows): Finding[] {
   return findings.sort((a, b) => rank(b.severity) - rank(a.severity));
 }
 
-/** The main thread carries the process name, truncated by the kernel to 15. */
+/**
+ * Whether a row is the app's main thread.
+ *
+ * `is_main_thread` is the trace's own answer and needs no guessing, but rows
+ * exported from the trace viewer carry a process name instead, so both are
+ * accepted. Asking neither — which is what this did, by reading a column the
+ * query never selected — makes every main-thread reading come back 0ms, and
+ * 0ms runnable reads as "the scheduler was not the problem".
+ */
 function isMainThread(row: Record<string, unknown>): boolean {
+  const flag = row.is_main_thread;
+  if (flag !== undefined && flag !== null) return String(flag) === "1" || flag === true;
+
   const thread = String(row.thread_name ?? "");
-  const process = String(row["ANY(process_name)"] ?? "");
+  const process = String(row["ANY(process_name)"] ?? row.process_name ?? "");
   if (!thread || !process) return false;
   // "com.example.shop" arrives as "om.example.shop": comm is 16 bytes with a
   // terminator, so a long package name loses its leading characters.
   return process.endsWith(thread) || thread.endsWith(process);
+}
+
+/**
+ * Ready to run, and not running.
+ *
+ * trace_processor returns the kernel's letters — R, R+ — while the trace viewer
+ * spells them out. Matching only the spelled-out form meant the letters never
+ * matched anything, so contention was invisible on every real trace and visible
+ * only in the fixtures.
+ */
+function isRunnable(state: unknown): boolean {
+  const value = String(state ?? "");
+  return value === "R" || value === "R+" || value.startsWith("Runnable");
+}
+
+/** Blocked in the kernel on I/O: D with the io_wait flag, or the long name. */
+function isIoWait(row: Record<string, unknown>): boolean {
+  const state = String(row.state ?? "");
+  if (/Uninterruptible Sleep \(IO\)/i.test(state)) return true;
+  return state.startsWith("D") && String(row.io_wait ?? "") === "1";
 }
 
 const rank = (severity: Finding["severity"]): number =>
@@ -284,6 +315,7 @@ export function findTraceProcessor(): string | null {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
   const candidates = [
     process.env.PORTHOLE_TRACE_PROCESSOR,
+    ...portholeCached(home),
     join(home, ".perfetto", "trace_processor_shell"),
     join(home, ".perfetto", "trace_processor_shell.exe"),
     "/usr/local/bin/trace_processor_shell",
@@ -291,15 +323,106 @@ export function findTraceProcessor(): string | null {
   return candidates.find((c) => existsSync(c)) ?? null;
 }
 
-/** trace_processor prints TSV: a header row, then values. */
+/**
+ * Copies `portholeTraceProcessor` put in ~/.porthole, newest version first.
+ *
+ * Read rather than hardcoded so the MCP server does not have to be republished
+ * in lockstep with the plugin's pinned version — whatever the plugin fetched
+ * last is what gets used. An explicitly set PORTHOLE_TRACE_PROCESSOR still wins,
+ * and so does nothing at all: an empty or missing directory yields no candidates.
+ */
+function portholeCached(home: string): string[] {
+  const root = join(home, ".porthole", "trace-processor");
+  let versions: string[];
+  try {
+    versions = readdirSync(root);
+  } catch {
+    return [];
+  }
+  return versions
+    .sort(byVersionDescending)
+    .flatMap((v) => [
+      join(root, v, "trace_processor_shell"),
+      join(root, v, "trace_processor_shell.exe"),
+    ]);
+}
+
+/** v58.2 above v58.1 above v9.0 — numerically, so v10 does not sort under v9. */
+function byVersionDescending(a: string, b: string): number {
+  const parts = (v: string) => v.replace(/^v/, "").split(".").map(Number);
+  const [ax, bx] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(ax.length, bx.length); i++) {
+    const diff = (bx[i] ?? 0) - (ax[i] ?? 0);
+    if (diff !== 0 && !Number.isNaN(diff)) return diff;
+  }
+  return b.localeCompare(a);
+}
+
+/**
+ * The one line of trace_processor's stderr worth repeating.
+ *
+ * Everything it says goes to stderr, most of it progress — load percentages and
+ * timestamped `file.cc:NN` chatter. Taking the first line reported "Loading
+ * trace: 0.00 MB" as the reason a question failed, which is not a reason.
+ */
+function why(stderr: string | undefined, error: Error | undefined): string {
+  const lines = (stderr ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\[[\d.]+\]\s+\S+?\.cc:\d+\s*/, "").trim())
+    .filter((l) => l.length > 0 && !l.startsWith("Loading trace:"));
+  const complaint = lines.find((l) => /error|unable|no such|syntax|failed/i.test(l));
+  return (complaint ?? lines[lines.length - 1] ?? error?.message ?? "failed").slice(0, 200);
+}
+
+/**
+ * trace_processor prints CSV, not TSV.
+ *
+ * Splitting on tabs produced exactly one column per row whose key was the
+ * entire header line, and every reading of it came back zero — which looked
+ * like a quiet app rather than a parser that had never worked. The unit tests
+ * did not catch it because they run on JSON exported from the trace viewer,
+ * which is the right data in the wrong shape.
+ */
 export function parseRows(stdout: string): Array<Record<string, unknown>> {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];
-  const header = lines[0].split("\t");
+  const header = parseCsvLine(lines[0]);
   return lines.slice(1).map((line) => {
-    const cells = line.split("\t");
-    return Object.fromEntries(header.map((key, i) => [key, cells[i]]));
+    const cells = parseCsvLine(line);
+    return Object.fromEntries(header.map((key, i) => [key, cells[i] ?? null]));
   });
+}
+
+/**
+ * One CSV row, tolerating trace_processor's quoting.
+ *
+ * It does not double the quotes inside a quoted field — `he said "hi"` comes
+ * out as `"he said "hi""` — so a strict reader either fails or truncates. What
+ * is unambiguous is where a field ends: at a quote followed by a comma, or a
+ * quote at the end of the line. Everything between is the value.
+ */
+function parseCsvLine(line: string): Array<string | null> {
+  const cells: Array<string | null> = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (line[i] === '"') {
+      let end = i + 1;
+      while (end < line.length && !(line[end] === '"' && (end === line.length - 1 || line[end + 1] === ","))) {
+        end++;
+      }
+      const value = line.slice(i + 1, end);
+      // trace_processor writes SQL NULL as the literal [NULL].
+      cells.push(value === "[NULL]" ? null : value);
+      i = end + 2;
+    } else {
+      const comma = line.indexOf(",", i);
+      const end = comma === -1 ? line.length : comma;
+      cells.push(line.slice(i, end));
+      i = end + 1;
+    }
+    if (i > line.length) break;
+  }
+  return cells;
 }
 
 export interface AskResult {
@@ -332,15 +455,17 @@ export function askTrace(options: {
       .replace(/\$to/g, String(Math.round(options.toNs)))
       .replace(/\$package/g, `'${options.packageName.replace(/'/g, "''")}'`);
 
-    const result = spawnSync(options.binary, ["-q", "/dev/stdin", options.trace], {
+    // `query -f -` and not `-q /dev/stdin`: the latter is read by reopening
+    // /proc/self/fd/0, which does not exist on Windows, so every question came
+    // back unanswered there while looking like a problem with the SQL.
+    const result = spawnSync(options.binary, ["query", "-f", "-", options.trace], {
       input: sql,
       encoding: "utf8",
       maxBuffer: 32 * 1024 * 1024,
     });
 
     if (result.status !== 0) {
-      const why = (result.stderr || result.error?.message || "failed").split("\n")[0];
-      unanswered.push(`${question.asks} — ${why.slice(0, 160)}`);
+      unanswered.push(`${question.asks} — ${why(result.stderr, result.error)}`);
       continue;
     }
     (rows as Record<string, unknown>)[question.id] = parseRows(result.stdout);

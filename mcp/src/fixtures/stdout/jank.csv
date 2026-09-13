@@ -1,0 +1,4 @@
+"jank_type","COUNT","MIN(dur)","MAX(dur)","AVG(dur)"
+"App Deadline Missed",1,117264766,117264766,117264766.000000
+"App Resynced Jitter, Non Animating",1,26873776,26873776,26873776.000000
+"None",1,12404610,12404610,12404610.000000

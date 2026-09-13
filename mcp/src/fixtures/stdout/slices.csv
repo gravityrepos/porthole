@@ -1,0 +1,201 @@
+"name","COUNT","SUM(dur)","SUM(self_dur)"
+"input",178,315828253,1687705
+"VRI[MainActivity]",178,314140548,22411651
+"AndroidOwner:onTouch",143,285167471,275502265
+"traversal",6,152978986,20392476
+"Compiling baseline",960,129474531,119777837
+"Choreographer#doFrame 226666108",1,117408776,35261
+"Compose:recompose",4,89886955,51935824
+"animation",76,43156173,24349664
+"clientTransactionExecuted",8,41962421,575205
+"binder transaction",55,40287737,40287737
+"Background concurrent mark compact GC",1,35141172,565181
+"Choreographer#doFrame 226665975",1,27295573,243750
+"Choreographer#doFrame - resynced to 226665977 in 23.1ms",1,27051823,9296
+"MarkingPhase",1,19368178,293753
+"Choreographer#scheduleVsyncLocked",197,19004990,19004990
+"MarkRoots",2,16161328,13046
+"activityResume",2,14871277,3529350
+"wait",4,14650338,14650338
+"measure",4,13960103,254217
+"AndroidOwner:onMeasure",4,13705886,10700187
+"MarkRootsCheckpoint",2,13277500,1281223
+"ProcessMarkStackNonNull",2,11996277,11996277
+"Compose:applyChanges",4,11349192,8977393
+"activityDestroy",2,10970546,2349555
+"Recomposer:recompose",10,10129008,1227106
+"CompactionPhase",1,10055417,4652005
+"ScopedCodeCacheWrite",1939,9762265,9762265
+"layout",2,9620416,9378098
+"Choreographer#doFrame 226666371",1,9125027,19948
+"activityStart",2,8776875,3253541
+"allocateBuffers",4,8124662,354245
+"allocate",10,7759115,645729
+"Recomposer:animation",9,7663049,6986356
+"deliverInputEvent src=0x1002 eventTimeNano=341019045000000 id=0xfb05b0cc",1,7629036,207161
+"ViewPostImeInputStage id=0xfb05b0cc",1,7367422,364584
+"Choreographer#doFrame 226666963",1,7095495,14844
+"deliverInputEvent src=0x1002 eventTimeNano=341019947000000 id=0xf538b150",1,6944193,305390
+"draw-VRI[MainActivity]",5,6684843,616510
+"Choreographer#doFrame 226672599",1,6633516,74844
+"ViewPostImeInputStage id=0xf538b150",1,6555703,494011
+"Choreographer#doFrame 226667369",1,6180078,16875
+"deliverInputEvent src=0x1002 eventTimeNano=341020880000000 id=0xd8c34d99",1,6158698,356849
+"deliverInputEvent src=0x1002 eventTimeNano=341021069000000 id=0xe6929cad",1,5789922,334012
+"ViewPostImeInputStage id=0xd8c34d99",1,5749219,441199
+"Record View#draw()",3,5696302,4560444
+"Choreographer#doFrame 226675355",1,5621067,52473
+"deliverInputEvent src=0x1002 eventTimeNano=341021828164329 id=0xe98e9125",1,5608880,210182
+"performDestroy:com.example.shop.ui.MainActivity",2,5607604,3569295
+"Choreographer#doFrame 226672347",1,5559453,35234
+"Drawing  0.00  0.00 1080.00 2404.00",3,5446069,458909
+"ViewPostImeInputStage id=0xe6929cad",1,5441145,317786
+"deliverInputEvent src=0x1002 eventTimeNano=341022672000000 id=0xf642bb54",1,5418073,276146
+"CompactMovingSpace",1,5403412,5403412
+"ViewPostImeInputStage id=0xe98e9125",1,5384297,1414922
+"Choreographer#doFrame 226675159",1,5157422,25261
+"ViewPostImeInputStage id=0xf642bb54",1,5090313,467240
+"Choreographer#doFrame 226669872",1,5079167,34923
+"setSurface",5,5031643,4551329
+"deliverInputEvent src=0x1002 eventTimeNano=341021743000000 id=0xdf2f4393",1,4970885,362838
+"Choreographer#doFrame 226674795",1,4881042,20000
+"Choreographer#doFrame 226672515",1,4816250,59115
+"JIT compiling boolean androidx.compose.ui.input.pointer.Node.buildCache(androidx.collection.LongSparseArray, androidx.compose.ui.layout.LayoutCoordinates, androidx.compose.ui.input.pointer.InternalPointerEvent, boolean) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,4759662,29245
+"deliverInputEvent src=0x1002 eventTimeNano=341023684500000 id=0xf287f33c",1,4748646,373021
+"deliverInputEvent src=0x1002 eventTimeNano=341023629771994 id=0xfc328515",1,4695416,315260
+"virtual void art::MemMapArenaPool::TrimMaps()",55,4657035,4657035
+"TrimMaps",54,4648277,284732
+"JIT compiling void kotlinx.coroutines.DispatchedTask.run() (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk!10",1,4638307,46406
+"ViewPostImeInputStage id=0xdf2f4393",1,4522031,540052
+"deliverInputEvent src=0x1002 eventTimeNano=341018075000000 id=0xe74f62af",1,4422526,101928
+"ViewPostImeInputStage id=0xfc328515",1,4367291,302942
+"ViewPostImeInputStage id=0xf287f33c",1,4360755,312917
+"ViewPostImeInputStage id=0xe74f62af",1,4289869,548359
+"Choreographer#doFrame 226669077",1,4245104,23984
+"Choreographer#doFrame 226672823",1,4212838,39141
+"Choreographer#doFrame 226670292",1,4114740,44349
+"deliverInputEvent src=0x1002 eventTimeNano=341024427000000 id=0xc6dc0e9c",1,4093906,322395
+"performCreate:com.example.shop.ui.MainActivity",2,4083932,3718906
+"Choreographer#doFrame 226670348",1,4073073,42213
+"Choreographer#doFrame 226674907",1,4006015,33281
+"TextLayout:initLayout",19,4001379,761403
+"flush commands",3,3984218,5338
+"Vulkan finish frame",3,3978880,247760
+"Choreographer#doFrame 226670236",1,3966172,71016
+"deliverInputEvent src=0x1002 eventTimeNano=341021928000000 id=0xcfa1b7e0",1,3963151,294011
+"Choreographer#doFrame 226670432",1,3954479,36979
+"deliverInputEvent src=0x1002 eventTimeNano=341018088500000 id=0xf61c04fe",1,3901328,79557
+"deliverInputEvent src=0x1002 eventTimeNano=341019182915942 id=0xc6454e77",1,3881432,304634
+"Choreographer#doFrame 226676323",1,3815209,24740
+"deliverInputEvent src=0x1002 eventTimeNano=341021803000000 id=0xf5ad748f",1,3811459,113151
+"Choreographer#doFrame 226674851",1,3796640,56120
+"ViewPostImeInputStage id=0xf61c04fe",1,3780339,348490
+"ViewPostImeInputStage id=0xf5ad748f",1,3690755,230520
+"Choreographer#doFrame 226669021",1,3687161,30339
+"Choreographer#doFrame 226672767",1,3682344,33490
+"ViewPostImeInputStage id=0xc6dc0e9c",1,3662865,677396
+"ViewPostImeInputStage id=0xcfa1b7e0",1,3657682,228854
+"Choreographer#doFrame 226673910",1,3599349,30000
+"Choreographer#doFrame 226672711",1,3590573,30390
+"ViewPostImeInputStage id=0xc6454e77",1,3559740,281745
+"deliverInputEvent src=0x1002 eventTimeNano=341021894830993 id=0xe8537388",1,3557787,303881
+"Compose:onRemembered",2,3547890,3397160
+"deliverInputEvent src=0x1002 eventTimeNano=341021753190331 id=0xe67091ad",1,3542969,228100
+"Choreographer#doFrame 226676267",1,3510860,24011
+"deliverInputEvent src=0x1002 eventTimeNano=341023554771997 id=0xdeaceefd",1,3441328,270781
+"deliverInputEvent src=0x1002 eventTimeNano=341020084790994 id=0xc60fa8e4",1,3430677,372187
+"deliverInputEvent src=0x1002 eventTimeNano=341020101457660 id=0xec08ccd9",1,3411901,346301
+"JIT compiling androidx.compose.ui.input.pointer.PointerInputEventData androidx.compose.ui.input.pointer.MotionEventAdapter.createPointerInputEventData(androidx.compose.ui.input.pointer.PositionCalculator, android.view.MotionEvent, int, boolean) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,3401589,41928
+"Choreographer#doFrame 226673966",1,3370469,21511
+"deliverInputEvent src=0x1002 eventTimeNano=341024520000000 id=0xd7ba750f",1,3366927,456798
+"Choreographer#doFrame 226676603",1,3366198,26224
+"deliverInputEvent src=0x1002 eventTimeNano=341023518000000 id=0xeed25419",1,3343047,72786
+"deliverInputEvent src=0x1002 eventTimeNano=341020126457659 id=0xdf3992dd",1,3337604,368490
+"Choreographer#doFrame 226672459",1,3312265,46405
+"Constructing StaticLayout",21,3306409,3306409
+"Choreographer#doFrame 226676547",1,3300209,33595
+"Choreographer#doFrame 226672403",1,3295730,25991
+"Choreographer#doFrame 226670404",1,3286928,37006
+"Choreographer#doFrame 226667845",1,3275390,23984
+"deliverInputEvent src=0x1002 eventTimeNano=341020136000000 id=0xf1438e30",1,3249739,108749
+"ViewPostImeInputStage id=0xe8537388",1,3239844,256745
+"ViewPostImeInputStage id=0xe67091ad",1,3229869,328671
+"ViewPostImeInputStage id=0xeed25419",1,3221615,319193
+"Choreographer#doFrame 226667873",1,3206172,23230
+"Choreographer#doFrame 226673854",1,3205443,25677
+"deliverInputEvent src=0x1002 eventTimeNano=341019225000000 id=0xe1aac582",1,3172812,409088
+"deliverInputEvent src=0x1002 eventTimeNano=341024505700996 id=0xd871ce96",1,3167058,417761
+"Choreographer#doFrame 226673770",1,3166953,24557
+"ViewPostImeInputStage id=0xdeaceefd",1,3164271,198203
+"deliverInputEvent src=0x1002 eventTimeNano=341019163000000 id=0xd0a49347",1,3155964,437995
+"ViewPostImeInputStage id=0xf1438e30",1,3130651,187344
+"Choreographer#doFrame 226669900",1,3111172,28621
+"deliverInputEvent src=0x1002 eventTimeNano=341020064500000 id=0xedc07aeb",1,3109922,148776
+"deliverInputEvent src=0x1002 eventTimeNano=341023538105331 id=0xf38441d2",1,3106172,249193
+"deliverInputEvent src=0x1002 eventTimeNano=341021874500000 id=0xf9188640",1,3098203,321615
+"JIT compiling androidx.compose.ui.input.pointer.InternalPointerEvent androidx.compose.ui.input.pointer.PointerInputChangeEventProducer.produce(androidx.compose.ui.input.pointer.PointerInputEvent, androidx.compose.ui.input.pointer.PositionCalculator) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,3097552,51615
+"Choreographer#doFrame 226675047",1,3074141,35183
+"Choreographer#doFrame 226667453",1,3071666,17161
+"Choreographer#doFrame 226671722",1,3069271,18073
+"deliverInputEvent src=0x1002 eventTimeNano=341022768000000 id=0xec0a4222",1,3068333,443567
+"deliverInputEvent src=0x1002 eventTimeNano=341021861497661 id=0xcbd0d0f3",1,3061797,250807
+"ViewPostImeInputStage id=0xec08ccd9",1,3052318,222813
+"ViewPostImeInputStage id=0xc60fa8e4",1,3047240,233594
+"deliverInputEvent src=0x1002 eventTimeNano=341019959413433 id=0xd598fba6",1,3036172,275052
+"FullSuspendCheck",15,3012916,3012916
+"Choreographer#doFrame 226671638",1,3008333,18672
+"deliverInputEvent src=0x1002 eventTimeNano=341022787358661 id=0xc99e967d",1,3005416,471847
+"ThreadListFlip",2,3000990,32500
+"Choreographer#doFrame 226676519",1,2982969,20573
+"ViewPostImeInputStage id=0xdf3992dd",1,2957968,235338
+"ViewPostImeInputStage id=0xedc07aeb",1,2950729,221172
+"deliverInputEvent src=0x1002 eventTimeNano=341018232915980 id=0xfddc77e4",1,2944557,185546
+"Choreographer#doFrame 226674963",1,2942109,15000
+"deliverInputEvent src=0x1002 eventTimeNano=341023506000000 id=0xc8271c2f",1,2940391,163074
+"Choreographer#doFrame 226670180",1,2916848,41874
+"ViewPostImeInputStage id=0xd7ba750f",1,2888229,367213
+"Choreographer#doFrame 226671582",1,2877500,22084
+"deliverInputEvent src=0x1002 eventTimeNano=341024604000000 id=0xf381cb4b",1,2870000,404766
+"Choreographer#doFrame 226671526",1,2854714,20964
+"ViewPostImeInputStage id=0xf38441d2",1,2845495,288698
+"Choreographer#doFrame 226667593",1,2838594,21641
+"Choreographer#doFrame 226675215",1,2829114,33072
+"deliverInputEvent src=0x1002 eventTimeNano=341021767000000 id=0xd203215a",1,2826458,214896
+"deliverInputEvent src=0x1002 eventTimeNano=341022853000000 id=0xd6582b4b",1,2820807,410964
+"Choreographer#doFrame 226669928",1,2810755,23750
+"deliverInputEvent src=0x1002 eventTimeNano=341018241249313 id=0xda64f5a0",1,2805260,164634
+"MarkConcurrentRoots",3,2801250,2741745
+"ViewPostImeInputStage id=0xcbd0d0f3",1,2800495,239532
+"Choreographer#doFrame 226674107",1,2799947,20259
+"Choreographer#doFrame 226672683",1,2779401,28437
+"deliverInputEvent src=0x1002 eventTimeNano=341022754025329 id=0xefffe23c",1,2769089,447447
+"Choreographer#doFrame 226671666",1,2768828,20782
+"ViewPostImeInputStage id=0xf9188640",1,2767110,217032
+"Choreographer#doFrame 226667425",1,2764323,17006
+"deliverInputEvent src=0x1002 eventTimeNano=341024589034326 id=0xc739be9e",1,2763516,429870
+"ViewPostImeInputStage id=0xfddc77e4",1,2750130,200495
+"ViewPostImeInputStage id=0xe1aac582",1,2745131,650522
+"Choreographer#doFrame 226676379",1,2732943,19818
+"ViewPostImeInputStage id=0xd871ce96",1,2729922,317656
+"Choreographer#doFrame 226671610",1,2728542,20807
+"Choreographer#doFrame 226672571",1,2723125,34037
+"deliverInputEvent src=0x1002 eventTimeNano=341019968104665 id=0xf8bf5670",1,2720912,166668
+"ViewPostImeInputStage id=0xd598fba6",1,2711302,242031
+"Choreographer#doFrame 226675103",1,2703386,17214
+"ViewPostImeInputStage id=0xd0a49347",1,2702969,302631
+"deliverInputEvent src=0x1002 eventTimeNano=341021057500000 id=0xeff653ca",1,2701119,427734
+"deliverInputEvent src=0x1002 eventTimeNano=341022729025330 id=0xfa554530",1,2699922,447005
+"Choreographer#doFrame 226670124",1,2691693,23151
+"deliverInputEvent src=0x1002 eventTimeNano=341021035681993 id=0xee69bc80",1,2689635,369792
+"Choreographer#doFrame 226676099",1,2679427,25364
+"Choreographer#doFrame 226672907",1,2677266,16276
+"deliverInputEvent src=0x1002 eventTimeNano=341018116249318 id=0xc6c98061",1,2675052,72004
+"Choreographer#doFrame 226672655",1,2660130,10807
+"Choreographer#doFrame 226672879",1,2654661,33854
+"Choreographer#doFrame 226675299",1,2648047,20390
+"ViewPostImeInputStage id=0xc8271c2f",1,2648020,302578
+"deliverInputEvent src=0x1002 eventTimeNano=341024580700993 id=0xeb47173e",1,2647683,386277
+"DrawFrames 226665975",1,2644714,403358
+"ViewPostImeInputStage id=0xda64f5a0",1,2631927,201979
+"Choreographer#doFrame 226670040",1,2631640,20598
+"Choreographer#doFrame 226669956",1,2617891,27501

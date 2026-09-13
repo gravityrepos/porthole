@@ -1,0 +1,113 @@
+"thread_name","is_main_thread","state","io_wait","COUNT","SUM(dur)"
+"porthole-recomp",0,"S","[NULL]",196,11709113557
+"porthole-watchd",0,"S","[NULL]",78,11687481935
+"porthole-writer",0,"S","[NULL]",62,11013489827
+"porthole-memory",0,"S","[NULL]",22,11005735997
+"om.example.shop",1,"S","[NULL]",427,10975310183
+"binder:17183_5",0,"S","[NULL]",24,8280743521
+"RenderThread",0,"S","[NULL]",246,8202910292
+"Jit thread pool",0,"S","[NULL]",59,8093348068
+"Profile Saver",0,"S","[NULL]",22,5485572270
+"porthole-logcat",0,"S","[NULL]",12,5412869506
+"HeapTaskDaemon",0,"S","[NULL]",3,4999999117
+"FinalizerWatchd",0,"S","[NULL]",2,2000505990
+"SurfaceSyncGrou",0,"S","[NULL]",3,1133244271
+"om.example.shop",1,"Running","[NULL]",651,684462231
+"binder:17183_4",0,"S","[NULL]",24,533417236
+"android.bg",0,"S","[NULL]",4,513600781
+"allocateBuffers",0,"S","[NULL]",11,508983098
+"GPU completion",0,"S","[NULL]",7,184060286
+"porthole-frames",0,"S","[NULL]",3,174195963
+"hwuiTask0",0,"S","[NULL]",7,173862163
+"Jit thread pool",0,"Running","[NULL]",144,137573441
+"porthole-memory",0,"Running","[NULL]",26,91163541
+"porthole-writer",0,"Running","[NULL]",146,75381271
+"porthole-recomp",0,"Running","[NULL]",206,61008333
+"om.example.shop",1,"R","[NULL]",504,49458173
+"HeapTaskDaemon",0,"Running","[NULL]",8,35694166
+"RenderThread",0,"Running","[NULL]",255,27790203
+"porthole-recomp",0,"R","[NULL]",203,26266972
+"porthole-watchd",0,"Running","[NULL]",81,23894864
+"hwuiTask1",0,"S","[NULL]",4,21207108
+"RenderThread",0,"R","[NULL]",246,14703783
+"Jit thread pool",0,"R","[NULL]",107,10040267
+"porthole-watchd",0,"R","[NULL]",79,9581047
+"om.example.shop",1,"R+","[NULL]",134,9486976
+"porthole-logcat",0,"Running","[NULL]",25,9398438
+"porthole-writer",0,"R","[NULL]",81,7738336
+"Profile Saver",0,"R","[NULL]",21,6567164
+"porthole-writer",0,"R+","[NULL]",65,5987214
+"arch_disk_io_0",0,"Running","[NULL]",13,4835678
+"porthole-logcat",0,"R","[NULL]",21,4683179
+"om.example.shop",1,"D",1,13,4378436
+"Jit thread pool",0,"R+","[NULL]",36,4194999
+"vk_sparse_queue",0,"R","[NULL]",1,4043750
+"ReferenceQueueD",0,"Running","[NULL]",1,4043359
+"FinalizerDaemon",0,"Running","[NULL]",12,3390755
+"binder:17183_4",0,"Running","[NULL]",26,3149041
+"SurfaceSyncGrou",0,"R","[NULL]",3,2899947
+"porthole-memory",0,"R","[NULL]",23,2574741
+"binder:17183_5",0,"Running","[NULL]",25,2253385
+"porthole-watchd",0,"R+","[NULL]",2,2220287
+"binder:17183_4",0,"R","[NULL]",24,2189817
+"binder:17183_5",0,"R","[NULL]",23,1945495
+"allocateBuffers",0,"R","[NULL]",13,1915755
+"allocateBuffers",0,"Running","[NULL]",15,1689584
+"FinalizerDaemon",0,"D",1,1,1458203
+"binder:17183_2",0,"Running","[NULL]",3,1302631
+"porthole-frames",0,"Running","[NULL]",6,1203880
+"porthole-recomp",0,"R+","[NULL]",3,787240
+"allocateBuffers",0,"R+","[NULL]",2,720208
+"porthole-memory",0,"R+","[NULL]",3,695208
+"Jit thread pool",0,"D",1,2,666876
+"arch_disk_io_0",0,"D",1,6,636510
+"Profile Saver",0,"Running","[NULL]",22,592392
+"FinalizerDaemon",0,"R","[NULL]",3,588385
+"hwuiTask0",0,"Running","[NULL]",10,585493
+"DefaultDispatch",0,"Running","[NULL]",4,581484
+"porthole-frames",0,"R","[NULL]",5,537709
+"android.bg",0,"R","[NULL]",5,530338
+"binder:17183_2",0,"R","[NULL]",3,504661
+"android.bg",0,"Running","[NULL]",5,487500
+"arch_disk_io_0",0,"R","[NULL]",12,484844
+"HeapTaskDaemon",0,"R","[NULL]",5,451616
+"om.example.shop",1,"D",0,1,423541
+"FinalizerDaemon",0,"R+","[NULL]",8,421303
+"FinalizerWatchd",0,"Running","[NULL]",2,415938
+"binder:17183_1",0,"R","[NULL]",1,357005
+"DefaultDispatch",0,"S","[NULL]",4,339425
+"vkmem_free",0,"Running","[NULL]",2,255834
+"porthole-frames",0,"R+","[NULL]",1,254401
+"vkmem_free",0,"R","[NULL]",2,227473
+"binder:17183_3",0,"R","[NULL]",1,223568
+"GPU completion",0,"Running","[NULL]",7,199114
+"FinalizerWatchd",0,"R","[NULL]",2,198385
+"SurfaceSyncGrou",0,"Running","[NULL]",3,175990
+"binder:17183_5",0,"R+","[NULL]",1,169167
+"arch_disk_io_0",0,"R+","[NULL]",1,165208
+"hwuiTask1",0,"Running","[NULL]",4,163204
+"HeapTaskDaemon",0,"R+","[NULL]",2,151250
+"hwuiTask0",0,"R","[NULL]",8,137995
+"porthole-logcat",0,"R+","[NULL]",4,108177
+"hwuiTask1",0,"R","[NULL]",4,105260
+"GPU completion",0,"R","[NULL]",7,97943
+"binder:17183_4",0,"R+","[NULL]",2,97812
+"RenderThread",0,"R+","[NULL]",5,89217
+"hwuiTask0",0,"R+","[NULL]",2,61015
+"vk_sparse_queue",0,"Running","[NULL]",1,59818
+"FinalizerDaemon",0,"S","[NULL]",2,52967
+"DefaultDispatch",0,"R","[NULL]",4,52214
+"HWC release",0,"Running","[NULL]",1,50235
+"ReferenceQueueD",0,"R","[NULL]",1,25860
+"HWC release",0,"R","[NULL]",1,13177
+"binder:17183_3",0,"Running","[NULL]",1,11354
+"binder:17183_1",0,"Running","[NULL]",1,3724
+"HWC release",0,"S","[NULL]",1,-1
+"ReferenceQueueD",0,"S","[NULL]",1,-1
+"allocateBuffers",0,"X","[NULL]",1,-1
+"arch_disk_io_0",0,"S","[NULL]",1,-1
+"binder:17183_1",0,"S","[NULL]",1,-1
+"binder:17183_3",0,"S","[NULL]",1,-1
+"vk_sparse_queue",0,"S","[NULL]",1,-1
+"vkmem_free",0,"S","[NULL]",1,-1
+"binder:17183_2",0,"S","[NULL]",2,-2

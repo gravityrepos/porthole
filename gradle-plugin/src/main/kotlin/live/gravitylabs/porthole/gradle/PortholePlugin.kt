@@ -96,6 +96,14 @@ class PortholePlugin : Plugin<Project> {
             overrideCommand.set(extension.uiCommand)
         }
 
+        project.tasks.register<PortholeTraceProcessorTask>("portholeTraceProcessor") {
+            group = GROUP
+            description = "Downloads and verifies Perfetto's trace_processor, so trace questions can be answered."
+            refresh.set(
+                project.providers.gradleProperty("porthole.refresh").map { it == "true" },
+            )
+        }
+
         project.tasks.register<PortholeMcpConfigTask>("portholeMcpConfig") {
             group = GROUP
             description = "Writes the MCP server entry into .mcp.json."

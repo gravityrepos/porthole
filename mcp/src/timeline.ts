@@ -154,7 +154,8 @@ export class TimelineServer {
           if (!binary) {
             notes.push(
               "trace_processor_shell was not found, so the trace could not be read. " +
-                "The trace itself still opens at ui.perfetto.dev.",
+                "`./gradlew portholeTraceProcessor` fetches it; the trace itself already " +
+                "opens at ui.perfetto.dev.",
             );
           } else if (!app) {
             notes.push("Not attached to an app, so there is no process to scope the trace to.");

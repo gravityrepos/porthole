@@ -17,6 +17,8 @@ import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.URI
+import java.util.zip.ZipFile
 import javax.inject.Inject
 
 /**
@@ -227,6 +229,103 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         logger.lifecycle(
             "[porthole] next: ./gradlew portholeConnect, launch the debug build, " +
                 "and the tools go live in ${projectName.get()}.",
+        )
+    }
+}
+
+/**
+ * Fetches Perfetto's trace_processor, once, and says where it went.
+ *
+ * Separate from everything else and never run on its own: a 77MB download is
+ * not something to trigger as a side effect of applying a plugin. Ask for it
+ * and it arrives; otherwise nothing here touches the network.
+ *
+ * Already-present copies are left alone, including one the developer installed
+ * themselves — the point is to remove a chore, not to take ownership of a tool
+ * that is not ours.
+ */
+abstract class PortholeTraceProcessorTask : DefaultTask() {
+
+    /** Set to re-download over a cached copy. Rarely wanted. */
+    @get:Input
+    @get:Optional
+    abstract val refresh: Property<Boolean>
+
+    @TaskAction
+    fun fetch() {
+        val platform = TraceProcessor.platform()
+            ?: throw GradleException(
+                "No trace_processor build for ${System.getProperty("os.name")} " +
+                    "${System.getProperty("os.arch")}. Perfetto publishes Windows, macOS and " +
+                    "Linux on amd64 and arm64; see github.com/google/perfetto/releases.",
+            )
+
+        val home = File(System.getProperty("user.home"))
+        val target = File(TraceProcessor.cacheDir(home), TraceProcessor.binaryName(platform))
+        if (target.isFile && refresh.getOrElse(false) != true) {
+            logger.lifecycle("[porthole] trace_processor already at ${target.absolutePath}")
+            report(target)
+            return
+        }
+
+        val expected = TraceProcessor.expectedSha256(platform)
+            ?: throw GradleException("No pinned checksum for $platform; refusing to download it.")
+
+        val url = TraceProcessor.url(platform)
+        logger.lifecycle("[porthole] downloading trace_processor ${TraceProcessor.VERSION} for $platform")
+        logger.lifecycle("[porthole] from $url")
+
+        target.parentFile.mkdirs()
+        val archive = File(target.parentFile, "$platform.zip")
+        URI(url).toURL().openStream().use { input ->
+            archive.outputStream().use { output -> input.copyTo(output) }
+        }
+
+        // Before unzipping, not after: an archive that is not the one this
+        // plugin was written against should never be opened at all.
+        val actual = TraceProcessor.sha256(archive)
+        if (actual != expected) {
+            archive.delete()
+            throw GradleException(
+                "Checksum mismatch for $platform.zip.\n" +
+                    "  expected $expected\n" +
+                    "  got      $actual\n" +
+                    "Nothing was extracted. Either the release was re-cut or the download was " +
+                    "tampered with; in both cases this plugin's pin is the thing to trust.",
+            )
+        }
+
+        extract(archive, target)
+        archive.delete()
+
+        if (!target.isFile) {
+            throw GradleException(
+                "The archive verified but held no ${TraceProcessor.binaryName(platform)}. " +
+                    "The release layout may have changed.",
+            )
+        }
+        target.setExecutable(true)
+        logger.lifecycle("[porthole] verified and extracted to ${target.absolutePath}")
+        report(target)
+    }
+
+    /** Pulls the one file out of the release archive, wherever it sits in it. */
+    private fun extract(archive: File, target: File) {
+        val wanted = target.name
+        ZipFile(archive).use { zip ->
+            val entry = zip.entries().asSequence().firstOrNull {
+                !it.isDirectory && File(it.name).name == wanted
+            } ?: return
+            zip.getInputStream(entry).use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+    }
+
+    private fun report(binary: File) {
+        logger.lifecycle(
+            "[porthole] the MCP server finds it here on its own. To use it from a shell:\n" +
+                "  PORTHOLE_TRACE_PROCESSOR=${binary.absolutePath}",
         )
     }
 }

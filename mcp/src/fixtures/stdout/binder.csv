@@ -1,0 +1,4 @@
+"target","COUNT","SUM(dur)","MAX(dur)"
+"system_server",76,32397503,9449036
+"/vendor/bin/hw/pixel.gralloc.allocator-service",10,7113386,1290808
+"/system/bin/surfaceflinger",233,776848,169166

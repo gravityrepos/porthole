@@ -1,0 +1,31 @@
+"name","thread_name","COUNT","SUM(dur)"
+"Drawing  0.00  0.00 1080.00 2404.00","RenderThread",3,5446069
+"setSurface","RenderThread",5,5031643
+"flush commands","RenderThread",3,3984218
+"Vulkan finish frame","RenderThread",3,3978880
+"DrawFrames 226665975","RenderThread",1,2644714
+"DrawFrames 226666108","RenderThread",1,2354766
+"binder transaction","hwuiTask0",4,2252813
+"auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,2192734
+"waitForever","GPU completion",3,2000703
+"DrawFrames 226666371","RenderThread",1,1940286
+"waiting for GPU completion 2","GPU completion",1,1494584
+"QueueSubmit","RenderThread",3,1046823
+"queueBuffer","RenderThread",6,1038777
+"binder transaction","hwuiTask1",2,713152
+"disconnect","RenderThread",2,582917
+"BindImageMemory2","RenderThread",3,504349
+"TAKick: 19","RenderThread",1,494401
+"waiting for GPU completion 1","GPU completion",1,404010
+"auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,360808
+"TQ_KickNoSync: 15","RenderThread",1,353542
+"AtlasTextOp","RenderThread",16,324037
+"frameCommit success=1","RenderThread",2,282213
+"CircularRRectOp","RenderThread",20,281645
+"allocateBuffers","RenderThread",2,220130
+"~GraphicBuffer","RenderThread",4,219090
+"free","RenderThread",4,210938
+"freeBuffer","RenderThread",4,175078
+"notifyFramePending","RenderThread",8,168593
+"onFrameAvailable - VRI[MainActivity]#2(f:0,a:0)","RenderThread",1,133646
+"syncFrameState","RenderThread",3,131485

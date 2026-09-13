@@ -362,9 +362,9 @@ server.registerTool(
       + "Deliberately not a SQL interface. The questions are fixed, because an agent handed a "
       + "hundred tables and no guidance assembles an answer from whichever guess came back "
       + "non-empty — which is the failure this whole surface was reshaped to avoid.\n\n"
-      + "Needs `trace_processor_shell`, which is not bundled: it is a large platform-specific "
-      + "binary and Porthole is a plugin and an npm package. Point at it with PORTHOLE_TRACE_PROCESSOR "
-      + "or --trace-processor; get it from perfetto.dev.",
+      + "Needs `trace_processor_shell`, which is not bundled — it is a large platform-specific "
+      + "binary — but is fetched on request: `./gradlew portholeTraceProcessor` downloads the "
+      + "pinned release, checks its SHA-256 and caches it where this tool looks.",
     inputSchema: {
       trace: z.string().describe("Path to a .pftrace, as returned by capture_system_trace."),
       from: z
@@ -386,10 +386,11 @@ server.registerTool(
       traceProcessor ?? process.env.PORTHOLE_TRACE_PROCESSOR ?? findTraceProcessor();
     if (!binary) {
       return fail(
-        "No trace_processor_shell found. It is a separate download from perfetto.dev, not "
-          + "bundled here — it is a large platform-specific binary and this ships as a Gradle "
-          + "plugin and an npm package. Set PORTHOLE_TRACE_PROCESSOR to it, or pass "
-          + "`traceProcessor`. The trace itself is still readable at ui.perfetto.dev.",
+        "No trace_processor_shell found. Run `./gradlew portholeTraceProcessor` in the app's "
+          + "project: it downloads the pinned Perfetto release, verifies its checksum and caches "
+          + "it where this tool looks, so nothing further needs configuring. An existing copy "
+          + "works too — set PORTHOLE_TRACE_PROCESSOR or pass `traceProcessor`. Either way the "
+          + "trace itself is already readable at ui.perfetto.dev.",
       );
     }
 

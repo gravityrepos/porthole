@@ -1,8 +1,10 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import { interpret, QUESTIONS, type Rows } from "./perfetto.js";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { findTraceProcessor, interpret, QUESTIONS, type Rows } from "./perfetto.js";
 
 /**
  * The fixtures are real: three exports taken from Perfetto's own UI against a
@@ -132,5 +134,72 @@ describe("reading a real capture", () => {
     // Everything here is a direct reading. If a finding is ever derived by
     // putting two things next to each other it must say `correlated`.
     for (const f of findings) expect(f.confidence).toBe("observed");
+  });
+});
+
+/**
+ * `portholeTraceProcessor` puts the binary somewhere specific and then says
+ * nothing further is needed. That promise is only kept if this function looks
+ * where the task actually wrote.
+ */
+describe("findTraceProcessor", () => {
+  let home: string;
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "porthole-home-"));
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    delete process.env.PORTHOLE_TRACE_PROCESSOR;
+  });
+
+  afterEach(() => {
+    process.env.HOME = saved.HOME;
+    process.env.USERPROFILE = saved.USERPROFILE;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const cache = (version: string, name: string) => {
+    const dir = join(home, ".porthole", "trace-processor", version);
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, name);
+    writeFileSync(file, "");
+    return file;
+  };
+
+  it("finds what the Gradle task cached", () => {
+    const file = cache("v58.2", "trace_processor_shell");
+    expect(findTraceProcessor()).toBe(file);
+  });
+
+  it("finds the Windows binary too", () => {
+    const file = cache("v58.2", "trace_processor_shell.exe");
+    expect(findTraceProcessor()).toBe(file);
+  });
+
+  it("prefers the newest version numerically, not alphabetically", () => {
+    // "v9.0" sorts above "v58.2" as a string, which would quietly pin every
+    // session to whichever version was released first.
+    cache("v9.0", "trace_processor_shell");
+    const newer = cache("v58.2", "trace_processor_shell");
+    expect(findTraceProcessor()).toBe(newer);
+  });
+
+  it("lets an explicit path win over the cache", () => {
+    cache("v58.2", "trace_processor_shell");
+    const mine = join(home, "my_trace_processor");
+    writeFileSync(mine, "");
+    process.env.PORTHOLE_TRACE_PROCESSOR = mine;
+    expect(findTraceProcessor()).toBe(mine);
+  });
+
+  it("returns null rather than a path that is not there", () => {
+    // An empty cache directory is the state right after a failed download.
+    mkdirSync(join(home, ".porthole", "trace-processor", "v58.2"), { recursive: true });
+    expect(findTraceProcessor()).toBeNull();
+  });
+
+  it("survives there being no cache at all", () => {
+    expect(findTraceProcessor()).toBeNull();
   });
 });
