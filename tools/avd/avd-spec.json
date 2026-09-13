@@ -1,0 +1,50 @@
+{
+  "$comment": "Single source of truth for the emulator both a laptop and CI boot. create.sh and create.ps1 read this file and produce the same AVD from it; a CI workflow reads systemImage/device/config to fill in reactivecircus/android-emulator-runner's inputs (see the ci block below) without checking in a second copy of these numbers. Changing any value here is a deliberate re-pin, not a tweak: it invalidates every capture taken against the old AVD as a comparison baseline. See README.md#emulator for why.",
+
+  "avdName": "porthole_avd_api35",
+
+  "systemImage": {
+    "$comment": "packageId is what sdkmanager/avdmanager resolve. Everything else here is not consulted by either tool -- it is recorded so a human (or a CI assertion) can catch the day Google republishes the same packageId with different bits behind it. That has happened to public system images before; a package id survives it, a build id does not.",
+    "packageId": "system-images;android-35;google_atd;x86_64",
+    "apiLevel": 35,
+    "androidRelease": "15",
+    "tag": "google_atd",
+    "abi": "x86_64",
+    "packageRevision": 1,
+    "buildId": "AE3A.240806.019",
+    "buildIncremental": "12368160"
+  },
+
+  "device": {
+    "$comment": "avdmanager's --device profile. pixel_6 rather than whatever the tool lists as 'latest' -- an implicit default drifts every time a new Pixel profile ships, which is the exact failure mode this ticket exists to close. The profile only supplies defaults; config below overrides the fields that actually affect reproducibility.",
+    "profile": "pixel_6"
+  },
+
+  "config": {
+    "$comment": "Written into the AVD's config.ini after creation, every run, so a laptop AVD created months ago converges to the same values as one created today. Keys map 1:1 onto config.ini keys; see create.sh/create.ps1 applyConfig.",
+    "ramSizeMb": 4096,
+    "cpuCores": 4,
+    "gpuMode": "swiftshader_indirect",
+    "gpuEnabled": true,
+    "lcdDensity": 420,
+    "refreshRateHz": 60,
+    "snapshotsEnabled": false
+  },
+
+  "ci": {
+    "$comment": "Handed to GRA-101 (owns .github/workflows/*, not touched here). reactivecircus/android-emulator-runner takes api-level/target/arch, not a packageId, so it cannot pin the build directly the way create.sh/create.ps1 do -- it resolves 'android-35 google_atd x86_64' through sdkmanager same as anyone typing that string would, and Google could republish under that tag. The mitigating step, left for GRA-101 to wire in: after boot, run `adb shell getprop ro.build.version.incremental` and fail the job if it does not equal systemImage.buildIncremental below. That turns an unpinnable input into a detected pin.",
+    "action": "reactivecircus/android-emulator-runner",
+    "inputs": {
+      "api-level": 35,
+      "target": "google_atd",
+      "arch": "x86_64",
+      "ram-size": "4096M",
+      "disk-size": "6144M",
+      "emulator-options": "-no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none"
+    },
+    "postBootVerification": {
+      "property": "ro.build.version.incremental",
+      "expected": "12368160"
+    }
+  }
+}
