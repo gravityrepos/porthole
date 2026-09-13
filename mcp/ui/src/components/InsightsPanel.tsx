@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * What is wrong, from both halves, in one list.
@@ -35,46 +35,197 @@ interface Payload {
   notes: string[];
 }
 
+/** How long a burst of `schedule` calls waits for the view to settle, and the
+ * longest a continuously-moving view is ever allowed to go unasked. */
+const DEBOUNCE_MS = 300;
+
+interface FindingsCallbacks {
+  onStart: () => void;
+  onSuccess: (payload: Payload) => void;
+  onError: (message: string) => void;
+}
+
+/**
+ * Turns a stream of `schedule` calls -- one per animation frame while the
+ * user pans the timeline, or once a tick while `following` is on -- into at
+ * most one outstanding `/api/findings` request every `debounceMs`.
+ *
+ * That "every", not "after", matters and was not obvious until this was
+ * tried against a live device: `following` mode calls `schedule` on every
+ * animation frame for as long as traffic keeps arriving, which is
+ * indefinitely. A plain trailing debounce -- reset the timer on every call,
+ * fire when the calls stop -- never fires at all under that load, because
+ * the calls never stop; the panel would go stale the moment `following` was
+ * turned on and stay that way. So a batch, once started, has a deadline
+ * fixed at `debounceMs` from its first call, not from its most recent one:
+ * further calls before the deadline still update which window gets asked
+ * for, but they no longer push the deadline itself back. Panning briefly and
+ * releasing still settles onto one request, `debounceMs` after the pan
+ * began; continuous motion gets serviced roughly every `debounceMs` instead
+ * of not at all.
+ *
+ * Three further guards, because any one alone leaves a gap:
+ *  - cancelled: a fetch still in flight when a newer one starts is aborted,
+ *    so the server is not left computing an answer nobody wants any more;
+ *  - ordered: an aborted fetch's promise can still settle (a test's fake
+ *    fetch, or a runtime that does not wire the signal all the way through),
+ *    so a request id is checked again on the way out -- only the most recent
+ *    `run` is allowed to report its result;
+ *  - bound to the right `this`: `fetch` is a Window method, not a free
+ *    function, and browsers check that it is invoked with `this === window`.
+ *    Storing the bare reference and calling it as `this.fetchImpl(...)`
+ *    rebinds `this` to the loader, which a live device's browser caught
+ *    immediately as "Failed to execute 'fetch' on 'Window': Illegal
+ *    invocation" -- Node's fetch does not enforce this, so no unit test
+ *    here would have. Bound to `globalThis` once, in the constructor.
+ *
+ * Kept free of React so it can be constructed once per component instance
+ * and unit-tested directly, the way the rest of this codebase tests plain
+ * classes rather than rendering components.
+ */
+export class FindingsLoader {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  /** When the current batch's deadline falls; null between batches. */
+  private batchDeadline: number | null = null;
+  private pendingFrom: number | undefined;
+  private pendingTo: number | undefined;
+  private controller: AbortController | null = null;
+  private requestId = 0;
+  private readonly debounceMs: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(
+    private readonly callbacks: FindingsCallbacks,
+    options?: { debounceMs?: number; fetchImpl?: typeof fetch },
+  ) {
+    this.debounceMs = options?.debounceMs ?? DEBOUNCE_MS;
+    this.fetchImpl = options?.fetchImpl ?? fetch.bind(globalThis);
+  }
+
+  /** Queue a request for this window; a call already waiting is replaced,
+   * but the batch's deadline is only ever brought closer, never pushed out. */
+  schedule(from?: number, to?: number): void {
+    this.pendingFrom = from;
+    this.pendingTo = to;
+
+    const now = Date.now();
+    if (this.batchDeadline === null) this.batchDeadline = now + this.debounceMs;
+
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        this.batchDeadline = null;
+        void this.run(this.pendingFrom, this.pendingTo);
+      },
+      Math.max(0, this.batchDeadline - now),
+    );
+  }
+
+  /** Run immediately, for the manual refresh button. */
+  runNow(from?: number, to?: number): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.batchDeadline = null;
+    void this.run(from, to);
+  }
+
+  /** Stop anything pending; the component is going away. */
+  dispose(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.batchDeadline = null;
+    this.controller?.abort();
+  }
+
+  private async run(from?: number, to?: number): Promise<void> {
+    this.controller?.abort();
+    const controller = new AbortController();
+    this.controller = controller;
+    const requestId = ++this.requestId;
+
+    this.callbacks.onStart();
+    try {
+      const params = new URLSearchParams();
+      if (from !== undefined) params.set("from", String(from));
+      if (to !== undefined) params.set("to", String(to));
+      const response = await this.fetchImpl(`/api/findings?${params}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`the server answered ${response.status}`);
+      const body = (await response.json()) as Payload;
+      if (this.requestId !== requestId) return; // superseded while we waited
+      this.callbacks.onSuccess(body);
+    } catch (cause) {
+      if (this.requestId !== requestId) return;
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      this.callbacks.onError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+}
+
 const SEVERITY: Record<Finding["severity"], { label: string; className: string }> = {
   error: { label: "ERROR", className: "text-[var(--color-danger)]" },
   warning: { label: "WARN", className: "text-[var(--color-recompose)]" },
   note: { label: "NOTE", className: "text-[var(--color-muted)]" },
 };
 
-export function InsightsPanel({
-  from,
-  to,
-  tracePath,
-}: {
-  from?: number;
-  to?: number;
-  tracePath?: string;
-}) {
+// This panel used to also take a `tracePath` prop and forward it to
+// `/api/findings?trace=...`, but nothing in the UI ever named a trace file to
+// put there -- no picker, no setup state, nothing -- so the prop was always
+// undefined and the trace half of `findings` was unreachable from here. It
+// was removed rather than wired up: building a trace-file picker was not
+// part of this fix and has no design. The server-side `trace` query
+// parameter this fed is untouched; an agent still populates it by calling
+// `capture_system_trace` then `ask_system_trace` (or hitting
+// `/api/findings?trace=<path>` directly), and this component renders
+// whatever `findings` comes back either way. If `tracePath` reappears here,
+// it needs an actual source for the path first.
+export function InsightsPanel({ from, to }: { from?: number; to?: number }) {
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (from !== undefined) params.set("from", String(Math.round(from)));
-      if (to !== undefined) params.set("to", String(Math.round(to)));
-      if (tracePath) params.set("trace", tracePath);
-      const response = await fetch(`/api/findings?${params}`);
-      if (!response.ok) throw new Error(`the server answered ${response.status}`);
-      setPayload((await response.json()) as Payload);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [from, to, tracePath]);
+  // One loader per component instance, not per render -- it carries its own
+  // timer and AbortController across renders. A ref, not state, since
+  // creating it must never itself trigger a render.
+  const loaderRef = useRef<FindingsLoader | null>(null);
+  if (loaderRef.current === null) {
+    loaderRef.current = new FindingsLoader({
+      onStart: () => {
+        setLoading(true);
+        setError(null);
+      },
+      onSuccess: (body) => {
+        setPayload(body);
+        setLoading(false);
+      },
+      onError: (message) => {
+        setError(message);
+        setLoading(false);
+      },
+    });
+  }
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    return () => loaderRef.current?.dispose();
+  }, []);
+
+  // `from`/`to` move by fractions of a millisecond on every animation frame
+  // while the timeline is being panned or is following live traffic.
+  // Rounding first means those sub-pixel changes never reach the effect
+  // below at all, rather than reaching it and being debounced away --
+  // fewer timers started and cancelled for the same end result.
+  const roundedFrom = from === undefined ? undefined : Math.round(from);
+  const roundedTo = to === undefined ? undefined : Math.round(to);
+
+  useEffect(() => {
+    loaderRef.current?.schedule(roundedFrom, roundedTo);
+  }, [roundedFrom, roundedTo]);
+
+  const refresh = () => loaderRef.current?.runNow(roundedFrom, roundedTo);
 
   const findings = payload?.findings ?? [];
   const fromTrace = findings.filter((f) => f.source === "trace").length;
@@ -87,7 +238,7 @@ export function InsightsPanel({
         </h2>
         <button
           type="button"
-          onClick={() => void load()}
+          onClick={refresh}
           className="font-mono text-[10px] text-[var(--color-muted)] hover:text-[var(--color-fg)]"
         >
           {loading ? "reading…" : "refresh"}
@@ -151,8 +302,9 @@ export function InsightsPanel({
 
       {payload && fromTrace === 0 && !payload.notes.length && (
         <p className="text-[11px] leading-snug text-[var(--color-dim)]">
-          Only the app's own view so far. Record a system trace and pass it to see what the rest
-          of the device was doing — which is mostly how a cause gets ruled out.
+          Only the app's own view so far. Ask the agent to capture a system trace and correlate
+          it against this window to see what the rest of the device was doing — which is mostly
+          how a cause gets ruled out.
         </p>
       )}
     </section>
