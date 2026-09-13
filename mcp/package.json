@@ -1,15 +1,18 @@
 {
   "name": "@gravitylabsllc/porthole",
   "version": "0.1.0",
-  "description": "MCP server and live timeline for Porthole: query a running Android app for recomposition counts, frame timing, main-thread stalls, navigation, state, in-flight work and logs.",
+  "description": "MCP server and live timeline for Porthole: query a running Android app for recomposition counts, frame timing, main-thread stalls, navigation, state, in-flight work and logs, and capture and query Perfetto system traces.",
   "type": "module",
   "bin": {
     "porthole": "dist/cli.js",
     "porthole-mcp": "dist/index.js"
   },
   "files": [
+    "README.md",
     "dist",
-    "ui/dist"
+    "ui/dist",
+    "src/*.ts",
+    "!src/*.test.ts"
   ],
   "engines": {
     "node": ">=18"

@@ -1,0 +1,56 @@
+# Expected contents of the @gravitylabsllc/porthole tarball: every path
+# `npm pack` would include, one per line, sorted.
+#
+# The content hash Vite stamps into the UI asset filenames is normalised to
+# `*`. It changes on every UI edit and says nothing about what the package
+# contains, so leaving it in would mean rewriting this file for no reason.
+#
+# Generated from `npm pack --dry-run --json` after `npm run build`. CI diffs
+# the real packed list against this one, so a change here is the signal: the
+# published tarball is about to look different, and someone should have meant
+# it. The file exists because 0.1.0 went out with no README at all and with
+# source maps pointing at sources that were not in the tarball, and nothing
+# in the process was looking.
+
+LICENSE
+README.md
+dist/adb.js
+dist/adb.js.map
+dist/capture.js
+dist/capture.js.map
+dist/cli.js
+dist/cli.js.map
+dist/device.js
+dist/device.js.map
+dist/index.js
+dist/index.js.map
+dist/moment.js
+dist/moment.js.map
+dist/perfetto.js
+dist/perfetto.js.map
+dist/report.js
+dist/report.js.map
+dist/system.js
+dist/system.js.map
+dist/systrace.js
+dist/systrace.js.map
+dist/timeline.js
+dist/timeline.js.map
+dist/trace.js
+dist/trace.js.map
+package.json
+src/adb.ts
+src/capture.ts
+src/cli.ts
+src/device.ts
+src/index.ts
+src/moment.ts
+src/perfetto.ts
+src/report.ts
+src/system.ts
+src/systrace.ts
+src/timeline.ts
+src/trace.ts
+ui/dist/assets/index-*.css
+ui/dist/assets/index-*.js
+ui/dist/index.html
