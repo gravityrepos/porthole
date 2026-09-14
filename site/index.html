@@ -177,9 +177,16 @@
            takes the right column for both rows, Install and Ask stack on the
            left with no gap. DOM order stays 01, 02, 03 for reading order. */
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        /* auto, then 1fr: row 1 is exactly Install's height. Without it the
+           grid shared Connect's extra height between both rows and Ask
+           floated 50px below Install (founder, on the preview). */
+        grid-template-rows: auto 1fr;
         grid-template-areas:
           "install connect"
           "ask connect";
+        /* Room under both columns before the next screen's rule, so the
+           Connect card's bottom border does not sit on the separator. */
+        margin-bottom: 28px;
       }
       .cols-mid > :nth-child(1) {
         grid-area: install;
@@ -189,6 +196,10 @@
       }
       .cols-mid > :nth-child(3) {
         grid-area: ask;
+        /* Bottom-justified: its lower edge lines up with the Connect card's,
+           and the space the left column has spare sits between 1 and 3
+           rather than under 3 (founder, on the merged page). */
+        align-self: end;
       }
       @media (max-width: 1160px) {
         /* Two 520px columns plus the gap no longer fit the wrap; one column,
@@ -199,6 +210,9 @@
             "install"
             "connect"
             "ask";
+        }
+        .cols-mid > :nth-child(3) {
+          align-self: start;
         }
       }
       .cols-tight {
@@ -220,6 +234,14 @@
            keeps that promise, wrapping it does not. */
         white-space: pre;
         overflow-x: auto;
+      }
+      pre::after {
+        /* The same inset on the right as the left when a block scrolls: a
+           block's end padding is not reliably part of its scrollable area,
+           so the longest line otherwise ends flush against the border. */
+        content: "";
+        display: inline-block;
+        width: 12px;
       }
 
       /* Three monospace treatments (founder feedback, DECISIONS.md — "a
@@ -256,6 +278,16 @@
         border-left: 2px solid var(--line);
         border-top-left-radius: 0;
         border-bottom-left-radius: 0;
+      }
+
+      /* Severity, as a terminal would colour it: the one word per line the
+         eye is scanning for. observed/correlated stay muted on purpose — the
+         severity is the verdict, the confidence is the caveat. */
+      pre .sev-error {
+        color: var(--danger);
+      }
+      pre .sev-warning {
+        color: var(--db);
       }
 
       /* file: the plain pre look, plus a small label naming the file this
@@ -767,48 +799,6 @@
         text-wrap: pretty;
       }
 
-      /* roadmap */
-      .roadmap {
-        display: flex;
-        flex-direction: column;
-        gap: 1px;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        background: var(--line);
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        overflow: hidden;
-      }
-      .road-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 14px;
-        padding: 13px 14px;
-        background: var(--panel);
-        font-size: 13.5px;
-        color: #dbe3ef;
-      }
-      .road-tag {
-        font-family: var(--mono);
-        font-size: 10.5px;
-        white-space: nowrap;
-        border-radius: 999px;
-        padding: 3px 9px;
-      }
-      .road-tag.next {
-        color: var(--recompose);
-        background: rgba(240, 136, 62, 0.12);
-      }
-      .road-tag.exploring {
-        color: var(--state);
-        background: rgba(163, 113, 247, 0.12);
-      }
-      .road-tag.planned {
-        color: #96a2b4;
-        background: rgba(150, 162, 180, 0.12);
-      }
 
       /* footer */
       .foot {
@@ -995,19 +985,17 @@ Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().bui
           <div class="path-body" style="gap: 8px">
             <pre class="pre-output">findings
 
-4 finding(s) over 225s (3 error, 1 warning). Worst: 1 database query ran on
+4 finding(s) over 225s (<span class="sev-error">3 error</span>, <span class="sev-warning">1 warning</span>). Worst: 1 database query ran on
 the main thread [observed].
 
-  error    observed  1 database query ran on the main thread
-  error    observed  main thread blocked for 295ms
-  error    observed  4 HTTP calls failed
-  warning  observed  112 frames missed their deadline (budget 8.3ms at 120Hz)</pre>
+  <span class="sev-error">error  </span>  observed  1 database query ran on the main thread
+  <span class="sev-error">error  </span>  observed  main thread blocked for 295ms
+  <span class="sev-error">error  </span>  observed  4 HTTP calls failed
+  <span class="sev-warning">warning</span>  observed  112 frames missed their deadline (budget 8.3ms at 120Hz)</pre>
             <p>
-              A real capture, driven against <code>com.example.shop</code> on the attached Pixel 10
-              Pro XL — cart adds, checkout, and a forced main-thread block. The query and the stall
-              are yours to fix; a dropped frame whose cause sits below the app is not.
-              <code>capture_system_trace</code> + <code>ask_system_trace</code> go one level down,
-              into a Perfetto trace, when <code>findings</code> alone cannot say why.
+              The query and the stall are yours to fix; a dropped frame whose cause sits below the
+              app is not. <code>capture_system_trace</code> + <code>ask_system_trace</code> go one
+              level down, into a Perfetto trace, when <code>findings</code> alone cannot say why.
               <code>./gradlew portholeTraceProcessor</code> fetches the query engine once — pinned
               and SHA-256 verified. Nobody opens ui.perfetto.dev.
             </p>
@@ -1206,8 +1194,8 @@ the main thread [observed].
     </section>
 
     <section id="faq">
-      <div class="wrap split">
-        <div>
+      <div class="wrap">
+        <div style="max-width: 68ch">
           <div class="heading" style="margin-bottom: 20px">
             <span class="eyebrow">FAQ</span>
             <h2>The usual objections</h2>
@@ -1252,30 +1240,10 @@ the main thread [observed].
               </dd>
             </div>
           </dl>
-        </div>
-        <div>
-          <div class="heading" style="margin-bottom: 20px">
-            <span class="eyebrow">ROADMAP</span>
-            <h2>Next up</h2>
-          </div>
-          <ul class="roadmap">
-            <li class="road-row">
-              Publish to Maven Central and the Plugin Portal <span class="road-tag next">next</span>
-            </li>
-            <li class="road-row">
-              Compose Multiplatform core <span class="road-tag exploring">exploring</span>
-            </li>
-            <li class="road-row">
-              Control surface for out-of-process drivers
-              <span class="road-tag exploring">exploring</span>
-            </li>
-            <li class="road-row">
-              Verified on a physical device <span class="road-tag planned">planned</span>
-            </li>
-            <li class="road-row">
-              Stack symbolication for minified builds <span class="road-tag planned">planned</span>
-            </li>
-          </ul>
+          <p class="lede" style="margin-top: 28px; font-size: 14px">
+            What is next, and what is not yet verified, lives with the code:
+            <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+          </p>
         </div>
       </div>
     </section>
@@ -1291,10 +1259,7 @@ the main thread [observed].
             </svg>
             PORTHOLE
           </div>
-          <p>
-            Open source, Apache-2.0. Debug builds only — release builds link a no-op with the same
-            API, so the calls stay in your code and compile to nothing.
-          </p>
+          <p>Open source, Apache-2.0.</p>
           <span class="foot-meta">v0.1.0 · Android · Jetpack Compose</span>
         </div>
       </div>
