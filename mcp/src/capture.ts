@@ -52,7 +52,23 @@ The command runs to completion with the porthole recording. Its exit code is
 passed through unless --fail-on fires first.
 `;
 
-/** Waits for the device to answer, so a capture does not silently record nothing. */
+/**
+ * Waits for the device to answer, so a capture does not silently record
+ * nothing.
+ *
+ * GRA-157 AC5: this used to resolve the instant the socket connected, before
+ * hello had a chance to land — DeviceClient set state = "connected" on
+ * socket connect and issued the hello request without awaiting it, so a
+ * capture that started recording right here could finish with `hello: null`
+ * for a run it had already reported as connected. That is now structurally
+ * impossible without any change to this function: DeviceClient's "state"
+ * event does not fire "connected" until hello has actually resolved (see
+ * device.ts's setState()/connect()), and this only resolves `true` on that
+ * exact event, so by the time it does, `device.hello` below is guaranteed
+ * non-null. Waiting through the new "handshaking" state in between is free —
+ * this function was never told which non-"connected" states exist, and does
+ * not need to be now either.
+ */
 async function awaitConnection(device: DeviceClient, timeoutMs = 10_000): Promise<boolean> {
   if (device.state === "connected") return true;
   return new Promise((resolve) => {
@@ -86,6 +102,11 @@ export async function capture(options: CaptureOptions): Promise<number> {
 
   // The last events are still in flight when the child exits.
   await new Promise((resolve) => setTimeout(resolve, 750));
+  // Non-null here unless the app disconnected again during the run — a real,
+  // separate risk (the process under test crashed or was reinstalled mid-run)
+  // that this ticket does not attempt to paper over. It is no longer possible
+  // for this to be null merely because we asked too early: awaitConnection()
+  // above only returns once DeviceClient has actually set hello (GRA-157).
   const hello = device.hello as Record<string, unknown> | null;
   device.stop();
 

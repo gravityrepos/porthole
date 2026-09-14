@@ -289,7 +289,16 @@ export class TimelineServer {
                 "opens at ui.perfetto.dev.",
             );
           } else if (!app) {
-            notes.push("Not attached to an app, so there is no process to scope the trace to.");
+            // GRA-157: "Not attached" is wrong during the handshake window —
+            // the socket is up and a hello is already on its way, so telling
+            // the caller to attach is misleading advice for something
+            // already in progress. Name the wait instead when we can.
+            notes.push(
+              this.device.state === "handshaking"
+                ? "Still waiting on the app's first check-in, so there is no process yet to scope " +
+                    "the trace to. Try again in a moment."
+                : "Not attached to an app, so there is no process to scope the trace to.",
+            );
           } else {
             // The window is in Porthole's clock; the trace is stamped in the
             // boot clock, and the two differ by however long the device slept.
@@ -332,6 +341,18 @@ export class TimelineServer {
             name: "porthole-timeline",
             uiPort: this.port,
             devicePort: this.device.port,
+            // Strict on purpose (GRA-157): this used to read exactly this
+            // way, but under the old model "connected" was true the instant
+            // the socket connected — this is what produced the
+            // `connected: true, app: null, device: null` combo the ticket
+            // that generalised the fix names as the bug for this endpoint.
+            // Now that "connected" implies `hello` is set, that combo cannot
+            // happen: during a handshake this reports connected: false with
+            // app/device null, which is a coherent "not yet" instead of a
+            // self-contradicting one. explainPortInUse()'s "stale, restart
+            // it" wording is technically a beat early for the ~2s handshake
+            // window itself, which is a smaller, pre-existing gap this
+            // ticket does not close.
             connected: this.device.state === "connected",
             app: this.device.hello?.packageName ?? null,
             device: this.device.hello?.device ?? null,
@@ -393,8 +414,16 @@ export class TimelineServer {
         if (path === "/api/tools/restart") {
           const packageName = (this.device.hello as { packageName?: string } | null)?.packageName;
           if (!packageName) {
+            // GRA-157: distinguish "still handshaking, this will resolve
+            // itself shortly" from "no device at all" the same way the
+            // findings endpoint above now does, rather than one generic
+            // sentence for both.
+            const output =
+              this.device.state === "handshaking"
+                ? "Still waiting on the app's first check-in. Try again in a moment."
+                : "The app has not said hello yet.";
             res.writeHead(409, { "content-type": "application/json" });
-            res.end(JSON.stringify({ ok: false, output: "The app has not said hello yet." }));
+            res.end(JSON.stringify({ ok: false, output }));
             return;
           }
           const result = restartApp(packageName, this.serial);

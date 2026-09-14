@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
@@ -372,35 +372,47 @@ describe("findings", () => {
   });
 });
 
-describe("porthole_status and findings agree during the handshake race (AC7/AC9)", () => {
-  // DeviceClient sets state = "connected" the instant the socket connects,
-  // then issues `request("hello")` without awaiting it (device.ts,
-  // socket.on("connect")) — so there is a window, roughly 2s wide on real
-  // hardware (see GRA-152's device-verify comment), where
-  // `device.state === "connected"` and `device.hello` is still null.
+describe("porthole_status, findings and what_was_happening agree during the handshake (GRA-157)", () => {
+  // GRA-157 gave the gap this whole describe block is about its own
+  // ConnectionState, "handshaking" — DeviceClient enters it on socket
+  // connect and only leaves it for "connected" once hello has actually
+  // resolved (see device.ts's setState()/connect()). Before that ticket,
+  // DeviceClient set state = "connected" the instant the socket connected
+  // and issued `request("hello")` without awaiting it, so this same race —
+  // roughly 2s wide on real hardware (see GRA-152's device-verify comment) —
+  // showed up as `device.state === "connected"` with `device.hello` still
+  // null; these tests used to assert exactly that combination. They now
+  // assert `device.state === "handshaking"` instead, which is what makes
+  // this describe block still prove anything: with the fix in place,
+  // `device.state === "connected"` can no longer coexist with a null hello
+  // at all (device.ts throws if it would), so an assertion still written
+  // against the old combination would either hang forever waiting for a
+  // state that never arrives, or silently stop testing the race it names.
+  //
   // `connectDevice: false` skips buildRig's own wait-for-hello, and a hello
-  // handler that never resolves holds that window open indefinitely instead
-  // of racing a real, narrow gap in a unit test.
+  // handler that never resolves holds "handshaking" open indefinitely
+  // instead of racing a real, narrow gap in a unit test.
   async function buildRaceRig(): Promise<Rig> {
     const rig = await buildRig({
       connectDevice: false,
       handlers: { hello: () => new Promise(() => {}) },
     });
     rig.device.start();
-    await waitUntil(() => rig.device.state === "connected");
+    await waitUntil(() => rig.device.state === "handshaking");
     return rig;
   }
 
-  it("neither tool emits the troubleshooting wall while the socket is connected and hello is pending", async () => {
+  it("no tool emits the troubleshooting wall while the socket is up and hello is pending", async () => {
     const rig = await buildRaceRig();
     try {
-      expect(rig.device.state).toBe("connected");
+      expect(rig.device.state).toBe("handshaking");
       expect(rig.device.hello).toBeNull();
 
       const status = await rig.client.callTool("porthole_status", {});
       const findings = await rig.client.callTool("findings", {});
+      const whatWasHappening = await rig.client.callTool("what_was_happening", { at: 1000 });
 
-      for (const result of [status, findings]) {
+      for (const result of [status, findings, whatWasHappening]) {
         expect(result.isError).toBeFalsy();
         expect(result.text).not.toContain("Not connected to the app on");
       }
@@ -409,8 +421,8 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
     }
   });
 
-  it("porthole_status's summary agrees with its own payload.state in the race window", async () => {
-    // The bug this guards against: the summary required
+  it("porthole_status's summary agrees with its own payload.state in the handshake window", async () => {
+    // The bug this guards against (pre-GRA-157): the summary required
     // `device.state === "connected" && device.hello`, so it took the
     // not-connected branch and printed the wall while payload.state said
     // "connected" right below it — one call, two answers.
@@ -418,7 +430,7 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
     try {
       const status = await rig.client.callTool("porthole_status", {});
       const payload = status.json as { state: string; app: unknown };
-      expect(payload.state).toBe("connected");
+      expect(payload.state).toBe("handshaking");
       expect(payload.app).toBeNull();
       expect(status.text).toContain("Connected, waiting on the app's first check-in");
     } finally {
@@ -426,16 +438,18 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
     }
   });
 
-  it("findings' summary and connected field agree with each other in the race window (kills M5 and M5c)", async () => {
+  it("findings' summary and connected field agree with each other in the handshake window (kills M5 and M5c)", async () => {
     const rig = await buildRaceRig();
     try {
       const findings = await rig.client.callTool("findings", {});
       // M5: `const connected = device.hello !== null` reads the wrong field.
       // hello is null here, so that mutant reports connected: false even
-      // though device.state === "connected" — this assertion catches it.
+      // though device.state === "handshaking" (loosely "attached") — this
+      // assertion catches it.
       expect(findings.json).toMatchObject({ connected: true });
       // M5c: putting device.notConnectedMessage() back into the
-      // hello-pending arm reprints the wall here even though the payload
+      // hello-pending arm (i.e. bypassing device.pendingMessage()'s
+      // "handshaking" case) reprints the wall here even though the payload
       // says connected — this assertion catches it.
       expect(findings.text).toContain("Connected, waiting on the app's first check-in");
       expect(findings.text).not.toContain("Not connected to the app on");
@@ -444,7 +458,55 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
     }
   });
 
-  it("porthole_status and findings tell the same connection story in the race window", async () => {
+  it("what_was_happening tells the same handshake-pending story as findings (GRA-154, absorbed as AC7)", async () => {
+    // GRA-154's bug, folded into this ticket: an empty ring (nothing pushed
+    // to the timeline yet) used to read as "not connected" here regardless
+    // of whether a device was actually attached. In this rig the ring truly
+    // is empty (connectDevice: false — nothing was ever pushed), and the
+    // device is mid-handshake, which is the same case findings' "hello
+    // pending" arm covers above.
+    //
+    // QA caught a real regression here: an earlier version of this test
+    // asserted `connected: false` for what_was_happening right next to
+    // findings' `connected: true` for the identical state and identical
+    // prose, under a describe block titled "...agree during the
+    // handshake" — two tests each pinned to their own literal, silently
+    // encoding a disagreement instead of catching one. Asserting the two
+    // tools' `connected` fields equal to EACH OTHER, not each to a
+    // constant, is what makes them unable to drift apart again.
+    const rig = await buildRaceRig();
+    try {
+      const result = await rig.client.callTool("what_was_happening", { at: 1000 });
+      const findings = await rig.client.callTool("findings", {});
+      expect(result.isError).toBeFalsy();
+      const resultConnected = (result.json as { connected: boolean }).connected;
+      const findingsConnected = (findings.json as { connected: boolean }).connected;
+      expect(resultConnected).toBe(findingsConnected);
+      expect(resultConnected).toBe(true);
+      expect(result.text).toContain("Connected, waiting on the app's first check-in");
+      expect(result.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("what_was_happening reports connected: false when genuinely disconnected, not merely handshaking", async () => {
+    // The other half of the fix above: `connected` must still be false when
+    // there really is no device, not just always true now that the
+    // handshaking bug is fixed. device.start() is never called here, so
+    // state never leaves "disconnected".
+    const rig = await buildRig({ connectDevice: false });
+    try {
+      const result = await rig.client.callTool("what_was_happening", { at: 1000 });
+      expect(result.isError).toBeFalsy();
+      expect(result.json).toMatchObject({ connected: false });
+      expect(result.text).toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("porthole_status and findings tell the same connection story in the handshake window", async () => {
     const rig = await buildRaceRig();
     try {
       const status = await rig.client.callTool("porthole_status", {});
@@ -452,12 +514,59 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
       const statusPayload = status.json as { state: string };
       const findingsPayload = findings.json as { connected: boolean };
 
-      expect(statusPayload.state).toBe("connected");
+      expect(statusPayload.state).toBe("handshaking");
       expect(findingsPayload.connected).toBe(true);
       // Not just "both non-wall" — both describe the same handshake-pending
       // story, so an agent reading either tool gets a consistent answer.
       expect(status.text).toContain("Connected, waiting on the app's first check-in");
       expect(findings.text).toContain("Connected, waiting on the app's first check-in");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("ask_system_trace and capture_system_trace name the handshake instead of telling the caller to connect (GRA-157 AC3)", async () => {
+    const rig = await buildRaceRig();
+    try {
+      const trace = await rig.client.callTool("ask_system_trace", { trace: "whatever.pftrace" });
+      expect(trace.isError).toBe(true);
+      expect(trace.text).toContain("still waiting on its first check-in");
+      expect(trace.text).not.toContain("Connect to the app");
+
+      const capture = await rig.client.callTool("capture_system_trace", {});
+      expect(capture.isError).toBe(true);
+      expect(capture.text).toContain("Still waiting on the app's first check-in");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("device.state resolves to 'connected' — never anything else — once hello finally answers", async () => {
+    // Proves the window actually closes, and closes onto the strict state:
+    // buildRaceRig's hello handler never resolves on its own, so this
+    // replaces it and lets the pending request settle.
+    const rig = await buildRaceRig();
+    try {
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: 0,
+        collectors: [],
+      }));
+      // The pending hello request from buildRaceRig's original handler is
+      // never going to resolve; disconnect and let the client's own
+      // reconnect loop send a fresh one against the new handler.
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "connected", 5_000);
+      expect(rig.device.hello).not.toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.json).toMatchObject({ state: "connected" });
+      expect(status.text).toContain("Connected to com.example.shop");
     } finally {
       await rig.close();
     }
@@ -517,5 +626,28 @@ describe("resolveSdkDir's blank sdk.dir from local.properties (M6b)", () => {
         else process.env[name] = value;
       }
     }
+  });
+});
+
+describe("no site re-derives the connection story by hand (GRA-154 AC5, absorbed into GRA-157)", () => {
+  // GRA-154 AC5 asked for "a cheap and mechanical guard, not a comment asking
+  // people to be careful" against a future call site reading
+  // device.notConnectedMessage() directly in a branch that is really about
+  // an empty buffer rather than a disconnected device — the exact shape B3
+  // and this ticket's seven sites both were. Every such site in this file
+  // now goes through device.pendingMessage() instead (see porthole_status,
+  // findings, what_was_happening and ask_system_trace above), which is the
+  // one place allowed to call notConnectedMessage() at all — this reads the
+  // source text and fails if a second, independent caller shows up.
+  it("index.ts never calls device.notConnectedMessage() directly", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // pendingMessage() itself is defined in device.ts, not here, so a plain
+    // substring count is enough — there is no legitimate definition of the
+    // method in this file to exclude, only call sites.
+    const count = (source.match(/notConnectedMessage\(/g) ?? []).length;
+    expect(
+      count,
+      "index.ts should route every connection message through device.pendingMessage()",
+    ).toBe(0);
   });
 });

@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -225,6 +225,88 @@ describe("capture command: refused before device contact", () => {
     rmSync(adbSdkRoot, { recursive: true, force: true });
   });
 
+  /**
+   * A bare TCP listener that speaks just enough of the wire protocol to get
+   * a real `DeviceClient` past its handshake: it answers `hello`, and
+   * nothing else.
+   *
+   * GRA-157: before that ticket, `device.ts` set state "connected" on the
+   * raw TCP connect event, before the "hello" RPC round-trip even started,
+   * so a listener that never spoke the protocol at all was already enough to
+   * get `capture()` past `awaitConnection()`. That was itself an instance of
+   * the bug GRA-157 fixed — this test file's own harness was leaning on the
+   * exact race the runtime code no longer has. `capture()` now waits for the
+   * real "connected" state, which DeviceClient only reaches once hello has
+   * actually resolved, so the fake device here has to answer it for real.
+   */
+  function startHelloServer(): net.Server {
+    return net.createServer((socket) => {
+      socket.on("error", () => {});
+      let buffer = "";
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        let newline = buffer.indexOf("\n");
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf("\n");
+          if (!line) continue;
+          let request: { id: number; method: string } | undefined;
+          try {
+            request = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (request?.method === "hello") {
+            socket.write(
+              JSON.stringify({
+                id: request.id,
+                ok: true,
+                result: {
+                  protocol: 1,
+                  packageName: "com.example.shop",
+                  processName: "com.example.shop",
+                  versionName: "1.0.0-test",
+                  device: "Test Device",
+                  sdkInt: 34,
+                  startedAt: 0,
+                  collectors: [],
+                },
+              }) + "\n",
+            );
+          }
+        }
+      });
+    });
+  }
+
+  /**
+   * `spawnSync` blocks this process's own event loop until the child exits —
+   * that is what "Sync" means — so `startHelloServer()`'s handlers, which
+   * live in this same process, can never run while a `spawnSync`'d child is
+   * waiting on them. The client's TCP connect alone does not have that
+   * problem (the OS completes a handshake against a listen backlog without
+   * the listening process's JS running at all, which is exactly how the two
+   * refusal tests above get away with `spawnSync`), but answering `hello`
+   * is an application-level round trip that needs this process's own code to
+   * run — so any test that needs its fake device to actually answer
+   * something has to spawn the CLI asynchronously instead.
+   */
+  function spawnCliAsync(
+    args: string[],
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<{ status: number | null; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [distCli, ...args], { env });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+      child.on("error", reject);
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+  }
+
   function sentinelPath(): string {
     return path.join(tmpdir(), `porthole-ordering-sentinel-${process.pid}-${Date.now()}.txt`);
   }
@@ -237,33 +319,35 @@ describe("capture command: refused before device contact", () => {
   }
 
   /**
-   * Spawns the compiled CLI with the fake adb from `beforeAll` standing in
-   * for the real one. `adbSentinel` is the file that fake adb writes to if
-   * — and only if — it is actually invoked, which is the signal a test needs
-   * to tell "refused before touching the device" from "refused, but only
-   * after touching the device" (the latter is what survived as GRA-124's QA
+   * The env that points the CLI at the fake adb from `beforeAll` instead of
+   * the real one. `adbSentinel` is the file that fake adb writes to if — and
+   * only if — it is actually invoked, which is the signal a test needs to
+   * tell "refused before touching the device" from "refused, but only after
+   * touching the device" (the latter is what survived as GRA-124's QA
    * mutation 4).
    */
+  function fakeAdbEnv(adbSentinel: string): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      // Highest precedence, so a real local.properties in the checkout
+      // cannot quietly win and make the shim unreachable — see the note
+      // above this describe's fixtures.
+      PORTHOLE_SDK_DIR: adbSdkRoot,
+      ANDROID_HOME: adbSdkRoot,
+      ANDROID_SDK_ROOT: adbSdkRoot,
+      // NODE_OPTIONS is parsed with shell-like quoting rules: a backslash
+      // inside a quoted value is an escape character, which silently
+      // eats every path separator in a Windows absolute path ("C:\Users\..."
+      // becomes "C:Users..." and the require fails). Forward slashes resolve
+      // identically on Windows and sidestep that without needing to think
+      // about escaping at all.
+      NODE_OPTIONS: `--require "${adbShimInit.replace(/\\/g, "/")}"`,
+      PORTHOLE_ADB_SENTINEL: adbSentinel,
+    };
+  }
+
   function spawnCliWithFakeAdb(args: string[], adbSentinel: string) {
-    return spawnSync(process.execPath, [distCli, ...args], {
-      env: {
-        ...process.env,
-        // Highest precedence, so a real local.properties in the checkout
-        // cannot quietly win and make the shim unreachable — see the note
-        // above this describe's fixtures.
-        PORTHOLE_SDK_DIR: adbSdkRoot,
-        ANDROID_HOME: adbSdkRoot,
-        ANDROID_SDK_ROOT: adbSdkRoot,
-        // NODE_OPTIONS is parsed with shell-like quoting rules: a backslash
-        // inside a quoted value is an escape character, which silently
-        // eats every path separator in a Windows absolute path ("C:\Users\..."
-        // becomes "C:Users..." and the require fails). Forward slashes resolve
-        // identically on Windows and sidestep that without needing to think
-        // about escaping at all.
-        NODE_OPTIONS: `--require "${adbShimInit.replace(/\\/g, "/")}"`,
-        PORTHOLE_ADB_SENTINEL: adbSentinel,
-      },
-    });
+    return spawnSync(process.execPath, [distCli, ...args], { env: fakeAdbEnv(adbSentinel) });
   }
 
   it("never runs the -- command or contacts adb when --port is malformed", () => {
@@ -314,20 +398,16 @@ describe("capture command: refused before device contact", () => {
   it("sanity check: the harness itself does run the -- command once arguments validate", async () => {
     // Proves the sentinel technique can observe a "ran" outcome at all — a
     // harness that never runs anything would make the two refusal tests
-    // above pass vacuously. device.ts sets state "connected" on the raw TCP
-    // connect event, before the "hello" RPC round-trip even starts, so a
-    // bare listener that never speaks the protocol is enough to get capture()
-    // past awaitConnection and into running the -- command. --no-forward
-    // skips adb entirely here, on purpose: this test is only about the
-    // command sentinel, and the adb shim gets its own positive control next.
-    const server = net.createServer((socket) => socket.on("error", () => {}));
+    // above pass vacuously. --no-forward skips adb entirely here, on
+    // purpose: this test is only about the command sentinel, and the adb
+    // shim gets its own positive control next.
+    const server = startHelloServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const port = (server.address() as net.AddressInfo).port;
     const sentinel = sentinelPath();
     const out = path.join(tmpdir(), `porthole-ordering-trace-${process.pid}-${Date.now()}.json`);
     try {
-      const result = spawnSync(process.execPath, [
-        distCli,
+      const result = await spawnCliAsync([
         "capture",
         "--port",
         String(port),
@@ -339,7 +419,7 @@ describe("capture command: refused before device contact", () => {
         "-e",
         `require("fs").writeFileSync(${JSON.stringify(sentinel)}, "ran")`,
       ]);
-      expect(existsSync(sentinel)).toBe(true);
+      expect(existsSync(sentinel), result.stderr).toBe(true);
       expect(result.status).not.toBe(2);
     } finally {
       server.close();
@@ -356,14 +436,14 @@ describe("capture command: refused before device contact", () => {
     // mechanism is sound or simply never fires. --no-forward is deliberately
     // NOT passed: parseCapture leaves options.forward at its default of
     // true, so a successful parse reaches cli.ts's real runAdb call.
-    const server = net.createServer((socket) => socket.on("error", () => {}));
+    const server = startHelloServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const port = (server.address() as net.AddressInfo).port;
     const commandSentinel = sentinelPath();
     const adbSentinel = adbSentinelPath();
     const out = path.join(tmpdir(), `porthole-adb-positive-trace-${process.pid}-${Date.now()}.json`);
     try {
-      const result = spawnCliWithFakeAdb(
+      const result = await spawnCliAsync(
         [
           "capture",
           "--port",
@@ -375,10 +455,10 @@ describe("capture command: refused before device contact", () => {
           "-e",
           `require("fs").writeFileSync(${JSON.stringify(commandSentinel)}, "ran")`,
         ],
-        adbSentinel,
+        fakeAdbEnv(adbSentinel),
       );
-      expect(existsSync(adbSentinel)).toBe(true);
-      expect(existsSync(commandSentinel)).toBe(true);
+      expect(existsSync(adbSentinel), result.stderr).toBe(true);
+      expect(existsSync(commandSentinel), result.stderr).toBe(true);
       expect(result.status).not.toBe(2);
     } finally {
       server.close();

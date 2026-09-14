@@ -33,7 +33,24 @@ export interface Hello {
   collectors: string[];
 }
 
-export type ConnectionState = "disconnected" | "connecting" | "connected";
+/**
+ * GRA-157: the socket connecting and the app saying hello are two different
+ * events, roughly 2s apart on real hardware, and treating them as one was the
+ * bug. "handshaking" names the gap: the socket is up, `request()` can already
+ * be used (hello itself goes over it), but `hello` is still null. "connected"
+ * is now a promise, not just a name — see `setState()` below, which refuses
+ * to enter it while `hello` is null, and `connect()`'s hello handler, which is
+ * the only place that promise is fulfilled. Every caller that used to write
+ * `state === "connected" && hello` can drop the `&& hello`; every caller that
+ * used to write `state === "connected"` alone and silently mean "and hello
+ * happens to be set" was the bug, and now has three states to actually name
+ * what it meant.
+ */
+export type ConnectionState = "disconnected" | "connecting" | "handshaking" | "connected";
+
+/** The one sentence every tool uses for "the socket is up, hello has not landed yet" — GRA-157 AC3. */
+export const HANDSHAKE_PENDING_MESSAGE =
+  "Connected, waiting on the app's first check-in. Ask again in a moment.";
 
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 5_000;
@@ -99,14 +116,35 @@ export class DeviceClient extends EventEmitter {
     socket.on("connect", () => {
       this.reconnectDelay = RECONNECT_MIN_MS;
       this.lastError = null;
-      this.setState("connected");
+      // Not "connected" yet — GRA-157. The TCP handshake finishing says
+      // nothing about whether the far end is a Porthole runtime, let alone
+      // which app; hello is what answers that, and it has not been asked
+      // yet at this line. Callers that need "connected" is real now get it:
+      // the state stays "handshaking" until the block below actually has a
+      // Hello in hand.
+      this.setState("handshaking");
       // hello doubles as a liveness check and as the timeline's origin.
       this.request<Hello>("hello")
         .then((hello) => {
+          // Order matters: hello is set before the state change that
+          // announces it, so anything reacting to the "state" event (or
+          // reading `.hello` right after seeing state flip to "connected")
+          // never observes "connected" with `hello` still null. setState()
+          // also asserts this itself, so a future edit that reordered these
+          // two lines would fail loudly instead of reintroducing the race.
           this.hello = hello;
+          this.setState("connected");
           this.emit("hello", hello);
         })
         .catch((error: Error) => {
+          // The socket is still open and still usable — only the hello
+          // round-trip failed (most likely its own 5s timeout, if the far
+          // end accepted the TCP connection but never speaks the protocol).
+          // Staying in "handshaking" rather than falling back to "connected"
+          // is the point of this whole change; there is deliberately no
+          // retry here, since request() already gives every other method
+          // the same 5s timeout and nothing about hello is special enough to
+          // loop on its own.
           this.lastError = error.message;
         });
     });
@@ -176,6 +214,16 @@ export class DeviceClient extends EventEmitter {
   }
 
   private setState(state: ConnectionState): void {
+    // GRA-157 AC1: "connected" implies `hello` is non-null, enforced here —
+    // the one place `state` is actually assigned — rather than left for
+    // every reader to remember. If this throws, the bug is in this file
+    // (most likely connect()'s hello handler setting state before hello),
+    // never in whatever asked for the transition.
+    if (state === "connected" && this.hello === null) {
+      throw new Error(
+        "DeviceClient invariant violated: cannot enter state 'connected' with hello still null",
+      );
+    }
     if (this.state === state) return;
     this.state = state;
     this.emit("state", state);
@@ -183,7 +231,14 @@ export class DeviceClient extends EventEmitter {
 
   request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const socket = this.socket;
-    if (!socket || this.state !== "connected") {
+    // "handshaking" is allowed here on purpose: it is the exact state hello
+    // itself is sent in (see connect()'s socket.on("connect") above, which
+    // sets "handshaking" and then calls request<Hello>("hello") next) —
+    // gating on "connected" alone would make sending hello reject itself.
+    // Only "connecting" (TCP handshake still in flight — this.socket exists
+    // but has not fired "connect" yet) and "disconnected" have no usable
+    // socket to write a frame to.
+    if (!socket || (this.state !== "handshaking" && this.state !== "connected")) {
       return Promise.reject(new Error(this.notConnectedMessage()));
     }
 
@@ -208,6 +263,40 @@ export class DeviceClient extends EventEmitter {
       });
       socket.write(JSON.stringify({ id, method, params: cleaned }) + "\n");
     });
+  }
+
+  /**
+   * The disconnected/handshaking half of what every tool says about the
+   * connection, written once instead of separately by porthole_status,
+   * findings, and whichever tool asks next (GRA-157 AC3). Returns null when
+   * `state` is "connected", since `hello` is guaranteed non-null there (see
+   * setState() above) and what to say about a live connection differs by
+   * caller — porthole_status names the collectors, findings talks about the
+   * buffer — so that half stays with each tool.
+   *
+   * The switch is exhaustive on purpose, with a compiled-in `never` check
+   * instead of a `default` that quietly falls through: a fifth
+   * ConnectionState added later without a case here fails `tsc`, in this one
+   * place, rather than silently being treated as either "connected" or the
+   * wall. This is deliberately the only place in the package with that
+   * check — everywhere else asks this method instead of re-deriving the
+   * answer from `state` and `hello` by hand, which is the actual fix GRA-157
+   * is about.
+   */
+  pendingMessage(): string | null {
+    switch (this.state) {
+      case "disconnected":
+      case "connecting":
+        return this.notConnectedMessage();
+      case "handshaking":
+        return HANDSHAKE_PENDING_MESSAGE;
+      case "connected":
+        return null;
+      default: {
+        const exhaustive: never = this.state;
+        throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
+      }
+    }
   }
 
   notConnectedMessage(): string {

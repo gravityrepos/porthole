@@ -157,22 +157,25 @@ async function ui(argv: string[]): Promise<void> {
   if (options.open) openBrowser(url);
 
   device.on("state", (state: string) => {
-    if (state === "connected") {
-      const hello = device.hello;
-      console.error(hello ? `connected to ${hello.packageName} on ${hello.device}` : "connected");
+    if (state === "handshaking") {
+      // GRA-157: this fires exactly when the socket comes up, which is the
+      // real event the 2-second setTimeout below used to guess at. Printing
+      // here instead means the CLI says something true immediately on a
+      // slow device and does not need a fixed wait on a fast one — the
+      // opposite of what a timer can do.
+      console.error("connected, waiting on the app's first check-in...");
+    } else if (state === "connected") {
+      // hello is guaranteed non-null here — DeviceClient does not enter
+      // "connected" until it is (see device.ts's setState()) — so this no
+      // longer hedges with a ternary the way it had to before that was true.
+      const hello = device.hello as NonNullable<typeof device.hello>;
+      console.error(`connected to ${hello.packageName} on ${hello.device}`);
     } else if (state === "disconnected") {
       // Expected constantly during development: the app gets reinstalled and
       // relaunched, and the client reconnects on its own.
       console.error("waiting for the app...");
     }
   });
-
-  // The first connect usually lands in well under a second. Printing a
-  // troubleshooting wall immediately and then "connected" a moment later reads
-  // like something went wrong when nothing did.
-  setTimeout(() => {
-    if (device.state !== "connected") console.error(device.notConnectedMessage());
-  }, 2000);
 
   const shutdown = () => {
     device.stop();
