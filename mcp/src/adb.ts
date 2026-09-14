@@ -121,6 +121,77 @@ export function resolveProjectRoot(): ResolvedProjectRoot {
   return { directory: process.cwd(), source: "cwd" };
 }
 
+/**
+ * True for a Windows drive-relative path — a letter, a colon, and then
+ * anything other than a separator (`C:foo`, or bare `C:`): "foo, relative to
+ * whatever the current directory on drive C happens to be", a real Windows
+ * path concept distinct from both absolute and an ordinary relative path.
+ * This is the TypeScript analogue of `isWindowsDriveRelative` in
+ * PortholeTasks.kt (GRA-150), kept for the same reason: `path.join(directory,
+ * "C:foo")` does not anchor it under `directory` — Node happily concatenates
+ * the strings into `<directory>\C:foo`, a colon spliced into the middle of a
+ * path segment that Windows refuses to open. There is no reliable way to ask
+ * Node, any more than the JVM, what "the current directory on drive C" is for
+ * a directory other than this process's own, so — matching the Kotlin
+ * resolver's choice — this shape is deliberately left to resolve however
+ * `path.resolve` on its own (no `directory` argument) already resolves it,
+ * rather than inventing an anchor. Gated on `win32`: everywhere else a colon
+ * is an ordinary filename character, and `C:foo` there is exactly as
+ * relative as it looks.
+ */
+function isWindowsDriveRelative(value: string): boolean {
+  return process.platform === "win32" && /^[A-Za-z]:($|[^\\/])/.test(value);
+}
+
+/**
+ * True for a path `java.io.File#isAbsolute()` — and so PortholeTasks.kt's
+ * `resolveSdkDir` — would call absolute. On Windows this deliberately
+ * disagrees with Node's own `path.isAbsolute`: a bare POSIX-style leading
+ * slash (`/opt/sdk`) is absolute to Node there (it roots the path at
+ * whatever the current drive is) but not to Java, which requires a drive
+ * letter or a UNC prefix. GRA-150's QA moved the Kotlin resolver to route
+ * that shape through the project-root join instead of the current-drive
+ * root; using Node's native check here would silently put TypeScript back on
+ * the old, rejected answer for this one shape. See PortholeTasks.kt's
+ * `resolveSdkDir` doc comment for the full story. Off Windows, Java's rule
+ * and Node's agree (both are simply "starts with /"), so this just defers to
+ * `path.isAbsolute`.
+ */
+function isJavaStyleAbsolute(value: string): boolean {
+  if (process.platform !== "win32") return path.isAbsolute(value);
+  return /^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}/.test(value);
+}
+
+/**
+ * Anchors a `sdk.dir` value read out of local.properties against `directory`
+ * — [sdkDirFromLocalProperties]'s current directory in its walk, i.e. the
+ * directory the file was actually found in. This is deliberately NOT
+ * `resolveProjectRoot().directory`: the two differ whenever the walk climbs
+ * past the project root to find the file, and a relative path written inside
+ * that file means "relative to where the file lives", not "relative to
+ * wherever PORTHOLE_PROJECT_ROOT happens to point". This mirrors
+ * PortholeTasks.kt's `resolveSdkDir`, which anchors on `projectRoot` — its
+ * exact analogue, for the exact same reason (GRA-160 AC1).
+ *
+ * `path.join`, not `path.resolve`, does the anchoring for the ordinary case:
+ * `path.resolve` special-cases any argument it considers absolute — which,
+ * on Windows, includes the POSIX-style shape `isJavaStyleAbsolute`
+ * deliberately excludes — by discarding every argument before it and rooting
+ * at the current drive instead. That is exactly the answer this function
+ * exists to avoid. `path.join` treats every argument as a plain segment
+ * regardless of what it looks like, so it always anchors under `directory`;
+ * the outer `path.resolve` then only normalizes the result (drops a trailing
+ * separator, collapses a redundant `.`/`..`), which is also where the
+ * "GRA-160 AC4" trim below actually pays for itself — an unstripped
+ * whitespace character survives straight into this join as part of the path
+ * segment, and lands on a directory that does not exist.
+ */
+function resolveRelativeSdkDir(value: string, directory: string): string {
+  if (isWindowsDriveRelative(value)) return path.resolve(value);
+  if (isJavaStyleAbsolute(value)) return path.resolve(value);
+  return path.resolve(path.join(directory, value));
+}
+
 /** `sdk.dir` from the nearest local.properties at or above `from`. */
 function sdkDirFromLocalProperties(from: string): string | null {
   let directory = path.resolve(from);
@@ -131,7 +202,19 @@ function sdkDirFromLocalProperties(from: string): string | null {
         // A local.properties with no sdk.dir in it is not an answer, so the
         // walk continues past it rather than stopping at the first file found.
         const value = parseProperties(readFileSync(file, "utf8")).get("sdk.dir");
-        if (value && value.trim()) return value.trim();
+        // GRA-160 AC4: value.trim() here is the only thing standing between
+        // a value parseProperties handed back un-trimmed and a filesystem
+        // check on a directory that does not exist. Plain ASCII whitespace
+        // around the value mostly never reaches this line at all —
+        // parseProperties' own `[ \t\f]` stripping already ate the leading
+        // run, and a value with nothing but trailing ASCII space is realistic
+        // (a hand-edited file, or a stray editor auto-format) but easy to
+        // write a fixture for and forget. A non-breaking space (U+00A0) is
+        // the sharper case: `[ \t\f]` does not include it, so it survives
+        // parseProperties untouched either way, and only JS's own
+        // Unicode-aware `trim()` — not a regex character class copied from
+        // Java's — removes it here. adb.test.ts covers both.
+        if (value && value.trim()) return resolveRelativeSdkDir(value.trim(), directory);
       }
     } catch {
       // Unreadable is the same as absent: the environment is next, and a
@@ -210,13 +293,34 @@ export function resolveSdkDir(): ResolvedSdkDir {
   return { directory: null, source: "PATH" };
 }
 
-/** adb, from the SDK if one can be found, and otherwise left to the PATH. */
+/**
+ * adb, from the SDK if one can be found, and otherwise left to the PATH.
+ *
+ * GRA-160 AC3: falling through to a bare binary name is the right answer
+ * only when nothing named an SDK at all (`directory` is null, `source` is
+ * "PATH") — that is an honest "I don't know", and PATH is the reasonable
+ * last resort, unremarked. When `directory` IS known — Android Studio wrote
+ * it, or this ticket's fix just anchored a relative one against the right
+ * place — but platform-tools is not actually there, falling through to PATH
+ * the same silent way is a different thing: it runs *some* adb, possibly a
+ * different SDK's, without a word to whoever asked. The wave-4 integration
+ * QA measured exactly this. This writes that specific case to stderr rather
+ * than swallowing it — stdout is the MCP transport's JSON-RPC channel, so
+ * stderr is the only channel available here that cannot corrupt it. Fully
+ * surfacing it through `porthole_status`'s payload would need a change in
+ * index.ts, which this ticket's Owns excludes; see the ticket report.
+ */
 export function findAdb(): string {
   const binary = process.platform === "win32" ? "adb.exe" : "adb";
   const { directory } = resolveSdkDir();
   if (!directory) return binary;
   const candidate = path.join(directory, "platform-tools", binary);
-  return existsSync(candidate) ? candidate : binary;
+  if (existsSync(candidate)) return candidate;
+  process.stderr.write(
+    `[porthole] sdk.dir resolved to ${directory}, but ` +
+      `${path.join("platform-tools", binary)} was not found there; falling back to ${binary} on PATH.\n`,
+  );
+  return binary;
 }
 
 export interface AdbResult {

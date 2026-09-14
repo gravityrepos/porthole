@@ -49,6 +49,21 @@ function fakeSdk(): string {
   return sdk;
 }
 
+/**
+ * An SDK at a specific, known place under `parent` rather than at its own
+ * fresh temporary root — what GRA-160's relative-path tests need, since the
+ * whole point is to prove the SDK is found (or not) relative to a particular
+ * directory. `parent` must already exist; the returned path is not
+ * separately tracked in `roots` because it lives under a directory that
+ * already is.
+ */
+function fakeSdkIn(parent: string, name: string): string {
+  const sdk = path.join(parent, name);
+  mkdirSync(path.join(sdk, "platform-tools"), { recursive: true });
+  writeFileSync(path.join(sdk, "platform-tools", BINARY), "");
+  return sdk;
+}
+
 /** A path as Android Studio would write it into local.properties. */
 function javaEscaped(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
@@ -360,5 +375,370 @@ describe("resolveProjectRoot", () => {
 
     expect(resolveSdkDir()).toEqual({ directory: sdk, source: "local.properties" });
     expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+  });
+});
+
+/**
+ * GRA-160: a relative `sdk.dir` was returned from `sdkDirFromLocalProperties`
+ * completely unresolved, and `findAdb()`'s `path.join(directory,
+ * "platform-tools", binary)` stayed relative, so `existsSync` quietly
+ * resolved it against `process.cwd()` — the MCP server process's own working
+ * directory — rather than the project. Every test below proves the fix by
+ * calling `findAdb()`, not just by inspecting `resolveSdkDir().directory`'s
+ * string: a wrong anchor and a right one can produce strings that look
+ * equally plausible, but only the wrong one fails to find the real adb this
+ * ticket places on disk.
+ */
+describe("a relative sdk.dir (GRA-160)", () => {
+  it("anchors on the directory local.properties was found in, not on PORTHOLE_PROJECT_ROOT — AC1", () => {
+    // The walk starts at PORTHOLE_PROJECT_ROOT (a subdirectory with no
+    // local.properties of its own) and has to climb past it to find the
+    // file — the exact case where resolveProjectRoot().directory and the
+    // walk's own current directory diverge, which is what AC1 is about.
+    const root = temporaryDirectory();
+    const sdk = fakeSdkIn(root, "sdk-relative");
+    writeLocalProperties(root, "sdk.dir=sdk-relative\n");
+    const projectRoot = path.join(root, "module");
+    mkdirSync(projectRoot, { recursive: true });
+    workingDirectory(temporaryDirectory()); // cwd is unrelated to either
+    process.env.PORTHOLE_PROJECT_ROOT = projectRoot;
+
+    expect(resolveSdkDir()).toEqual({ directory: sdk, source: "local.properties" });
+    // The wrong anchor (resolveProjectRoot().directory === projectRoot) has
+    // no "sdk-relative" under it at all, so this is the assertion that would
+    // have caught it: findAdb() falls back to bare PATH unless the anchor is
+    // `root`, where the file actually lives.
+    expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+  });
+
+  it("finds a real adb when PORTHOLE_PROJECT_ROOT is set and the server's cwd is elsewhere — the wave-4 integration QA's exact scenario", () => {
+    const project = temporaryDirectory();
+    const sdk = fakeSdkIn(project, "android-sdk");
+    writeLocalProperties(project, "sdk.dir=android-sdk\n");
+    workingDirectory(temporaryDirectory()); // the server's own cwd, unrelated
+    process.env.PORTHOLE_PROJECT_ROOT = project;
+
+    // Before this fix: the raw "android-sdk" string came back from
+    // sdkDirFromLocalProperties unresolved, findAdb() joined it onto
+    // "platform-tools/adb[.exe]" without ever making it absolute, and
+    // existsSync() resolved that relative candidate against process.cwd()
+    // — the unrelated directory above, not `project` — so it silently fell
+    // back to a bare PATH lookup even though this real adb existed.
+    expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+  });
+
+  describe("path shapes — AC2, the table PortholeTasks.kt's resolveSdkDir tests enumerate", () => {
+    it("a plain relative sdk.dir resolves under the project root", () => {
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk-relative");
+      writeLocalProperties(project, "sdk.dir=sdk-relative\n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a dot-relative ./foo sdk.dir resolves under the project root", () => {
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk-dot-relative");
+      writeLocalProperties(project, "sdk.dir=./sdk-dot-relative\n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a parent-relative ../foo sdk.dir resolves against the project root's parent", () => {
+      const parent = temporaryDirectory();
+      const project = path.join(parent, "project");
+      mkdirSync(project, { recursive: true });
+      const sdk = fakeSdkIn(parent, "sdk-parent-relative");
+      writeLocalProperties(project, "sdk.dir=../sdk-parent-relative\n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a drive-letter absolute sdk.dir is used as-is, not anchored on the project root", () => {
+      const sdk = fakeSdk(); // already an absolute, drive-letter path on this host
+      const project = temporaryDirectory();
+      writeLocalProperties(project, `sdk.dir=${javaEscaped(sdk)}\n`);
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a trailing separator on a relative sdk.dir does not change the resolved path or break the lookup", () => {
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk-relative-trailing");
+      writeLocalProperties(project, "sdk.dir=sdk-relative-trailing/\n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a relative sdk.dir with spaces resolves under the project root and finds adb", () => {
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk relative with spaces");
+      writeLocalProperties(project, "sdk.dir=sdk relative with spaces\n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("a Windows drive-relative sdk.dir (C:foo): drive-relative and unanchored on Windows, an ordinary relative segment everywhere else", () => {
+      // Re-QA (QA round 1): this was previously gated on the host
+      // (`it.skipIf(process.platform !== "win32")`), which meant a POSIX CI
+      // leg never exercised a drive-letter-shaped value at all — so if
+      // isWindowsDriveRelative's own `process.platform === "win32"` guard
+      // were ever dropped, POSIX would start silently unanchoring "C:foo"
+      // too, exactly the shape this test exists to pin, and nothing running
+      // there would notice. It is now a branched expectation instead: it
+      // runs on every host, and asserts the two platforms' genuinely
+      // different, both-correct answers.
+      if (process.platform === "win32") {
+        // GRA-150 QA's regression, TypeScript side: path.join(directory,
+        // "C:foo") does not anchor this shape the way an ordinary relative
+        // path is anchored — it splices the strings into
+        // "<directory>\C:foo", a colon in the middle of a path segment that
+        // Windows refuses to open. isWindowsDriveRelative routes this shape
+        // to path.resolve(value) alone instead, matching PortholeTasks.kt's
+        // choice to leave it exactly as Java resolves it, unanchored, rather
+        // than invent an answer. There is no reliable way to independently
+        // compute "the current directory on drive C" for this test to
+        // compare against — see the Kotlin test's own comment on that — so
+        // this checks the same invariant the Kotlin test does: no colon
+        // outside the drive prefix, and not spliced onto the project root.
+        //
+        // project (where local.properties lives, via PORTHOLE_PROJECT_ROOT)
+        // and process.cwd() are deliberately different directories here:
+        // path.resolve(value) alone resolves a drive-relative string against
+        // process.cwd(), and if the test let that coincide with `project` —
+        // by mocking cwd to `project` itself, the way most other tests in
+        // this file do — a spliced, wrong answer would land under `project`
+        // by coincidence and this assertion would pass for the wrong reason.
+        const project = temporaryDirectory();
+        writeLocalProperties(project, "sdk.dir=C:sdk-drive-relative\n");
+        process.env.PORTHOLE_PROJECT_ROOT = project;
+        workingDirectory(temporaryDirectory());
+
+        const produced = resolveSdkDir().directory as string;
+        expect(produced.slice(2)).not.toContain(":");
+        expect(produced.startsWith(project)).toBe(false);
+      } else {
+        // A colon is an ordinary filename character on POSIX — "C:foo" has
+        // no special "drive-relative" meaning there at all, so the only
+        // correct answer is the same as any other plain relative value:
+        // anchored under the directory local.properties was found in.
+        //
+        // Re-QA (round 2): this branch previously mocked cwd to `project`
+        // itself, the same directory used as the walk anchor — exactly the
+        // mistake the win32 branch's own comment above warns about. With
+        // cwd === anchor, "unanchored" (path.resolve(value) alone, which
+        // falls back to process.cwd() if isWindowsDriveRelative's platform
+        // gate were ever dropped) and "anchored under directory" produce the
+        // identical string, so the assertion below could not tell a
+        // gate-dropped mutant from real code — it passed either way. project
+        // (the walk anchor, via PORTHOLE_PROJECT_ROOT) and process.cwd() are
+        // now deliberately different, mirroring the win32 branch, which is
+        // what actually makes this the assertion that fails if the platform
+        // gate is ever lost.
+        const project = temporaryDirectory();
+        const sdk = fakeSdkIn(project, "C:sdk-drive-relative");
+        writeLocalProperties(project, "sdk.dir=C:sdk-drive-relative\n");
+        process.env.PORTHOLE_PROJECT_ROOT = project;
+        workingDirectory(temporaryDirectory());
+
+        expect(resolveSdkDir().directory).toBe(sdk);
+        expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+      }
+    });
+
+    it("a UNC sdk.dir: absolute and used as-is on Windows, an ordinary relative segment everywhere else", () => {
+      // Re-QA (QA round 1): same host-vs-shape gap as the drive-relative
+      // test above, fixed the same way — a branched expectation instead of
+      // a host skip, so a POSIX leg actually exercises this string shape
+      // rather than never seeing it.
+      const unc = String.raw`\\server\share\sdk`;
+
+      if (process.platform === "win32") {
+        const project = temporaryDirectory();
+        writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+        workingDirectory(project);
+
+        const result = resolveSdkDir();
+        expect(result.source).toBe("local.properties");
+        expect(result.directory).toBe(unc);
+      } else {
+        // A backslash has no separator meaning on POSIX, so this string is
+        // not recognized as absolute at all (isJavaStyleAbsolute's non-win32
+        // branch is a plain path.isAbsolute, which agrees with Java here) —
+        // it is just an oddly-named relative path segment, anchored under
+        // the directory local.properties was found in, like any other
+        // relative value.
+        //
+        // Re-QA (round 2): this branch previously mocked cwd to `project`
+        // itself — the same mistake the drive-relative test's original
+        // POSIX branch made, and wrong for the same reason: if
+        // isJavaStyleAbsolute's win32 gate were ever dropped, this string
+        // (it starts with two backslashes, matching the win32-only UNC
+        // regex) would be misclassified as absolute and resolved via
+        // path.resolve(value) alone — which falls back to process.cwd() —
+        // and if cwd === project that produces the identical string to the
+        // correct, anchored answer, so the assertion could not tell a
+        // gate-dropped mutant from real code. project (the walk anchor, via
+        // PORTHOLE_PROJECT_ROOT) and process.cwd() are now deliberately
+        // different, and this goes through findAdb() against a real
+        // fixture rather than only comparing the resolved string.
+        const project = temporaryDirectory();
+        const sdk = fakeSdkIn(project, unc);
+        writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+        process.env.PORTHOLE_PROJECT_ROOT = project;
+        workingDirectory(temporaryDirectory());
+
+        expect(resolveSdkDir().directory).toBe(sdk);
+        expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+      }
+    });
+
+    it.skipIf(process.platform !== "win32")(
+      "a POSIX-shaped sdk.dir (no drive letter) anchors under the project root on Windows too, agreeing with PortholeTasks.kt post-GRA-150",
+      () => {
+        // Re-QA (QA round 1) asked whether this one could become a branched
+        // expectation like the two above it. It genuinely cannot, and this
+        // is that "say so plainly" case rather than an evasion: the thing
+        // this test exists to pin is a *disagreement*, on Windows only,
+        // between Node's path.isAbsolute (true — a bare leading slash roots
+        // at the current drive there) and Java's File#isAbsolute (false — it
+        // requires a drive letter), which isJavaStyleAbsolute's win32 branch
+        // resolves in Java's favour. Off Windows there is no such
+        // disagreement to pin: POSIX Node and POSIX Java both already agree
+        // that a leading "/" is absolute, isJavaStyleAbsolute's non-win32
+        // branch is nothing but a bare `path.isAbsolute(value)` call with no
+        // special-casing of its own to regress, and "/opt/android-sdk" would
+        // just be the ordinary absolute-path case the "drive-letter
+        // absolute" test above already covers — asserting it again here
+        // would only be a second copy of that test wearing this one's name,
+        // not a check of anything Windows-specific. isJavaStyleAbsolute's
+        // win32 gate itself — "does this fall through to plain
+        // path.isAbsolute on every other platform" — is exercised by the
+        // UNC test above, which does use a Windows-shaped string on a POSIX
+        // host and asserts the POSIX (relative, joined) answer.
+        //
+        // Node's own path.isAbsolute considers a bare leading slash absolute
+        // on Windows (it roots at the current drive) — but Java's
+        // File#isAbsolute() does not, and GRA-150's QA moved the Kotlin
+        // resolver to anchor this shape under the project root instead of
+        // the current drive's root. isJavaStyleAbsolute deliberately
+        // disagrees with path.isAbsolute here so the two resolvers keep
+        // agreeing: without it, this would silently regress to the
+        // pre-GRA-150 answer Kotlin's own test pins against.
+        const project = temporaryDirectory();
+        const sdk = fakeSdkIn(project, path.join("opt", "android-sdk"));
+        writeLocalProperties(project, "sdk.dir=/opt/android-sdk\n");
+        workingDirectory(project);
+
+        expect(resolveSdkDir().directory).toBe(sdk);
+        expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+        // Not the current-drive-root answer Node's native path.isAbsolute
+        // would have produced.
+        expect(resolveSdkDir().directory).not.toBe(path.resolve("/opt/android-sdk"));
+      },
+    );
+  });
+
+  describe("nothing fails silently when platform-tools isn't where sdk.dir says — AC3", () => {
+    it("writes a diagnostic to stderr when a resolved sdk.dir has no platform-tools under it, before falling back to PATH", () => {
+      const empty = temporaryDirectory();
+      const project = temporaryDirectory();
+      writeLocalProperties(project, `sdk.dir=${javaEscaped(empty)}\n`);
+      workingDirectory(project);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      expect(findAdb()).toBe(BINARY);
+      expect(stderr).toHaveBeenCalledTimes(1);
+      const message = stderr.mock.calls[0][0] as string;
+      expect(message).toContain(empty);
+      expect(message).toContain("platform-tools");
+      // Re-QA (QA round 1): the ticket's own mechanism section says the
+      // property missing from today's failure mode is that nothing names
+      // sdk.dir specifically — asserting only "platform-tools" and the
+      // directory would still pass a mutant that renamed this message to
+      // something that never says which property was at fault.
+      expect(message).toContain("sdk.dir");
+      stderr.mockRestore();
+    });
+
+    it("says nothing on stderr when no sdk.dir was ever named at all — an honest, unremarkable PATH lookup", () => {
+      workingDirectory(temporaryDirectory());
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      expect(findAdb()).toBe(BINARY);
+      expect(stderr).not.toHaveBeenCalled();
+      stderr.mockRestore();
+    });
+
+    it("says nothing on stderr on the ordinary, successful path — a resolved sdk.dir with adb actually under it", () => {
+      // Re-QA (QA round 1): the pair above covered "fires when platform-tools
+      // is missing" and "silent when nothing named an SDK", but not the
+      // third and most common state — a directory resolved AND adb found
+      // there. Without this, a mutant that moved the stderr.write above the
+      // success return (so it fired on every successful lookup too) would
+      // have left the whole suite green: the healthy path is exercised by
+      // nearly every other test in this file, but none of them assert
+      // silence on it. A warning that also fires on the healthy path is the
+      // exact failure mode AC3 exists to prevent — it trains whoever reads
+      // stderr to ignore the line, and then the real one gets ignored too.
+      const sdk = fakeSdk();
+      const project = temporaryDirectory();
+      writeLocalProperties(project, `sdk.dir=${javaEscaped(sdk)}\n`);
+      workingDirectory(project);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+      expect(stderr).not.toHaveBeenCalled();
+      stderr.mockRestore();
+    });
+  });
+
+  describe("trimming a value read from local.properties — AC4", () => {
+    it("trims trailing ASCII whitespace so the lookup still finds the real SDK", () => {
+      // The realistic case: a hand-edited file, or an editor's trailing-
+      // whitespace habit. parseProperties itself only strips *leading*
+      // whitespace off the value ([ \t\f] anchored at ^), so this trailing
+      // run survives all the way to adb.ts's own value.trim() — this is a
+      // fixture a mutant deleting that trim() actually fails, unlike a
+      // leading-space fixture, which parseProperties would have already
+      // cleaned up before .trim() ever ran.
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk-relative");
+      writeLocalProperties(project, "sdk.dir=sdk-relative   \n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
+
+    it("trims a non-breaking space (U+00A0) that parseProperties' own whitespace stripping never touches", () => {
+      // GRA-152's fix pass hit this trap: parseProperties' leading-
+      // whitespace regex is [ \t\f], which does not include U+00A0, so a
+      // non-breaking space survives parseProperties completely untouched
+      // either side of the value and arrives at adb.ts's value.trim() call
+      // intact. Only JS's own Unicode-aware String.prototype.trim() (not a
+      // regex copied from Java's whitespace class) strips it. This is the
+      // one shape that proves adb.ts's own trim() is doing real work,
+      // independent of anything parseProperties already does.
+      const project = temporaryDirectory();
+      const sdk = fakeSdkIn(project, "sdk-relative");
+      writeLocalProperties(project, "sdk.dir= sdk-relative \n");
+      workingDirectory(project);
+
+      expect(resolveSdkDir().directory).toBe(sdk);
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+    });
   });
 });
