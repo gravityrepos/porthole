@@ -23,6 +23,39 @@ interface Options {
   open: boolean;
 }
 
+/** A parse failure that names what was wrong, for the caller to print and exit on. */
+export interface ParseError {
+  message: string;
+}
+
+/**
+ * A port a device or a browser can plausibly reach. `--port` used to be
+ * `Number(argv[++i])` with no check at all: a missing value is `NaN`, and a
+ * `NaN` port is not a refusal, it is a listener that never connects to
+ * anything while printing nothing to say why. Below 1024 needs privileges
+ * this process does not have on most platforms; above 65535 does not exist;
+ * a fraction is a typo, not a port.
+ */
+export function parsePort(raw: string | undefined, option: string): number | ParseError {
+  if (raw === undefined || raw === "") {
+    return { message: `${option} needs a port number` };
+  }
+  // A port is a run of decimal digits, nothing else: `Number()` also accepts
+  // " 8677 " (trims whitespace), "1e4" (scientific notation) and "0x2000"
+  // (hex) as finite integers, none of which anyone typed on purpose.
+  if (/^-?\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (value < 1024 || value > 65535) {
+      return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
+    }
+    return value;
+  }
+  if (/^-?\d+\.\d+$/.test(raw)) {
+    return { message: `${option} ${raw} must be a whole number` };
+  }
+  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+}
+
 const USAGE = `
 porthole — a window into a running Android app
 
@@ -46,7 +79,13 @@ Needs a device or emulator with the debug build running: the porthole lives insi
 the app process, and adb forward is what makes its socket reachable from here.
 `;
 
-function parse(argv: string[]): Options {
+/**
+ * Exported so a test can drive the argv loop itself, not just the pure
+ * validators it calls. A test that only calls `parsePort` directly cannot
+ * tell the difference between this loop checking its result and ignoring it —
+ * deleting the `process.exit(2)` branches below left every prior test green.
+ */
+export function parse(argv: string[]): Options {
   const options: Options = {
     port: 8677,
     uiPort: 8678,
@@ -55,9 +94,21 @@ function parse(argv: string[]): Options {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--port") options.port = Number(argv[++i]);
-    else if (arg === "--ui-port") options.uiPort = Number(argv[++i]);
-    else if (arg === "--serial") options.serial = argv[++i];
+    if (arg === "--port") {
+      const value = parsePort(argv[++i], "--port");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.port = value;
+    } else if (arg === "--ui-port") {
+      const value = parsePort(argv[++i], "--ui-port");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.uiPort = value;
+    } else if (arg === "--serial") options.serial = argv[++i];
     else if (arg === "--no-forward") options.forward = false;
     else if (arg === "--no-open") options.open = false;
     else if (arg === "--help" || arg === "-h") {

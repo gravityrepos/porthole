@@ -55,6 +55,16 @@ export function App() {
     setView(fitView(store.events));
   }, [store, version]);
 
+  // This still produces a new `view` object on every store notification --
+  // up to once an animation frame while `following` is on (GRA-80). Left
+  // that way deliberately: `view` genuinely does move every frame here, so
+  // there is no rounded-and-therefore-stable value to key this effect on
+  // instead, and every consumer downstream that turns `view` into a network
+  // request (InsightsPanel) rounds and debounces on its own side rather than
+  // trusting App not to over-notify. Fixing it here would only trade one
+  // "recompute more often than needed" for another -- the network storm the
+  // ticket cared about is severed at InsightsPanel regardless of how often
+  // this effect fires.
   useEffect(() => {
     if (!following || store.events.length === 0) return;
     setView((current) => {
