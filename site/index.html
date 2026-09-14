@@ -170,8 +170,12 @@
         font-size: 11.5px;
         line-height: 1.6;
         color: #cfd8e5;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
+        /* Wrapping a code block mid-token turns valid Kotlin into invalid
+           Kotlin on a narrow screen (QA, GRA-127 re-review). A pre block's
+           job is to reproduce what was typed; scrolling it horizontally
+           keeps that promise, wrapping it does not. */
+        white-space: pre;
+        overflow-x: auto;
       }
 
       /* skip link — hidden until focused, first stop before the sticky nav */
@@ -406,14 +410,17 @@
         color: #eaf0f7;
       }
       .path-card pre {
-        font-size: 11px;
+        font-size: 12px;
       }
       #install pre {
         line-height: 1.45;
         padding: 10px 12px;
       }
       #install .path-screen pre {
-        font-size: 10.5px;
+        /* Was 10.5px, squeezed under the old height budget. That criterion
+           is gone (DECISIONS.md, GRA-127 height ruling); 12px is the floor
+           and this is the block most worth reading closely. */
+        font-size: 12px;
       }
       .step p {
         font-size: 12.5px;
@@ -761,7 +768,7 @@
          tickets, so this wrapper only encloses their markup — it does not
          change it. Closed just before <footer>, which stays its own
          contentinfo landmark. -->
-    <main id="main-content">
+    <main id="main-content" tabindex="-1">
     <header id="top">
       <div class="rules"></div>
       <div class="hero">
@@ -771,7 +778,8 @@
           <p>
             Porthole is a debug-only Android library and an MCP server: your coding agent asks what
             recomposed, what dropped a frame, and what is holding the main thread — against the app
-            in front of you.
+            in front of you. When the answer is below the app, it captures a Perfetto system trace
+            and queries it, so nobody has to open a trace viewer.
           </p>
           <p class="hero-cmd">
             <code>./gradlew portholeMcpConfig portholeConnect</code>
@@ -791,7 +799,11 @@
           <h2 style="font-size: 22px">From zero to an agent that can answer</h2>
         </div>
 
-        <div class="grid cols-mid">
+        <!-- align-items: start — the Connect card is deliberately the tallest
+             of the three now that it carries the .mcp.json entry and the real
+             output lines (QA, GRA-127 re-review); without this the grid's
+             default stretch pads Install and Ask with empty space to match. -->
+        <div class="grid cols-mid" style="align-items: start">
           <div class="card step path-card">
             <div class="step-head">
               <span class="step-num">01</span>
@@ -812,12 +824,24 @@
               <span class="step-num">02</span>
               <h3 class="path-card-title">Connect the agent</h3>
             </div>
-            <pre>./gradlew :app:installDebug
-./gradlew portholeMcpConfig   # writes .mcp.json
-./gradlew portholeConnect     # adb forward, loopback only</pre>
+            <pre>./gradlew :app:installDebug     # your app, as usual
+./gradlew portholeMcpConfig     # writes the porthole entry into .mcp.json
+./gradlew portholeConnect       # forwards the device port to localhost</pre>
+            <pre>[porthole] added porthole to .mcp.json
+[porthole] next: ./gradlew portholeConnect, launch the debug build, and the
+           tools go live in your-project.
+[porthole] forwarded 127.0.0.1:8677 to the device</pre>
             <p>
-              <code>portholeMcpConfig</code> merges rather than overwrites.
-              <code>portholeConnect</code> is the whole bridge — nothing leaves the machine.
+              <code>portholeMcpConfig</code> merges rather than overwrites — a different existing
+              entry is left alone. It writes a four-line entry:
+            </p>
+            <pre>{ "mcpServers": { "porthole": {
+    "command": "npx", "args": ["-y", "@gravitylabsllc/porthole"],
+    "env": { "PORTHOLE_PORT": "8677" } } } }</pre>
+            <p>
+              <code>portholeConnect</code> is the whole bridge: a standard <code>adb forward</code>
+              to a socket the runtime bound on the device's loopback interface — nothing leaves the
+              machine. Restart your MCP client once so it picks up the new server.
             </p>
           </div>
 
@@ -838,14 +862,23 @@
 
         <div class="path-screen" style="padding: 12px 0">
           <div class="step-head" style="margin-bottom: 8px">
-            <h3 class="path-card-title">One line per HTTP and database client</h3>
+            <h3 class="path-card-title">The few lines it cannot discover</h3>
           </div>
           <div class="path-body" style="gap: 8px">
-            <pre>OkHttpClient.Builder().installPorthole().build()
+            <pre>import live.gravitylabs.porthole.*
+
+OkHttpClient.Builder().installPorthole().build()
 Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().build()</pre>
             <p>
-              Ktor and SQLDelight are the same one line each; forget one and the runtime says so.
-              Rather watch than ask? <code>./gradlew portholeUi</code> — the same session, drawn.
+              Ktor and SQLDelight are the same one line each; forget one and the runtime says so a
+              few seconds after start. Everything else needs nothing at all: frames, the main
+              thread, memory, WorkManager, device context, logs, and the semantics tree.
+            </p>
+            <pre>LaunchedEffect(navController) { Porthole.registerNavController(navController) }</pre>
+            <p>
+              One more line if you use Navigation — it is also how screen-scoped view models get
+              their names. Rather watch than ask? <code>./gradlew portholeUi</code> — the same
+              session, drawn.
             </p>
           </div>
         </div>
@@ -856,14 +889,23 @@ Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().bui
             <h3 class="path-card-title">What comes back</h3>
           </div>
           <div class="path-body" style="gap: 8px">
-            <pre>findings — 3, ranked
-  error    query on the main thread   observed     CartDao.itemsBlocking, 41ms       → blocking
-  warning  recomposition hotspot      correlated   Cart.ItemRow x490, 445 after tick → recompositions
-  warning  158 frames missed in 8s    observed     worst 276ms, in swapBuffers       → frames</pre>
+            <pre>findings
+
+4 finding(s) over 225s (3 error, 1 warning). Worst: 1 database query ran on
+the main thread [observed].
+
+  error    observed  1 database query ran on the main thread
+  error    observed  main thread blocked for 295ms
+  error    observed  4 HTTP calls failed
+  warning  observed  112 frames missed their deadline (budget 8.3ms at 120Hz)</pre>
             <p>
-              The frame drop is the compositor, not your code. <code>capture_system_trace</code> +
-              <code>ask_system_trace</code> go one level down, into a Perfetto trace — setup once
-              with <code>portholeTraceProcessor</code>. Nobody opens ui.perfetto.dev.
+              A real capture, driven against <code>com.example.shop</code> on the attached Pixel 10
+              Pro XL — cart adds, checkout, and a forced main-thread block. The query and the stall
+              are yours to fix; a dropped frame whose cause sits below the app is not.
+              <code>capture_system_trace</code> + <code>ask_system_trace</code> go one level down,
+              into a Perfetto trace, when <code>findings</code> alone cannot say why.
+              <code>./gradlew portholeTraceProcessor</code> fetches the query engine once — pinned
+              and SHA-256 verified. Nobody opens ui.perfetto.dev.
             </p>
           </div>
         </div>
@@ -872,6 +914,11 @@ Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().bui
           <li>
             <a href="https://github.com/gravityrepos/porthole/blob/main/README.md#setup"
               >Setup, in full</a
+            >
+            ·
+            <a
+              href="https://github.com/gravityrepos/porthole/blob/main/README.md#what-the-numbers-actually-mean"
+              >What the numbers actually mean</a
             >
             ·
             <a
