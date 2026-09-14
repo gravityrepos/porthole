@@ -4,28 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  compare,
-  parseCapture,
-  parseFailOn,
-  parsePort,
-  readTrace,
-  report,
-  requiredValue,
-  TraceReadError,
-} from "./capture.js";
+import { compare, parseCapture, report } from "./capture.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
 
 /**
- * These three — parsePort, parseFailOn, readTrace — are what GRA-93 is about.
- * Each used to take whatever argv or a file handed it and use it without
- * asking whether it made sense: a missing --port became NaN and never
- * connected to anything, a typo'd --fail-on silently turned a CI gate off,
- * and a missing or malformed trace file became an unhandled rejection and a
- * raw stack trace instead of the one sentence a CI operator needs. They are
- * pure (or close enough — readTrace only reads a file, it does not touch
- * process), so there is no excuse not to test them directly rather than only
- * through the CLI.
+ * parsePort, parseFailOn, requiredValue and readTrace — what GRA-93 is
+ * about — moved to args.ts under GRA-124, along with their tests; see
+ * args.test.ts. What is left here is capture.ts's own behavior: parseCapture
+ * wiring those validators into its argv loop, and report()/compare() wiring
+ * readTrace into their exit codes.
  */
 
 function trace(over: Partial<Trace> = {}): Trace {
@@ -42,181 +29,6 @@ function trace(over: Partial<Trace> = {}): Trace {
     ...over,
   };
 }
-
-describe("parsePort", () => {
-  it("names the option when the value is missing", () => {
-    const result = parsePort(undefined, "--port");
-    expect(result).toEqual({ message: "--port needs a port number" });
-  });
-
-  it("rejects a non-numeric value", () => {
-    const result = parsePort("abc", "--port");
-    expect(result).toEqual({ message: '--port "abc" is not a number' });
-  });
-
-  it("rejects a negative port", () => {
-    const result = parsePort("-1", "--port");
-    expect(result).toEqual({
-      message: "--port -1 is out of range (must be 1024-65535)",
-    });
-  });
-
-  it("rejects a port above 65535", () => {
-    const result = parsePort("70000", "--port");
-    expect(result).toEqual({
-      message: "--port 70000 is out of range (must be 1024-65535)",
-    });
-  });
-
-  it("rejects a fractional port", () => {
-    const result = parsePort("8677.5", "--port");
-    expect(result).toEqual({ message: "--port 8677.5 must be a whole number" });
-  });
-
-  it("rejects the low boundary just below 1024", () => {
-    const result = parsePort("1023", "--port");
-    expect(result).toEqual({
-      message: "--port 1023 is out of range (must be 1024-65535)",
-    });
-  });
-
-  it("accepts the range boundaries", () => {
-    expect(parsePort("1024", "--port")).toBe(1024);
-    expect(parsePort("65535", "--port")).toBe(65535);
-  });
-
-  it("accepts an ordinary port", () => {
-    expect(parsePort("8677", "--port")).toBe(8677);
-  });
-
-  it("names whichever option asked", () => {
-    const result = parsePort(undefined, "--ui-port");
-    expect(result).toEqual({ message: "--ui-port needs a port number" });
-  });
-
-  it("treats an empty value as missing, not as an out-of-range number", () => {
-    // "" used to reach Number("") === 0, reported as "out of range" rather
-    // than the missing value it actually is.
-    expect(parsePort("", "--port")).toEqual({ message: "--port needs a port number" });
-  });
-
-  it("rejects whitespace padding that Number() would silently trim", () => {
-    expect(parsePort(" 8677 ", "--port")).toEqual({
-      message: '--port " 8677 " is not a number',
-    });
-  });
-
-  it("rejects scientific notation", () => {
-    expect(parsePort("1e4", "--port")).toEqual({ message: '--port "1e4" is not a number' });
-  });
-
-  it("rejects hex", () => {
-    expect(parsePort("0x2000", "--port")).toEqual({ message: '--port "0x2000" is not a number' });
-  });
-});
-
-describe("requiredValue", () => {
-  it("passes through an ordinary value", () => {
-    expect(requiredValue("checkout", "--scenario")).toBe("checkout");
-  });
-
-  it("refuses a missing value", () => {
-    expect(requiredValue(undefined, "--scenario")).toEqual({
-      message: "--scenario needs a value",
-    });
-  });
-
-  it("refuses the next flag rather than swallowing it as the value", () => {
-    // `--scenario --port 8677` used to set scenario to the literal string
-    // "--port" and leave "8677" to be rejected later as an unknown option —
-    // blaming the wrong flag for the actual mistake.
-    expect(requiredValue("--port", "--scenario")).toEqual({
-      message: "--scenario needs a value",
-    });
-  });
-
-  it("refuses the command separator rather than swallowing it as the value", () => {
-    expect(requiredValue("--", "--scenario")).toEqual({
-      message: "--scenario needs a value",
-    });
-  });
-});
-
-describe("parseFailOn", () => {
-  it("accepts the three real values", () => {
-    expect(parseFailOn("nothing")).toBe("nothing");
-    expect(parseFailOn("error")).toBe("error");
-    expect(parseFailOn("regression")).toBe("regression");
-  });
-
-  it("rejects a typo and lists the accepted values", () => {
-    const result = parseFailOn("regresion");
-    expect(result).toEqual({
-      message: '--fail-on must be one of: nothing, error, regression (got "regresion")',
-    });
-  });
-
-  it("rejects a missing value and still lists the accepted values", () => {
-    const result = parseFailOn(undefined);
-    expect(result).toEqual({
-      message: "--fail-on must be one of: nothing, error, regression (got null)",
-    });
-  });
-});
-
-describe("readTrace", () => {
-  let dir: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(path.join(tmpdir(), "porthole-capture-"));
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  function write(name: string, contents: string): string {
-    const file = path.join(dir, name);
-    writeFileSync(file, contents);
-    return file;
-  }
-
-  it("reads back a valid trace", async () => {
-    const file = write("trace.json", JSON.stringify(trace()));
-    await expect(readTrace(file)).resolves.toEqual(trace());
-  });
-
-  it("refuses a file that does not exist, by name, with no stack trace leaking through", async () => {
-    const missing = path.join(dir, "missing.json");
-    await expect(readTrace(missing)).rejects.toThrow(TraceReadError);
-    await expect(readTrace(missing)).rejects.toThrow(`no such file: ${missing}`);
-  });
-
-  it("refuses truncated JSON with one sentence", async () => {
-    const file = write("truncated.json", '{"porthole": 1, "scenario":');
-    await expect(readTrace(file)).rejects.toThrow(TraceReadError);
-    await expect(readTrace(file)).rejects.toThrow(`${file} is not valid JSON`);
-  });
-
-  it("refuses a JSON file with no porthole version field", async () => {
-    const file = write("no-version.json", JSON.stringify({ scenario: "checkout" }));
-    await expect(readTrace(file)).rejects.toThrow(
-      `${file} is not a porthole trace (missing "porthole" version field)`,
-    );
-  });
-
-  it("refuses a trace whose version this build does not understand", async () => {
-    const file = write("future.json", JSON.stringify(trace({ porthole: TRACE_VERSION + 1 })));
-    await expect(readTrace(file)).rejects.toThrow(
-      `${file} is trace version ${TRACE_VERSION + 1}, which this build (version ${TRACE_VERSION}) does not understand`,
-    );
-  });
-
-  it("refuses an empty JSON object the same way as a missing field", async () => {
-    const file = write("empty.json", "{}");
-    await expect(readTrace(file)).rejects.toThrow('missing "porthole" version field');
-  });
-});
 
 describe("report() and compare() exit codes", () => {
   let dir: string;
@@ -359,6 +171,20 @@ describe("parseCapture wiring", () => {
     expect(stderrText()).toContain("--port needs a port number");
   });
 
+  /**
+   * QA non-blocking #1 on GRA-124: cli.test.ts already had this case (parse()
+   * calling parsePort with an out-of-range value), but capture.ts's own
+   * argv loop never did — the missing-value case above was covered on both
+   * sides, the out-of-range case only on one. Mutating the range check in
+   * parsePort turned cli.test.ts red without touching this file, which is
+   * exactly the asymmetry a shared validator is supposed to make impossible.
+   */
+  it("exits 2 when --port is out of range", () => {
+    expect(() => parseCapture(["--port", "70000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--port 70000 is out of range");
+  });
+
   it("exits 2 when --out has no value, before any capture could start", () => {
     expect(() => parseCapture(["--out"])).toThrow("process.exit");
     expect(exit).toHaveBeenCalledWith(2);
@@ -387,6 +213,39 @@ describe("parseCapture wiring", () => {
     expect(() => parseCapture(["--scenario", "--baseline", "b.json"])).toThrow("process.exit");
     expect(exit).toHaveBeenCalledWith(2);
     expect(stderrText()).toContain("--scenario needs a value");
+  });
+
+  /**
+   * GRA-124 scoped fix, not just a rename: --driver and --serial used to read
+   * `argv[++i]` raw, with no check at all. A missing value was accepted
+   * silently (no test could have caught that — there was nothing to assert
+   * against), and `--driver --serial abc` swallowed "--serial" as the driver
+   * name and left "abc" to be rejected next as a nonsense option, blaming the
+   * wrong token. Routed through requiredValue, both now name the flag the
+   * user actually typed, same as --scenario/--out/--baseline already did.
+   */
+  it("exits 2 when --driver has no value", () => {
+    expect(() => parseCapture(["--driver"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--driver needs a value");
+  });
+
+  it("exits 2 when --driver swallows the next flag instead of taking a value", () => {
+    expect(() => parseCapture(["--driver", "--serial", "abc"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--driver needs a value");
+  });
+
+  it("exits 2 when --serial has no value", () => {
+    expect(() => parseCapture(["--serial"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--serial needs a value");
+  });
+
+  it("exits 2 when --serial swallows the next flag instead of taking a value", () => {
+    expect(() => parseCapture(["--serial", "--port", "8677"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--serial needs a value");
   });
 
   it("accepts a fully valid argv without exiting", () => {

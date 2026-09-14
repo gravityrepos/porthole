@@ -16,6 +16,8 @@ LICENSE
 README.md
 dist/adb.js
 dist/adb.js.map
+dist/args.js
+dist/args.js.map
 dist/capture.js
 dist/capture.js.map
 dist/cli.js
@@ -40,6 +42,7 @@ dist/trace.js
 dist/trace.js.map
 package.json
 src/adb.ts
+src/args.ts
 src/capture.ts
 src/cli.ts
 src/device.ts
