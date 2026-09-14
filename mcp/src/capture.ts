@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { DeviceClient, type DeviceEvent } from "./device.js";
+import { DeviceClient, isConnected, type ConnectionState, type DeviceEvent } from "./device.js";
 import { renderComparison, renderReport } from "./report.js";
 import { buildTrace, type Trace } from "./trace.js";
 import { parseFailOn, parsePort, readTrace, requiredValue, type FailOn } from "./args.js";
@@ -70,11 +70,14 @@ passed through unless --fail-on fires first.
  * not need to be now either.
  */
 async function awaitConnection(device: DeviceClient, timeoutMs = 10_000): Promise<boolean> {
-  if (device.state === "connected") return true;
+  // GRA-162: routed through isConnected() rather than `=== "connected"` so
+  // that a fifth ConnectionState fails `tsc` here instead of this function
+  // just never resolving true for it.
+  if (isConnected(device.state)) return true;
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
-    device.on("state", (state: string) => {
-      if (state === "connected") {
+    device.on("state", (state: ConnectionState) => {
+      if (isConnected(state)) {
         clearTimeout(timer);
         resolve(true);
       }
