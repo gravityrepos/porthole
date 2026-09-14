@@ -61,6 +61,28 @@ export const PROTOCOL_VERSION = 1;
  */
 export type ConnectionState = "disconnected" | "connecting" | "handshaking" | "connected";
 
+/**
+ * GRA-163: the ring survives a close (timeline.ts never clears it there —
+ * only a new `hello` does, because the post-mortem case, "what happened
+ * before it died", is exactly when someone needs those events most), but
+ * that leaves a gap the ring itself cannot answer: whose process produced
+ * what is still buffered, and when did it stop. This is that answer, kept
+ * on `DeviceClient` because it is the thing that watches the socket close —
+ * set in the close handler below, read by every tool that might describe
+ * buffered data without a live session behind it.
+ *
+ * This is the counterpart to what a `hello` already does on the other side
+ * of the session boundary: a `hello` discards the previous session's ring;
+ * a close records the one that just ended, for whoever reads what is left
+ * of it afterward.
+ */
+export interface ExitedSession {
+  /** The process that produced whatever the ring may still hold. */
+  hello: Hello;
+  /** Wall-clock time (`Date.now()`) the socket actually closed. */
+  disconnectedAt: number;
+}
+
 /** The one sentence every tool uses for "the socket is up, hello has not landed yet" — GRA-157 AC3. */
 export const HANDSHAKE_PENDING_MESSAGE =
   "Connected, waiting on the app's first check-in. Ask again in a moment.";
@@ -91,6 +113,15 @@ export class DeviceClient extends EventEmitter {
   state: ConnectionState = "disconnected";
   hello: Hello | null = null;
   lastError: string | null = null;
+  /**
+   * GRA-163: null until a session that actually got a `hello` has closed;
+   * from then on, the most recent one — overwritten on every subsequent
+   * close that had a `hello`, so it always names the last confirmed process,
+   * never a stale one from further back. See the close handler in
+   * `connect()` for where it is set, and `pendingMessage()` for where it
+   * turns into the sentence every tool shares.
+   */
+  lastExited: ExitedSession | null = null;
   /**
    * GRA-96: null when the app's `hello.protocol` matches `PROTOCOL_VERSION`,
    * otherwise the sentence `porthole_status` reports verbatim — set once,
@@ -198,6 +229,13 @@ export class DeviceClient extends EventEmitter {
 
     socket.on("close", () => {
       this.socket = null;
+      // GRA-163: captured before `hello` is cleared below, and only when
+      // there was one — a socket that closes mid-handshake (this.hello
+      // still null) never had a confirmed session to record, and recording
+      // one here would overwrite the real last-exited process with nothing.
+      if (this.hello) {
+        this.lastExited = { hello: this.hello, disconnectedAt: Date.now() };
+      }
       this.hello = null;
       // GRA-96: cleared with `hello`, for the same reason — a mismatch is a
       // fact about the `hello` that produced it, and once that `hello` is
@@ -351,9 +389,9 @@ export class DeviceClient extends EventEmitter {
     switch (this.state) {
       case "disconnected":
       case "connecting":
-        return this.notConnectedMessage();
+        return this.withExitedSessionNote(this.notConnectedMessage());
       case "handshaking":
-        return HANDSHAKE_PENDING_MESSAGE;
+        return this.withExitedSessionNote(HANDSHAKE_PENDING_MESSAGE);
       case "connected":
         return null;
       default: {
@@ -361,6 +399,33 @@ export class DeviceClient extends EventEmitter {
         throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
       }
     }
+  }
+
+  /**
+   * GRA-163: the other half of the session boundary a `hello` already had —
+   * a `hello` discards whatever ring content came before it (timeline.ts),
+   * so whoever asks about a ring a close left behind needs to be told, in
+   * the one sentence every tool already shares via `pendingMessage()`,
+   * whose process that data is from and when it stopped. Appended rather
+   * than folded into `notConnectedMessage()`/`HANDSHAKE_PENDING_MESSAGE`
+   * themselves, so those two keep meaning exactly what their names say —
+   * "here is how to reconnect" / "still waiting on the first check-in" —
+   * and this stays the one place that adds "and by the way, whatever you
+   * asked about belongs to a process that is gone."
+   *
+   * A no-op until something has actually exited (`lastExited` starts null
+   * and only a close that had a `hello` ever sets it), so a fresh server
+   * that has never seen a device says exactly what it said before this
+   * ticket.
+   */
+  private withExitedSessionNote(base: string): string {
+    if (!this.lastExited) return base;
+    const { hello, disconnectedAt } = this.lastExited;
+    return (
+      `${base}\n\nWhatever is still buffered is from ${hello.packageName} on ${hello.device}, ` +
+      `which exited at ${new Date(disconnectedAt).toISOString()}. That is the last thing it did, ` +
+      "not what is happening now."
+    );
   }
 
   notConnectedMessage(): string {

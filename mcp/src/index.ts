@@ -95,6 +95,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     }
   }
 
+  /**
+   * GRA-163: the payload half of the stale-ring fix, so an agent can tell
+   * live data from post-mortem data without parsing the prose next to it.
+   * `connected` is whatever the caller already worked out for the field of
+   * that name in its own payload — this does not recompute it, because
+   * `findings`' empty-ring arm and its non-empty one ask different
+   * questions of `device.state` (see that tool below) and this helper has
+   * no business re-deciding which one applies.
+   *
+   * Null whenever `connected` is true (nothing to explain) or nothing has
+   * ever exited in this server's lifetime (`device.lastExited` starts
+   * null). Otherwise the last confirmed process and when its socket closed,
+   * in the same shape every tool that calls this returns it in, so the
+   * three tools' payloads agree on more than just prose.
+   */
+  function exitedProcessField(
+    connected: boolean,
+  ): { packageName: string; device: string; disconnectedAt: string } | null {
+    if (connected || !device.lastExited) return null;
+    const { hello, disconnectedAt } = device.lastExited;
+    return {
+      packageName: hello.packageName,
+      device: hello.device,
+      disconnectedAt: new Date(disconnectedAt).toISOString(),
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // windows
   // ---------------------------------------------------------------------------
@@ -207,6 +234,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // adb.ts already compute both; this just reports them.
       const sdkDir = resolveSdkDir();
       const projectRoot = resolveProjectRoot();
+      // GRA-157: DeviceClient now has a "handshaking" ConnectionState for the
+      // gap between the socket connecting and hello resolving, so this reads
+      // `device.state` alone — pendingMessage() names the disconnected and
+      // handshaking stories the same way `findings` does (AC3), and returns
+      // null only when state === "connected", which now guarantees `hello`
+      // is set, so the non-null assertion below is the invariant, not a hope.
+      const pending = device.pendingMessage();
+      // GRA-163: same structured field findings and what_was_happening carry
+      // — null once connected, otherwise the last confirmed process and when
+      // it exited, in the payload as well as folded into `pending`'s prose
+      // (device.ts's withExitedSessionNote()), so an agent reading any of
+      // the three tools' JSON alone sees the same fact.
+      const exitedProcess = exitedProcessField(pending === null);
       const payload = {
         state: device.state,
         host: HOST,
@@ -224,14 +264,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         sdkDirSource: sdkDir.source,
         projectRoot: projectRoot.directory,
         projectRootSource: projectRoot.source,
+        exitedProcess,
       };
-      // GRA-157: DeviceClient now has a "handshaking" ConnectionState for the
-      // gap between the socket connecting and hello resolving, so this reads
-      // `device.state` alone — pendingMessage() names the disconnected and
-      // handshaking stories the same way `findings` does (AC3), and returns
-      // null only when state === "connected", which now guarantees `hello`
-      // is set, so the non-null assertion below is the invariant, not a hope.
-      const pending = device.pendingMessage();
       // GRA-96: a protocol mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
       // but the one thing worth saying is that the two sides disagree on the
@@ -275,25 +309,24 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to }): Promise<ToolResult> => {
       const span = resolveWindow({ sinceMs, from, to });
-      // GRA-157: "connected" here is the loose sense porthole_status also
-      // uses — the socket is up, whether or not hello has landed — because
-      // that is the fact an agent deciding whether to keep polling actually
-      // wants, and it is what keeps this field agreeing with the summary
-      // text below (both handshaking and connected get the non-wall story).
-      // buildTrace(), further down, wants the strict sense instead — hello
-      // itself, not a boolean — and asks device.hello directly for it.
-      // GRA-162: isAttached() replaces the inline `=== "handshaking" ||
-      // === "connected"` so a fifth ConnectionState fails `tsc` here instead
-      // of silently reading as not-connected. Same boolean, no behaviour
-      // change — GRA-163 (pending) is the ticket that may change what this
-      // field actually means.
-      const connected = isAttached(device.state);
       if (!span) {
         // resolveWindow returns null whenever the ring is empty, which is not
         // the same thing as the device being unreachable — hello can have
         // landed seconds ago with nothing collected yet. Printing the full
         // troubleshooting wall in that case sends the first call after every
         // install chasing a socket that was never the problem.
+        //
+        // GRA-157: "connected" here is the loose sense porthole_status also
+        // uses — the socket is up, whether or not hello has landed — because
+        // that is the fact an agent deciding whether to keep polling
+        // actually wants. GRA-162: isAttached() replaces the inline
+        // `=== "handshaking" || === "connected"` so a fifth ConnectionState
+        // fails `tsc` here instead of silently reading as not-connected.
+        // GRA-163: this loose sense is safe only because there is no ring
+        // content here to mislabel — an empty ring has nothing to claim is
+        // live. The non-empty branch below asks a stricter question; see its
+        // own comment for why the two cannot share one boolean.
+        const connected = isAttached(device.state);
         const pending = device.pendingMessage();
         if (pending !== null) {
           return ok(pending, { window: null, findings: [], connected });
@@ -304,6 +337,36 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const buffered = timeline.buffer();
       const events = buffered.filter((e) => e.t >= span.from && e.t <= span.to);
+
+      // GRA-163: a non-empty ring is not, on its own, proof the events in it
+      // are from what is running now — the ring only clears on a new hello
+      // (timeline.ts), so anything buffered while state has not reached
+      // "connected" could just as easily be a previous session's leftovers.
+      // `device.pendingMessage()` is the shared decision point GRA-157 built
+      // for exactly this question, and it used to be reachable only from the
+      // empty-ring branch above (`!span`) — the one input where a stale,
+      // still-buffered ring cannot appear at all. Calling it here too is
+      // what makes `connected` strict (true only once hello has actually
+      // landed for the session that is being reported on) instead of the
+      // loose isAttached() sense used above, where handshaking read as
+      // attached even when the ring's contents predated the handshake. That
+      // conflation was the measured bug: 34 hardware samples caught this
+      // tool reporting `connected: true` about a dead process during a later
+      // handshake, because handshaking alone was treated as good enough.
+      const pending = device.pendingMessage();
+      const connected = pending === null;
+      // Structured, not just prose (per the founder-pending assumption this
+      // ticket is built on): null once connected, otherwise the process
+      // `device` last confirmed and when it exited, so an agent can branch
+      // on this without parsing the summary text.
+      const exitedProcess = exitedProcessField(connected);
+      const notice = connected
+        ? ""
+        : exitedProcess
+          ? `These findings are from ${exitedProcess.packageName} on ${exitedProcess.device}, which ` +
+            `exited at ${exitedProcess.disconnectedAt}, not from what is running now. `
+          : "Nothing has confirmed itself as the running process yet, so these findings are not yet " +
+            "confirmed to be live. ";
 
       // Asking about a moment the ring no longer holds returns nothing, which is
       // indistinguishable from a moment when nothing happened. They are opposite
@@ -335,6 +398,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         metrics: trace.metrics,
         findings,
         connected,
+        exitedProcess,
       };
 
       const shortfall = clipped.start + clipped.end;
@@ -346,11 +410,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       if (findings.length === 0) {
         return ok(
-          shortfall > span.ms * 0.5
-            ? `Almost none of that window is in the buffer${missing} This is not a quiet app; ` +
+          notice +
+            (shortfall > span.ms * 0.5
+              ? `Almost none of that window is in the buffer${missing} This is not a quiet app; ` +
                 "it is a question the buffer cannot answer."
-            : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
-                `(${events.length} events). That is not the same as the app being fast.${missing}`,
+              : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
+                `(${events.length} events). That is not the same as the app being fast.${missing}`),
           payload,
         );
       }
@@ -365,7 +430,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         .join(", ");
 
       return ok(
-        `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
+        notice +
+          `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
           `Worst: ${worst.title} [${worst.confidence}].${missing}`,
         payload,
       );
@@ -707,17 +773,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async ({ at, bootMs, spreadMs }): Promise<ToolResult> => {
-      // GRA-166 item 3: computed once, up front, so every branch below
-      // shares one answer instead of some branches computing it and others
-      // omitting the key outright. That omission was the actual bug: a
-      // consumer reading `json.connected` got `false`, `true` or `undefined`
-      // depending on which branch answered, and `undefined` is falsy — a
-      // caller doing the obvious thing silently read "not connected" from a
-      // response that never made that claim. `connected` mirrors findings'
-      // loose sense exactly (handshaking or connected, not just connected) —
-      // see GRA-162's isAttached() and the note on findings' own `connected`
-      // above for why this is not the inline `===` pair it used to be.
-      const connected = isAttached(device.state);
       const events = timeline.buffer();
       if (events.length === 0) {
         // GRA-154, absorbed into GRA-157 as AC7: an empty ring is not the
@@ -727,6 +782,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // young. Same distinction `findings` and `porthole_status` make,
         // through the same method, so all three tell the same story about
         // an empty-but-attached device instead of each guessing separately.
+        //
+        // GRA-166 item 3 / GRA-163: `connected` is the loose sense (mirrors
+        // findings' own empty-ring arm — handshaking counts as attached,
+        // not just connected). Safe here for the same reason it is safe
+        // there: an empty ring has no content to mislabel. The non-empty
+        // branch below asks the strict question instead.
+        const connected = isAttached(device.state);
         const pending = device.pendingMessage();
         if (pending !== null) {
           return ok(pending, { moment: null, connected });
@@ -737,6 +799,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         );
       }
 
+      // GRA-163: from here on the ring has content, so — exactly as in
+      // findings — the ring's contents are only guaranteed to belong to the
+      // running process once its hello has actually landed. Consulting
+      // pendingMessage() here (previously unreached from this branch) is
+      // what stops this tool from agreeing with findings' old bug: reporting
+      // `connected: true` for a moment that was really a previous session's,
+      // just because the socket happened to be handshaking again by the
+      // time someone asked.
+      const pending = device.pendingMessage();
+      const connected = pending === null;
+      const exitedProcess = exitedProcessField(connected);
+
       let moment_at = at;
       let clock: { bootMs: number; sleepMs: number; sampledAt: number } | null = null;
 
@@ -746,7 +820,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           return ok(
             "No clock sample in the buffer, so a boot-clock timestamp cannot be placed. " +
               "The app must have been running with Porthole attached for that to exist.",
-            { moment: null, bootMs, connected },
+            { moment: null, bootMs, connected, exitedProcess },
           );
         }
         moment_at = converted.at;
@@ -756,8 +830,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       if (moment_at === undefined) {
-        return ok("Give either `at` or `bootMs`.", { moment: null, connected });
+        return ok("Give either `at` or `bootMs`.", { moment: null, connected, exitedProcess });
       }
+
+      // A short prefix for the two branches below that actually describe
+      // ring content, matching findings' own wording so an agent reading
+      // both tools about the same stale window sees the same story.
+      const notice = connected
+        ? ""
+        : exitedProcess
+          ? `This is from ${exitedProcess.packageName} on ${exitedProcess.device}, which exited at ` +
+            `${exitedProcess.disconnectedAt}, not from what is running now. `
+          : "Nothing has confirmed itself as the running process yet, so this is not yet confirmed to " +
+            "be live. ";
 
       // Outside the buffer is a different answer from "nothing happened", and
       // conflating them is how an agent concludes the app was idle.
@@ -765,14 +850,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const newest = events[events.length - 1].t;
       if (moment_at < oldest || moment_at > newest) {
         return ok(
-          `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +
+          notice +
+            `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +
             "Not that nothing was happening — it is no longer held.",
-          { moment: null, asked: moment_at, buffered: { from: oldest, to: newest }, clock, connected },
+          {
+            moment: null,
+            asked: moment_at,
+            buffered: { from: oldest, to: newest },
+            clock,
+            connected,
+            exitedProcess,
+          },
         );
       }
 
       const moment = { ...momentOf(events, moment_at, spreadMs ?? 2_000), clock };
-      return ok(describeMoment(moment), { ...moment, connected });
+      return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
     },
   );
 
