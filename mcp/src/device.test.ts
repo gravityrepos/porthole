@@ -694,6 +694,51 @@ function stripComments(text: string): string {
     .join("\n");
 }
 
+/**
+ * GRA-166 item 7, QA round 2: the strip above was proven by hand -- mutate
+ * the real Protocol.kt, run the suite, read the output, revert -- and never
+ * once by a test that stays in the suite. That is the GRA-168 shape this
+ * project just spent three QA rounds closing for the sibling guard in
+ * surface.test.ts: a fix with no coverage, on a line no routine run
+ * exercises. These two tests use small fixtures rather than the real file,
+ * and the exact production regex against stripComments()'s own output, so
+ * they exercise the real mechanism directly instead of asserting something
+ * about it by proxy.
+ */
+describe("stripComments() defends the drift scan against a comment quoting the declaration (GRA-166 item 7, QA round 2)", () => {
+  const PATTERN = /internal const val PROTOCOL_VERSION\s*=\s*(\d+)/g;
+
+  it("a comment quoting the correct, current value does not create a second match", () => {
+    const kotlin = [
+      "/**",
+      " * For example, today that reads `internal const val PROTOCOL_VERSION = 1`.",
+      " */",
+      "internal const val PROTOCOL_VERSION = 1",
+    ].join("\n");
+    const matches = [...stripComments(kotlin).matchAll(PATTERN)];
+    expect(matches).toHaveLength(1);
+    expect(Number(matches[0][1])).toBe(1);
+  });
+
+  it("a stale comment does not shadow a real bump -- the drift is still visible after stripping", () => {
+    const kotlin = [
+      "/**",
+      " * For example, today that reads `internal const val PROTOCOL_VERSION = 1`.",
+      " */",
+      "internal const val PROTOCOL_VERSION = 2",
+    ].join("\n");
+    // Before the strip, a bare .match() (or an un-stripped matchAll) would
+    // find the comment's stale "1" and never reach the real declaration's
+    // "2" at all -- the silent-pass path item 7 exists to close. After
+    // stripping, exactly one match remains, and it is the real, bumped
+    // value: the drift is still visible to whatever compares it against
+    // device.ts's own PROTOCOL_VERSION.
+    const matches = [...stripComments(kotlin).matchAll(PATTERN)];
+    expect(matches).toHaveLength(1);
+    expect(Number(matches[0][1])).toBe(2);
+  });
+});
+
 describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
   // GRA-96's whole point is that the receiving side checks what it is given
   // instead of trusting it silently -- but that check is only as good as
