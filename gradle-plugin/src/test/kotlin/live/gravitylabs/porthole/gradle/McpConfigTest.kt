@@ -376,13 +376,11 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
     @Test
     fun `local properties escaping round-trips against a real Android Studio capture, committed`() {
-        // AC4, and this is now the *primary* proof, not the only one — QA
-        // (GRA-150) correctly flagged that the machine-local test below is
-        // the GRA-75 / GRA-137 / GRA-144 shape: it silently skips wherever
-        // local.properties is absent (every fresh checkout, all of CI), the
-        // suite total does not move, and the build stays green. A green
-        // build that ran one fewer test is indistinguishable from one that
-        // passed, which defeats the entire point of AC4.
+        // AC4, and this is the primary proof, not the only one — QA
+        // (GRA-150, round 2) correctly flagged that the machine-local test
+        // below is the GRA-75 / GRA-137 / GRA-144 shape: it silently skips
+        // wherever local.properties is absent (every fresh checkout, all of
+        // CI), the suite total does not move, and the build stays green.
         //
         // capturedLocalProperties below is not reconstructed from the escaping
         // rules this suite assumes — it is the literal bytes read from a
@@ -390,12 +388,48 @@ class McpConfigTest : StubAdbFunctionalTest() {
         // (this project's GRA-111 pattern: a committed real artifact, with
         // provenance, rather than a hand-built fixture). The only change from
         // what was captured is the username, replaced with a neutral
-        // placeholder per GRA-150 QA's note not to commit a personal
-        // filesystem path — the escaping under test (the drive colon and
-        // every doubled backslash) is untouched. This test needs no file on
-        // disk and no assumeTrue: it runs identically on this machine, a
-        // fresh clone and CI.
-        assumeTrue("this escaping shape is Windows-specific", isWindowsHost())
+        // placeholder per QA's note not to commit a personal filesystem path
+        // — the escaping under test (the drive colon and every doubled
+        // backslash) is untouched.
+        //
+        // GRA-150 QA, round 3: the round-2 version of this test routed the
+        // parsed value through the whole resolveSdkDir/PortholeMcpConfigTask
+        // path, which meant asserting the *resolved absolute path* — and a
+        // Windows-shaped absolute path is only absolute by
+        // java.io.File.isAbsolute's rules on Windows, so that assertion
+        // needed isWindowsHost() to avoid the value being (correctly, on
+        // Linux) joined onto the project root instead. CI's `gradle` job in
+        // pr.yml runs on ubuntu-latest only, so that gate meant this test —
+        // the one thing AC4 asks for — never ran in CI at all: the "runs
+        // nowhere but this laptop" finding moved, it did not close.
+        //
+        // AC4's actual claim is about the *escaping round-trip*
+        // (java.util.Properties un-escaping the doubled backslashes and the
+        // escaped drive colon), which is pure JVM and has nothing to do with
+        // java.io.File's platform-dependent notion of "absolute". Asserting
+        // the parsed property value directly — no Gradle build, no File, no
+        // platform gate — is what actually runs this claim on every host,
+        // ubuntu-latest included. The paired test below covers the
+        // Windows-only half: that the parsed value, once treated as a path,
+        // resolves to the expected absolute SDK directory.
+        val props = Properties()
+        capturedLocalProperties.byteInputStream().use(props::load)
+        assertEquals(
+            "C:\\Users\\builder\\AppData\\Local\\Android\\Sdk",
+            props.getProperty("sdk.dir"),
+        )
+    }
+
+    @Test
+    fun `the committed capture resolves to the expected absolute path, on Windows`() {
+        // The Windows-only half of the claim above, kept separate rather
+        // than folded back into the platform-independent escaping test: once
+        // the parsed "C:\Users\..." string is treated as a path rather than
+        // just a string Properties handed back, whether it counts as
+        // absolute — and therefore whether it goes through this task and
+        // .mcp.json unchanged rather than being joined onto the project root
+        // — is a java.io.File, per-platform question, not a Properties one.
+        assumeTrue("a Windows-drive-letter path is absolute only on Windows", isWindowsHost())
 
         write("local.properties", capturedLocalProperties)
         scratch(registerTask())
@@ -412,42 +446,34 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
     @Test
     fun `local properties escaping round-trips against the real file on this machine, when one is present`() {
-        // AC4's belt-and-suspenders half: the committed capture above is now
-        // the unconditional proof, so this one is free to be exactly what its
-        // name says — an *additional* real-world cross-check on whatever
-        // local.properties this run's machine actually has, which may catch
-        // something the fixed capture above cannot (a different SDK layout,
-        // a different Windows locale, a genuinely different escaping choice
-        // by whatever wrote it). Per QA's finding, its skip must be visible
-        // rather than silent, so both the run and the skip print a banner —
-        // grep test output for "[McpConfigTest][AC4]" to see which happened
-        // without opening the JUnit XML.
+        // An *additional* real-world cross-check on whatever local.properties
+        // this run's machine actually has, on top of the unconditional
+        // committed-capture test above — it may catch something the fixed
+        // capture cannot (a different SDK layout, a different Windows
+        // locale, a genuinely different escaping choice by whatever wrote
+        // it). Its skip is no longer this suite's problem to announce: GRA-159
+        // (merged since the previous QA round) makes CI's summary step print
+        // every skipped JVM test by name regardless of pass/fail, which is a
+        // stronger, already-solved version of what an in-test println banner
+        // was attempting — a println here would only reach the JUnit XML's
+        // system-out, sitting next to the skip attribute it was meant to be
+        // more visible than, with no console output at all (this module sets
+        // no testLogging.showStandardStreams). So: no banner, just the
+        // ordinary assumeTrue skip, same as every other environment-gated
+        // test in this file.
         //
         // System.getProperty("user.dir") here is this JVM's own working
         // directory, not the scratch project's — Gradle sets a test task's
         // working directory to its module (gradle-plugin), so the parent is
         // the repository root, same as PortholeAgpCompatibilityTest.
         val real = File(File(System.getProperty("user.dir")).parentFile, "local.properties")
-        if (!real.isFile) {
-            println("[McpConfigTest][AC4] SKIPPED: no local.properties at ${real.absolutePath} — " +
-                "this environment gets AC4's coverage only from the committed capture above.")
-        }
         assumeTrue("no local.properties next to the real build; nothing to compare against", real.isFile)
 
         val props = Properties()
         real.inputStream().use(props::load)
         val rawSdkDir = props.getProperty("sdk.dir")
-        if (rawSdkDir.isNullOrBlank()) {
-            println("[McpConfigTest][AC4] SKIPPED: ${real.absolutePath} has no usable sdk.dir.")
-        }
         assumeTrue("the real local.properties has no usable sdk.dir", !rawSdkDir.isNullOrBlank())
         val expected = File(rawSdkDir)
-        if (!(expected.isAbsolute && expected.isDirectory)) {
-            println(
-                "[McpConfigTest][AC4] SKIPPED: ${real.absolutePath}'s sdk.dir ($expected) is not an " +
-                    "absolute, existing directory.",
-            )
-        }
         assumeTrue(
             "expected an absolute, existing SDK directory from the real file, got $expected",
             expected.isAbsolute && expected.isDirectory,
@@ -461,7 +487,6 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
         val env = readEnvBlock()
         assertEquals(expected.absolutePath, env["PORTHOLE_SDK_DIR"])
-        println("[McpConfigTest][AC4] RAN against the real ${real.absolutePath}: ${env["PORTHOLE_SDK_DIR"]}")
     }
 
     @Test
