@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildTrace, type Finding } from "./trace.js";
 import type { DeviceEvent } from "./device.js";
+import { buildRig } from "./testing/harness.js";
 
 /**
  * The shape of the MCP surface, rather than any one tool's output.
@@ -14,6 +15,17 @@ import type { DeviceEvent } from "./device.js";
  * tool it guessed at, comparing two windows it did not notice were different,
  * and reporting a correlation as a cause. Each test below pins one of the
  * properties that stops that.
+ *
+ * "the tool surface", below, guards a different complaint: nothing pinned
+ * the tool *names* themselves, in either direction. A renamed or deleted
+ * tool left `windowedTools()` in `index.test.ts` silent (it only discovers
+ * tools that declare a window) and left `entrypoints.test.ts` green (it
+ * compares the two entry points to each other, so a rename both entry
+ * points agree on still passes). Those tests exercise what a tool does;
+ * this one exercises what an agent — or a person reading the README — would
+ * call it. It has to ask the running server, not grep this file, or a
+ * rename that both the code and a hand-copied test string agree on would
+ * pass right along with the tool.
  */
 
 const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
@@ -202,5 +214,101 @@ describe("the server version", () => {
     // accepts; the fallback is still the package, never a literal.
     expect(source).toContain("options.version ?? pkg.version");
     expect(source).not.toMatch(/version: "\d+\.\d+\.\d+"/);
+  });
+});
+
+/**
+ * Pulls the tool names out of the README's "between them they cover" table
+ * (currently just above `## Layout`, but this does not assume that — it
+ * finds the table by its own header cell, not by a heading or a line
+ * number). Reads the first pipe-delimited cell of each data row, which is
+ * where the tool's name lives in a backtick span, e.g.
+ * `| \`findings\` | start here: ... |`.
+ *
+ * Deliberately loose about everything that is just table formatting —
+ * column widths, extra spaces, how the separator row is dashed — so
+ * reflowing the table does not break this test. What it does not tolerate
+ * is a row's name cell losing its tool, which is the actual thing AC 2
+ * exists to catch.
+ */
+function readmeToolNames(): string[] {
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const lines = readme.split("\n");
+  const headerIndex = lines.findIndex((line) => /^\|\s*tool\s*\|/i.test(line.trim()));
+  if (headerIndex < 0) {
+    throw new Error("no tool table found in README.md (expected a `| tool | answers |` header)");
+  }
+
+  const names: string[] = [];
+  // headerIndex + 1 is the "| --- | --- |" separator row; data starts after it.
+  for (let i = headerIndex + 2; i < lines.length && lines[i].trim().startsWith("|"); i++) {
+    const nameCell = lines[i].split("|")[1] ?? "";
+    const match = nameCell.match(/`([a-z_]+)`/);
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
+describe("the tool surface", () => {
+  // The 16 names `index.ts` registers, in registration order, verified
+  // against the running server rather than copied from the ticket that
+  // asked for this test — see the "registers exactly these tools" case
+  // below, which is what would have caught this list being wrong.
+  const REGISTERED_TOOLS = [
+    "porthole_status",
+    "findings",
+    "system_context",
+    "ask_system_trace",
+    "capture_system_trace",
+    "what_was_happening",
+    "recompositions",
+    "semantics_tree",
+    "nav_state",
+    "state",
+    "inflight",
+    "frames",
+    "blocking",
+    "logs",
+    "timeline",
+    "open_timeline",
+  ];
+
+  it("registers exactly these tools — a rename or a deletion fails this, named", async () => {
+    // `buildRig` drives `createPortholeServer` through a real MCP `Client`
+    // (see `testing/harness.ts`), so this asks the server what it actually
+    // registered — the same `tools/list` call an agent makes — rather than
+    // parsing `index.ts`'s source for `registerTool(` calls. A renamed tool
+    // shows up as both a missing expected name and an unexpected extra one;
+    // a deleted tool shows up as missing only. Either way the assertion
+    // message names the tool, not just "arrays differ".
+    const rig = await buildRig();
+    try {
+      const names = (await rig.client.listTools()).map((t) => t.name);
+      const missing = REGISTERED_TOOLS.filter((n) => !names.includes(n));
+      const extra = names.filter((n) => !REGISTERED_TOOLS.includes(n));
+      expect(missing, `expected but not registered: ${missing.join(", ")}`).toEqual([]);
+      expect(extra, `registered but not expected: ${extra.join(", ")}`).toEqual([]);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("documents every registered tool in the README, and no tool it does not register", async () => {
+    // Both directions of AC 2: a tool the server registers but the README
+    // never mentions, and a tool the README mentions that the server does
+    // not register (a stale doc, or a typo in the table).
+    const rig = await buildRig();
+    try {
+      const registered = (await rig.client.listTools()).map((t) => t.name);
+      const documented = readmeToolNames();
+      const undocumented = registered.filter((n) => !documented.includes(n));
+      const phantom = documented.filter((n) => !registered.includes(n));
+      expect(undocumented, `registered but not documented in README.md: ${undocumented.join(", ")}`).toEqual(
+        [],
+      );
+      expect(phantom, `documented in README.md but not registered: ${phantom.join(", ")}`).toEqual([]);
+    } finally {
+      await rig.close();
+    }
   });
 });
