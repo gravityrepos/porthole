@@ -164,6 +164,54 @@ describe("FindingsLoader.schedule", () => {
     expect(cb.onSuccess).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a non-abort rejection through onError", async () => {
+    // GRA-95: the catch in `run` exists to swallow one specific rejection --
+    // the AbortError raised by GRA-80's in-flight cancellation -- not every
+    // rejection that could land there. A real network failure (DNS, a
+    // dropped connection, `fetch` itself throwing) rejects with a plain
+    // `Error`, not a `DOMException` named "AbortError", and has to reach
+    // `onError` the same way a non-ok response or bad JSON already does.
+    // Nothing in this file asserted that before, which is exactly how a
+    // `catch { return; }` that swallows everything could sit here with the
+    // suite green: restoring that blanket catch turns this test red without
+    // moving any other number in the file (see GRA-95's ticket comment for
+    // the before/after run).
+    const { fetchImpl, pending } = deferredFetch();
+    const cb = callbacks();
+    const loader = new FindingsLoader(cb, { fetchImpl, debounceMs: 10 });
+
+    loader.schedule(0, 100);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pending).toHaveLength(1);
+
+    pending[0].reject(new Error("network request failed"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(cb.onError).toHaveBeenCalledTimes(1);
+    expect(cb.onError).toHaveBeenCalledWith("network request failed");
+    expect(cb.onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("reports a non-ok HTTP response through onError, not just a rejected fetch", async () => {
+    // The other shape a real failure takes: `fetch` resolves (no exception
+    // at all) but the server answered with a 500. `run` turns that into a
+    // thrown `Error` itself, which then has to travel through the same
+    // catch as a genuine rejection would -- and must not be mistaken for an
+    // AbortError or a superseded response along the way.
+    const fetchImpl = vi.fn(
+      async () => new Response("internal error", { status: 500 }),
+    );
+    const cb = callbacks();
+    const loader = new FindingsLoader(cb, { fetchImpl, debounceMs: 10 });
+
+    loader.schedule(0, 100);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(cb.onError).toHaveBeenCalledTimes(1);
+    expect(cb.onError).toHaveBeenCalledWith("the server answered 500");
+    expect(cb.onSuccess).not.toHaveBeenCalled();
+  });
+
   it("ignores a rejection from a request that has since been superseded", async () => {
     const { fetchImpl, pending } = deferredFetch();
     const cb = callbacks();
