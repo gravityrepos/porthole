@@ -66,6 +66,13 @@
         --device: #56d4dd;
         --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
         --sans: "Space Grotesk", system-ui, sans-serif;
+        /* Founder feedback (DECISIONS.md, "Landing page layout"): 1120px left
+           "huge gutters and wasted space" from ~1440px up. One variable, so
+           every wrap cap moves together; chosen by looking at 1440 and 1920
+           in a real browser, not by guessing (see the 1440/1920 measurements
+           this ticket recorded). Text measures (.lede, .hero p, 64ch/68ch)
+           are untouched — only the boxes get more room. */
+        --wrap: min(1600px, 92vw);
       }
       * {
         box-sizing: border-box;
@@ -113,13 +120,19 @@
         border-bottom: 1px solid var(--line-soft);
       }
       .wrap {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 66px 24px;
       }
       .split {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        /* min(300px, 100%): a bare minmax() floor is a hard minimum even
+           when the container is narrower than it (GRA-136 measurement — this
+           already forced 4px of page-level horizontal scroll at 320px,
+           pre-existing from GRA-127). Clamping the floor to the container
+           fixes it without changing anything at a width that already had
+           300px to give. */
+        grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
         gap: 34px;
         align-items: start;
       }
@@ -152,13 +165,21 @@
         gap: 14px;
       }
       .cols-wide {
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
       }
       .cols-mid {
-        grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+        /* #install's only user. 270px let three equal columns squeeze the
+           Connect card's pre blocks into horizontal scroll well before 1440
+           (GRA-136 measurement: the output block needs ~570px). 520px means
+           auto-fit drops to two columns — then one — before that happens,
+           instead of shrinking three columns until they scroll. Wrapped in
+           min(520px, 100%): minmax()'s min alone is a hard floor, which blew
+           the grid past a narrow viewport's own width (GRA-136, caught at
+           375px — the page-level horizontal scroll the ticket rules out). */
+        grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
       }
       .cols-tight {
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
       }
       pre {
         margin: 0;
@@ -297,7 +318,7 @@
       }
       .hero {
         position: relative;
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 44px 24px 36px;
         display: flex;
@@ -708,7 +729,7 @@
 
       /* footer */
       .foot {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 56px 24px 40px;
         display: flex;
@@ -733,7 +754,7 @@
         color: var(--dim);
       }
       .colophon {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 16px 24px;
         font-family: var(--mono);
