@@ -651,3 +651,62 @@ describe("no site re-derives the connection story by hand (GRA-154 AC5, absorbed
     ).toBe(0);
   });
 });
+
+describe("porthole_status on a protocol mismatch (GRA-96)", () => {
+  // AC4: "A test drives a fake device that reports a different protocol and
+  // asserts the message." A real FakeDevice over a real socket — not a
+  // hand-built DeviceClient state — answering `hello` with a protocol this
+  // server does not understand, exactly the shape a runtime built against an
+  // older or newer wire format would produce.
+  function mismatchedHello(protocol: number) {
+    return {
+      protocol,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: 0,
+      collectors: [],
+    };
+  }
+
+  it("names both versions and the action instead of the normal connected summary (AC1/AC2)", async () => {
+    const rig = await buildRig({ handlers: { hello: () => mismatchedHello(2) } });
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.device.protocolMismatch).not.toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      // AC1: a specific, actionable message, not the generic "Connected to
+      // ... Collectors: ..." summary the healthy path prints.
+      expect(status.text).not.toContain("Collectors:");
+      // AC2: both versions and the action are in the text an agent reads.
+      expect(status.text).toContain("2");
+      expect(status.text).toContain("1");
+      expect(status.text).toMatch(/update|pin/i);
+      // Structured data agrees with the summary text, not just the prose:
+      // the summary *is* protocolMismatch verbatim when there is one (see
+      // ok()'s "summary\n\n{json}" convention — status.text carries both).
+      const payload = status.json as { protocolMismatch: string | null };
+      expect(payload.protocolMismatch).not.toBeNull();
+      expect(status.text.startsWith(payload.protocolMismatch as string)).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("is absent for a matching protocol, the normal case", async () => {
+    const rig = await buildRig(); // default fixture hello() sends protocol: 1
+    try {
+      expect(rig.device.protocolMismatch).toBeNull();
+      const status = await rig.client.callTool("porthole_status", {});
+      const payload = status.json as { protocolMismatch: string | null };
+      expect(payload.protocolMismatch).toBeNull();
+      expect(status.text).toContain("Collectors:");
+    } finally {
+      await rig.close();
+    }
+  });
+});

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import net, { type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DeviceClient, type DeviceEvent } from "./device.js";
+import { DeviceClient, PROTOCOL_VERSION, type DeviceEvent } from "./device.js";
 
 /**
  * device.ts is the only place that turns raw TCP bytes from the Android
@@ -574,5 +574,83 @@ describe("pending requests on close", () => {
     // real MCP server's shutdown) waiting on a timer stop() should have
     // owned.
     expect(elapsed).toBeLessThan(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-96: hello.protocol is now checked, not just sent
+// ---------------------------------------------------------------------------
+
+/** A hello response payload for the given protocol, otherwise realistic. */
+function helloResult(protocol: number) {
+  return {
+    protocol,
+    packageName: "com.example.shop",
+    processName: "com.example.shop",
+    versionName: "1.0.0-test",
+    device: "Test Device",
+    sdkInt: 34,
+    startedAt: 0,
+    collectors: [],
+  };
+}
+
+describe("protocol mismatch", () => {
+  it("records a specific message naming both versions when hello.protocol disagrees", async () => {
+    // autoHello: false so this test can answer with a protocol the default
+    // fixture (hard-coded to PROTOCOL_VERSION) never would — a real fake
+    // device reporting a different protocol, not a hand-built expectation of
+    // what device.ts "should" do with one.
+    const server = trackServer(await startRawServer({ autoHello: false }));
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await server.whenAccepted(1);
+    // connect() sends exactly one request before this point — its own
+    // "hello" — so this is always id 1; see the "handshaking state" describe
+    // block above for the same assumption used to drive a hand-written
+    // response.
+    const mismatched = PROTOCOL_VERSION + 1;
+    server.write(JSON.stringify({ id: 1, ok: true, result: helloResult(mismatched) }) + "\n");
+
+    await waitForHello(client);
+    // The handshake still succeeds -- a mismatch is a refusal to trust the
+    // wire format, not a failure to talk to the device at all, so the rest
+    // of the surface keeps working for whatever it can (GRA-96's own note on
+    // protocolMismatch explains why this is not folded into lastError).
+    expect(client.state).toBe("connected");
+    expect(client.protocolMismatch).not.toBeNull();
+    // AC2: "The message names both versions and the action."
+    expect(client.protocolMismatch).toContain(String(mismatched));
+    expect(client.protocolMismatch).toContain(String(PROTOCOL_VERSION));
+    expect(client.protocolMismatch).toMatch(/update|pin/i);
+  });
+
+  it("is null when hello.protocol matches PROTOCOL_VERSION", async () => {
+    const server = trackServer(await startRawServer()); // default fixture sends protocol: 1
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await waitForState(client, "connected");
+    await waitForHello(client);
+
+    expect(client.protocolMismatch).toBeNull();
+  });
+
+  it("clears once the device disconnects, since it is a fact about the hello that produced it", async () => {
+    const server = trackServer(await startRawServer({ autoHello: false }));
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await server.whenAccepted(1);
+    server.write(
+      JSON.stringify({ id: 1, ok: true, result: helloResult(PROTOCOL_VERSION + 1) }) + "\n",
+    );
+    await waitForHello(client);
+    expect(client.protocolMismatch).not.toBeNull();
+
+    server.destroyAll();
+    await waitForState(client, "disconnected");
+    expect(client.protocolMismatch).toBeNull();
   });
 });

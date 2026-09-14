@@ -215,6 +215,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         timelineUi: timeline.isRunning() ? timeline.url() : null,
         bufferedEvents: timeline.buffer().length,
         lastError: device.lastError,
+        // GRA-96: null on a healthy handshake, otherwise the same sentence
+        // `summary` uses below — reported in the payload too so a caller
+        // reading structured data (not just the text) can branch on it
+        // without string-matching `summary`.
+        protocolMismatch: device.protocolMismatch,
         sdkDir: sdkDir.directory,
         sdkDirSource: sdkDir.source,
         projectRoot: projectRoot.directory,
@@ -227,8 +232,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // null only when state === "connected", which now guarantees `hello`
       // is set, so the non-null assertion below is the invariant, not a hope.
       const pending = device.pendingMessage();
+      // GRA-96: a protocol mismatch takes priority over the normal "here is
+      // what's connected" sentence — hello did land and the socket is fine,
+      // but the one thing worth saying is that the two sides disagree on the
+      // wire format, not the collector list a mismatched build may not even
+      // be able to report honestly. This is what turns AC1's "specific,
+      // actionable message... not a generic failure" into the actual summary
+      // text an agent reads, rather than a field it has to know to check.
       const summary =
         pending ??
+        device.protocolMismatch ??
         `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
           `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`;
       return ok(summary, payload);
