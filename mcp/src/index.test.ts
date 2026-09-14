@@ -1114,7 +1114,15 @@ describe("GRA-169: collapseBlankLines()", () => {
   });
 
   it("collapses a CRLF blank line", () => {
-    expect(collapseBlankLines("summary\r\n\r\npayload")).not.toContain("\n\n");
+    // QA round 1 (GRA-169): this used to assert `not.toContain("\n\n")`,
+    // which holds of an identity function too — "summary\r\n\r\npayload"
+    // never contains two adjacent bare "\n"s to begin with (there is a
+    // "\r" between them), so the assertion proved nothing about whether
+    // the `\r\n` → `\n` replace ran at all. `toBe(...)` pins the actual
+    // output, so deleting that replace now reddens this test by name
+    // instead of leaving it silently green — the GRA-160 shape: a test
+    // that passes for a reason unrelated to its own claim.
+    expect(collapseBlankLines("summary\r\n\r\npayload")).toBe("summary payload");
   });
 
   it("leaves a single newline alone — this is not a linter, only blank lines are the target", () => {
@@ -1284,11 +1292,16 @@ describe("GRA-169: a blank line in interpolated device data must not break ok()'
     });
   });
 
-  // The invariant `ok()` now enforces directly, exercised without any device
-  // at all: no summary this server ever builds may reach a caller with a
-  // blank line still in it. This is the "assert the invariant inside ok()"
-  // half of the fix (see index.ts) proven from the test side, independent of
-  // which call site a future tool might add.
+  // QA round 1 (GRA-169): the comment that used to sit here claimed this
+  // test "proves" ok()'s post-collapse throw guard "from the test side" —
+  // it does not. `device: "Two\n\n\n\nblank lines"` is a shape
+  // `collapseBlankLines()` already collapses correctly (four newlines tile
+  // into two non-overlapping matches), so this test only exercises the
+  // *happy* path through `ok()` — collapse succeeds, the guard never
+  // fires — end to end, through a device fixture with more than the
+  // minimal two newlines. It is not a test of the guard itself: deleting
+  // the guard entirely leaves this test (and the rest of the suite) green,
+  // which is the disclosed, unclosed gap in this ticket's own report.
   it("porthole_status's summary contains no blank line even when its own prose would have had one", async () => {
     const hello = helloOf({ device: "Two\n\n\n\nblank lines" });
     const rig = await buildExitedRig(hello);
