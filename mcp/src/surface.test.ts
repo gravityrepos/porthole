@@ -414,6 +414,35 @@ describe("stripComments (GRA-168 item 1): string literals do not open or close a
     expect(scanned).toContain('const url = "http://example.com";');
     expect(scanned).toContain('state === "connected"');
   });
+
+  it("the same headline case is defended for single-quoted strings, not only double-quoted ones", () => {
+    // Mutation testing this fix (deliberately, before reporting this ticket
+    // done) found that a version tracking only double-quoted strings and
+    // template literals -- dropping the single-quote branch entirely --
+    // survived the whole suite: nothing in this file's production source
+    // happens to use a single-quoted string containing '/*' today, so
+    // nothing forced that branch to prove itself. This closes that gap
+    // directly, independent of what index.ts happens to contain.
+    const src = [
+      "const qaOpen = '/*';",
+      'const qaOffender = ({ state: "c" } as { state: string }).state === "connected";',
+      "const qaClose = '*/';",
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).toContain('state === "connected"');
+  });
+
+  it("the same headline case is defended for template literals, not only quoted strings", () => {
+    // Same mutation-testing gap as the single-quote case above, for the
+    // template-literal branch.
+    const src = [
+      "const qaOpen = `/*`;",
+      'const qaOffender = ({ state: "c" } as { state: string }).state === "connected";',
+      "const qaClose = `*/`;",
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).toContain('state === "connected"');
+  });
 });
 
 describe("ConnectionState reads (GRA-162)", () => {
