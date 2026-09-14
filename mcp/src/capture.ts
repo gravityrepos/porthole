@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { DeviceClient, isConnected, type ConnectionState, type DeviceEvent } from "./device.js";
-import { renderComparison, renderReport } from "./report.js";
+import { renderComparison, renderReport, shouldColor } from "./report.js";
 import { buildTrace, type Trace } from "./trace.js";
 import { parseFailOn, parsePort, readTrace, requiredValue, type FailOn } from "./args.js";
 
@@ -123,7 +123,10 @@ export async function capture(options: CaptureOptions): Promise<number> {
   });
 
   await writeFile(options.out, JSON.stringify(trace, null, 2));
-  process.stderr.write(`\n${renderReport(trace)}`);
+  // stderr, not stdout — this is the summary `porthole capture` prints
+  // alongside the child command's own output, so it colours against stderr's
+  // own TTY-ness, which can differ from stdout's (e.g. `capture ... | tee log`).
+  process.stderr.write(`\n${renderReport(trace, { color: shouldColor(process.stderr) })}`);
   process.stderr.write(`\nwrote ${options.out} (${events.length} events)\n`);
 
   let regressed = false;
@@ -174,7 +177,7 @@ export async function report(file: string): Promise<number> {
     process.stderr.write(`${(error as Error).message}\n`);
     return 2;
   }
-  process.stdout.write(renderReport(trace));
+  process.stdout.write(renderReport(trace, { color: shouldColor(process.stdout) }));
   return 0;
 }
 

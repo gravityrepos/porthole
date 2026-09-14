@@ -1,8 +1,16 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { comparability, compareMetrics, renderComparison, renderReport } from "./report.js";
+import {
+  comparability,
+  compareMetrics,
+  renderComparison,
+  renderReport,
+  shouldColor,
+} from "./report.js";
 import type { Trace } from "./trace.js";
+
+const ESCAPE = /\x1b/;
 
 function trace(over: Partial<Trace> = {}): Trace {
   return {
@@ -235,5 +243,101 @@ describe("renderReport", () => {
 
     expect(text.indexOf("ERROR")).toBeLessThan(text.indexOf("WARNING"));
     expect(text).toContain('during "block the main thread"');
+  });
+});
+
+describe("renderReport colour (GRA-142)", () => {
+  // Every test above this one calls renderReport(trace) with no options —
+  // this is the actual regression surface: nothing here changes unless the
+  // implementation stops treating "no options" as "plain text".
+  it("stays plain with no escape bytes at all when color is not requested (the default every existing caller uses)", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          { id: "e", severity: "error", confidence: "observed", title: "an error" },
+          { id: "w", severity: "warning", confidence: "correlated", title: "a warning" },
+          { id: "n", severity: "note", confidence: "observed", title: "a note" },
+        ],
+      }),
+    );
+    expect(text).not.toMatch(ESCAPE);
+  });
+
+  // The forced-TTY test the ticket asks for by name: report.test.ts and
+  // capture.test.ts both run non-TTY (vitest's stdout/stderr are piped), so
+  // a suite that only ever calls renderReport(trace) with the implicit
+  // default would stay green over a colour path that was never wired up at
+  // all, or wired up backwards. Forcing it via options.color — rather than
+  // monkey-patching process.stdout.isTTY, which this function does not even
+  // read — exercises exactly the branch a real terminal would take.
+  it("forces the TTY path via options.color and asserts the escape sequence around ERROR and its absence around a nearby 'observed'", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          {
+            id: "main-thread-stall",
+            severity: "error",
+            confidence: "observed",
+            title: "main thread blocked for 305ms",
+            // Deliberately contains the word "observed" so the test can prove
+            // the escape wraps only the severity token and does not bleed
+            // into adjacent plain text — confidence itself is not rendered
+            // by renderReport today, so this is the closest real text to
+            // check the AC's literal wording against.
+            detail: "observed for 305ms, not merely correlated",
+          },
+        ],
+      }),
+      { color: true },
+    );
+
+    // Red, then a full reset, wrapping exactly the padded "ERROR  " label.
+    expect(text).toContain("\x1b[31mERROR  \x1b[0m");
+
+    const observedIndex = text.indexOf("observed");
+    expect(observedIndex).toBeGreaterThan(-1);
+    // No escape byte anywhere in a window around "observed" — proves the
+    // colouring did not leak past the severity token onto the detail line.
+    const window = text.slice(Math.max(0, observedIndex - 10), observedIndex + 20);
+    expect(window).not.toMatch(ESCAPE);
+  });
+
+  it("colours warning amber (yellow) and note dim, distinctly from error's red", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          { id: "e", severity: "error", confidence: "observed", title: "an error" },
+          { id: "w", severity: "warning", confidence: "observed", title: "a warning" },
+          { id: "n", severity: "note", confidence: "correlated", title: "a note" },
+        ],
+      }),
+      { color: true },
+    );
+    expect(text).toContain("\x1b[31mERROR  \x1b[0m");
+    expect(text).toContain("\x1b[33mWARNING\x1b[0m");
+    expect(text).toContain("\x1b[2mNOTE   \x1b[0m");
+  });
+
+  it("does not colour anything when there are no findings — nothing to wrap", () => {
+    const text = renderReport(trace(), { color: true });
+    expect(text).not.toMatch(ESCAPE);
+  });
+});
+
+describe("shouldColor (GRA-142)", () => {
+  it("is true only on a TTY with NO_COLOR unset", () => {
+    expect(shouldColor({ isTTY: true }, {})).toBe(true);
+  });
+
+  it("is false when the stream is not a TTY, regardless of NO_COLOR", () => {
+    expect(shouldColor({ isTTY: false }, {})).toBe(false);
+    expect(shouldColor({}, {})).toBe(false);
+  });
+
+  it("is false on a TTY once NO_COLOR is set, however it is set", () => {
+    expect(shouldColor({ isTTY: true }, { NO_COLOR: "1" })).toBe(false);
+    // NO_COLOR's own convention is presence, not truthiness — an empty value
+    // still counts as "set" and must still disable colour.
+    expect(shouldColor({ isTTY: true }, { NO_COLOR: "" })).toBe(false);
   });
 });
