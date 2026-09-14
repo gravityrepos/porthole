@@ -349,10 +349,15 @@ function productionSourceFiles(): string[] {
  * it and the replace silently no-ops, leaving the raw comment text in
  * place. That is exactly how a prose comment like `// ... state ===
  * "connected" ...` in `index.ts` starts matching the offender pattern below
- * on a CRLF checkout (Windows with `core.autocrlf=true`) even though the
- * only line-ending byte changed and no comparison was added: a false
- * positive on a clean tree, which is worse than a missed real one — see the
- * describe block below for why. Collapsing "\r\n" to "\n" up front costs
+ * on a CRLF-ending file even though the only line-ending byte changed and
+ * no comparison was added: a false positive on a clean tree, which is worse
+ * than a missed real one — see the describe block below for why. `.gitattributes`
+ * pins `* text=auto eol=lf` (an `eol` directive overrides `core.autocrlf`
+ * unconditionally), so a plain `git clone` cannot actually produce this —
+ * the real routes are an editor saving CRLF, a patch or archive applied
+ * outside git, or an edit to `.gitattributes` itself. Narrower than it
+ * looks, but still a route, and still a false positive rather than a missed
+ * real one when it happens. Collapsing "\r\n" to "\n" up front costs
  * nothing (it cannot change how many lines the file has, only how each
  * line's own terminator is spelled) and makes every reader of this function
  * — comment-blanking included — see the same normalised text regardless of
@@ -368,6 +373,28 @@ function stripComments(text: string): string {
     .map((line) => line.replace(/\/\/.*$/, ""))
     .join("\n");
 }
+
+describe("stripComments (GRA-166 item 6)", () => {
+  it("blanks a // comment whose line ends in \\r\\n, not just \\n", () => {
+    // Direct unit test on the normalisation step itself. The two describe
+    // blocks below that consume stripComments() only ever read real files
+    // off this checkout, and .gitattributes pins every checkout to LF (see
+    // the doc comment above stripComments()) — so nothing else in this file
+    // exercises the CRLF branch, ever. Without this test, deleting
+    // `text.replace(/\r\n/g, "\n")` from stripComments() leaves the whole
+    // suite green: the fix would have shipped with zero coverage of the
+    // exact line it added. Feeding stripComments() a CRLF string directly,
+    // rather than writing a temp file or mutating index.ts, is what makes
+    // this test independent of the working tree's own line endings.
+    const crlf = 'const ok = 1;\r\n// state === "connected", left here on purpose\r\nconst after = 2;\r\n';
+    const stripped = stripComments(crlf);
+    expect(stripped).not.toContain('state === "connected"');
+    // And the blanking is real, not a side effect of the whole line
+    // vanishing — the code before and after the comment must survive.
+    expect(stripped).toContain("const ok = 1;");
+    expect(stripped).toContain("const after = 2;");
+  });
+});
 
 describe("ConnectionState reads (GRA-162)", () => {
   it("never compares .state to a literal directly outside device.ts — isAttached()/isConnected()/isHandshaking() exist for exactly this", () => {
