@@ -357,6 +357,65 @@ describe("stripComments (GRA-166 item 6)", () => {
   });
 });
 
+describe("stripComments (GRA-168 item 1): string literals do not open or close a comment span", () => {
+  it("does not blank a real ConnectionState comparison sitting between two string literals that merely contain /* and */", () => {
+    // The headline reproduction from GRA-168, made permanent and independent
+    // of index.ts: before this fix, stripComments() was a pure text blanker
+    // with no notion of a string literal, so these two ordinary-looking
+    // string literals opened and closed a comment span exactly like a real
+    // block comment would, and the genuine offender between them vanished
+    // before the ConnectionState pattern ever saw it. Measured directly
+    // against index.ts at the time this ticket was filed: injecting this
+    // exact shape left the guard's test 22/22 green. Feeding the three
+    // lines to stripComments() here, rather than mutating index.ts, is what
+    // makes this a permanent regression test instead of a one-off manual
+    // check.
+    const src = [
+      'const qaOpen = "/*";',
+      'const qaOffender = ({ state: "c" } as { state: string }).state === "connected";',
+      'const qaClose = "*/";',
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).toContain('state === "connected"');
+  });
+
+  it("still blanks a genuine comment that merely mentions the comparison, with no string trickery nearby", () => {
+    // The other half of AC3: the fix above must not turn into a guard that
+    // stops blanking ordinary comments. A comment that only *talks about*
+    // the comparison — the exact prose a reviewer might reasonably write
+    // while explaining this guard — must still disappear from the scanned
+    // text, the same way it did before this fix (see the CRLF test above
+    // for the equivalent check on a CRLF-ending line; this is the plain-LF
+    // case, which is the one every real checkout on this project actually
+    // produces).
+    const src = [
+      "const ok = 1;",
+      '// example: state === "connected" is what this guard looks for',
+      "const after = 2;",
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).not.toContain('state === "connected"');
+    expect(scanned).toContain("const ok = 1;");
+    expect(scanned).toContain("const after = 2;");
+  });
+
+  it("a string literal containing an unescaped // is not mistaken for a line comment", () => {
+    // A side effect of the same fix worth pinning on its own: the old
+    // version's line-comment step (`line.replace(/\/\/.*$/, "")`) had no
+    // notion of strings either, so a perfectly ordinary string containing
+    // "//" — a URL is the obvious example — had everything after the "//"
+    // silently cut from the scanned line, string content and any real code
+    // sharing that line included. That is a truncation bug distinct from
+    // GRA-168 item 2's (which is about the guard's own positive controls),
+    // but it is the same root cause as item 1's headline case, and the same
+    // fix closes both.
+    const src = 'const url = "http://example.com"; const c = ({ state: "c" } as { state: string }).state === "connected";';
+    const scanned = stripComments(src);
+    expect(scanned).toContain('const url = "http://example.com";');
+    expect(scanned).toContain('state === "connected"');
+  });
+});
+
 describe("ConnectionState reads (GRA-162)", () => {
   it("never compares .state to a literal directly outside device.ts — isAttached()/isConnected()/isHandshaking() exist for exactly this", () => {
     // GRA-162's whole argument is that tsc catches a fifth ConnectionState,
