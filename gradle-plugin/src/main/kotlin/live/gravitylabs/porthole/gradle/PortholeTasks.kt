@@ -223,16 +223,16 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * whatever launched it, not by us. This task knows both with certainty at
  * configure time, so it writes `PORTHOLE_PROJECT_ROOT` (the directory
  * [configFile] lives in — always the Gradle root, since that is where
- * [PortholePlugin] points it) and `PORTHOLE_SDK_DIR` (resolved the same way
- * `PortholePlugin`'s adb lookup resolves it: `local.properties`, then
- * `ANDROID_HOME`/`ANDROID_SDK_ROOT`). `mcp/src/adb.ts` prefers the env var
- * when present and keeps its own walk as the fallback for a server started
- * some other way.
+ * [PortholePlugin] points it) and `PORTHOLE_SDK_DIR` (resolved by
+ * [resolveSdkDir]: `local.properties`, then `ANDROID_HOME`/`ANDROID_SDK_ROOT`).
+ * `mcp/src/adb.ts` prefers the env var when present and keeps its own walk as
+ * the fallback for a server started some other way.
  *
- * The resolution below duplicates `PortholePlugin.sdkDirectory` rather than
- * calling it: that method is private to a file outside this task's owned
- * set (see GRA-119's report). A follow-up should extract one shared
- * implementation once a change can touch both files.
+ * GRA-150: [resolveSdkDir] used to exist twice — once here, once as a private
+ * `sdkDirectory` in [PortholePlugin], because that method resolves `adb`
+ * itself and this task's config generation predates it (see GRA-119's
+ * report). They were kept in step by hand across two blank-`sdk.dir` fixes;
+ * now [PortholePlugin] calls this one function too.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -354,10 +354,11 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
 
 /**
  * `sdk.dir` from `local.properties` in [projectRoot], falling back to
- * `ANDROID_HOME` then `ANDROID_SDK_ROOT`. Mirrors `PortholePlugin`'s private
- * `sdkDirectory`, used to resolve `adb` — see the class doc on
- * [PortholeMcpConfigTask] for why this is a duplicate rather than a shared
- * call.
+ * `ANDROID_HOME` then `ANDROID_SDK_ROOT`. The one SDK-directory resolver for
+ * this module (GRA-150) — [PortholePlugin] calls this too, to resolve `adb`,
+ * rather than keeping its own copy. The two had drifted apart only in the
+ * sense that a bug fix (the blank-`sdk.dir` handling below) had to be applied
+ * to both by hand; nothing about them was ever meant to differ.
  *
  * `Properties.load` is what does the real work here: `local.properties` is
  * Java-properties-escaped (a Windows path's drive-letter colon and every
@@ -369,13 +370,72 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
  * directory, so a blank line would have written the Gradle daemon's cwd into
  * `.mcp.json` as the Android SDK — a confidently wrong answer, and worse than
  * the omission that lets the MCP server fall back to its own walk.
+ *
+ * GRA-150, AC3: a *relative* `sdk.dir` is resolved against [projectRoot], not
+ * against this JVM's own working directory. `File(it).absolutePath` alone
+ * would do the latter — a Gradle daemon is a long-lived process the launcher
+ * reuses across unrelated project directories, so its `user.dir` is wherever
+ * the daemon happened to start, not wherever the build was invoked from —
+ * and that answer was silently wrong before this ticket rather than merely
+ * unlikely: `local.properties` is text a person can hand-edit, and Android
+ * Studio's own writes are always absolute, so the relative case is rare but
+ * not hypothetical.
+ *
+ * The absolute case has to be handled explicitly rather than left to
+ * `File(projectRoot, it)`: on Windows, `java.io.File`'s two-argument
+ * constructor does *not* discard the parent just because the child looks
+ * absolute — `File(File("C:\\a"), "C:\\b")` is `C:\a\b`, not `C:\b`, whenever
+ * parent and child share a drive letter (`WinNTFileSystem.resolve`, working
+ * as documented — a real quirk, not a bug — but the wrong tool here). This
+ * cost an hour to a failing `Windows-shaped path` test before the explicit
+ * `isAbsolute` check below was added; the mistake is worth naming so nobody
+ * reaches for the two-argument constructor here again. `File(it).isAbsolute`
+ * correctly recognises a *fully* absolute drive-letter path (`C:\…`) and a UNC
+ * path, and correctly refuses a POSIX-shaped `/…` on Windows (it belongs to
+ * the current drive, not the filesystem root), matching the platform-dependent
+ * shapes this file's tests already document. It does **not** recognise a
+ * drive-letter path with no separator after the colon (`C:foo`) as absolute —
+ * that shape gets its own check below, because it is not "relative" either.
+ *
+ * GRA-150 QA: a **drive-relative** `sdk.dir` — `C:foo`, meaning "foo, relative
+ * to whatever the current directory on drive C happens to be", a real Windows
+ * path concept distinct from both absolute and ordinary-relative — is not
+ * absolute by `File.isAbsolute`'s definition, so it fell into the
+ * `File(projectRoot, it)` branch on the first pass of this fix. That branch
+ * does not "resolve it against projectRoot" for this shape; `WinNTFileSystem`
+ * splices the two strings together as `<projectRoot>\C:foo`, a colon inside a
+ * path segment that Windows refuses to open — worse than doing nothing, and
+ * worse than what this function did before GRA-150 (`File(it).absolutePath`
+ * alone, which Windows resolves against the drive's own current directory: a
+ * valid path, merely not anchored to the project). There is no reliable way
+ * to ask the JVM what "the current directory on drive C" is, so rather than
+ * invent an answer, this shape is deliberately left exactly as it resolved
+ * before this ticket: [isWindowsDriveRelative] routes it to `candidate`
+ * unjoined, matching `main`'s old behaviour on the one input where this
+ * ticket would otherwise have made things worse. On every other platform a
+ * colon is an ordinary filename character, so `C:foo` there is exactly as
+ * relative as it looks and takes the normal `File(projectRoot, it)` branch.
+ *
+ * `mcp/src/adb.ts`'s `sdkDirFromLocalProperties` does not resolve a relative
+ * value at all today — it returns the raw string from the file, and whatever
+ * eventually stats it resolves that string against its own process's cwd —
+ * so it does not yet agree with the answer here; see this ticket's report for
+ * why that is a TypeScript-side follow-up rather than a change made from this
+ * file.
  */
 internal fun resolveSdkDir(projectRoot: File): File? {
     val local = File(projectRoot, "local.properties")
     if (local.isFile) {
         val props = Properties()
         local.inputStream().use(props::load)
-        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
+        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let {
+            val candidate = File(it)
+            return when {
+                candidate.isAbsolute -> candidate
+                isWindowsDriveRelative(it) -> candidate
+                else -> File(projectRoot, it)
+            }
+        }
     }
     return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
         .mapNotNull { System.getenv(it) }
@@ -383,6 +443,22 @@ internal fun resolveSdkDir(projectRoot: File): File? {
         .map(::File)
         .firstOrNull { it.isDirectory }
 }
+
+/**
+ * True for a Windows drive-relative path — a letter, a colon, and then
+ * anything other than a separator (`C:foo`, or bare `C:`) — which is neither
+ * absolute (`File.isAbsolute` says so correctly) nor safely joinable with a
+ * parent (see the comment on [resolveSdkDir]). Gated on [isWindowsHost]
+ * because the same string is an unremarkable relative filename everywhere
+ * else: a colon is legal in a POSIX filename, and `File(projectRoot, "C:foo")`
+ * there is a normal, correct join.
+ */
+private fun isWindowsDriveRelative(value: String): Boolean =
+    isWindowsHost() && value.length >= 2 && value[0].isLetter() && value[1] == ':' &&
+        (value.length == 2 || (value[2] != '\\' && value[2] != '/'))
+
+private fun isWindowsHost(): Boolean =
+    System.getProperty("os.name").orEmpty().lowercase().contains("win")
 
 /**
  * Fetches Perfetto's trace_processor, once, and says where it went.
