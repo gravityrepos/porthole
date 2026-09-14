@@ -660,6 +660,40 @@ describe("protocol mismatch", () => {
 // GRA-96 QA follow-up: the two copies of PROTOCOL_VERSION do not drift
 // ---------------------------------------------------------------------------
 
+/**
+ * GRA-166 item 7, QA round 1 (on GRA-163, which owns this file): the
+ * `matchAll` + exactly-one fix below caught a real drift, but a QA attack
+ * found a false-positive path of its own — a doc comment that happens to
+ * quote the *current, correct* value (not a stale one) still counts as a
+ * second match, so the exactly-one assertion trips on a perfectly clean
+ * tree. That is a guard crying wolf, which by this project's own standard
+ * (see GRA-168, filed for the sibling case in surface.test.ts) is worse
+ * than no guard: a false positive gets deleted by the next person who hits
+ * it, and then the real gap is open again with nobody watching.
+ *
+ * Stripping comments before scanning — the technique surface.test.ts's own
+ * guard already uses — removes the false positive at the source: a comment
+ * quoting the declaration, correct or stale, is blanked before the regex
+ * ever sees it, so only the real `internal const val PROTOCOL_VERSION = …`
+ * can ever match. `matchAll` + exactly-one stays on afterward as a shape
+ * check: on production Kotlin, exactly one real declaration should exist
+ * outside comments, and finding zero or more than one is a parser giving up
+ * rather than guessing, not a drift assertion.
+ *
+ * Duplicated here rather than imported from surface.test.ts: this ticket's
+ * `Owns` is `device.test.ts`, not `surface.test.ts` (a different agent
+ * owns that file, per BRIEFING.md's rule that two nodes never own one
+ * file), and the function is small enough that duplicating it is cheaper
+ * than coupling two files neither of us is meant to both edit.
+ */
+function stripComments(text: string): string {
+  const noBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "));
+  return noBlockComments
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+}
+
 describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
   // GRA-96's whole point is that the receiving side checks what it is given
   // instead of trusting it silently -- but that check is only as good as
@@ -688,18 +722,22 @@ describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
     // the file than `internal const val PROTOCOL_VERSION = …` and shadows
     // it, so a real bump on the Kotlin side reads as the comment's stale
     // number and this test keeps passing — green for the exact drift it
-    // exists to catch. `matchAll` plus an assertion of exactly one match
-    // turns that into a loud failure instead: two occurrences means the
-    // parser cannot tell which one is the real constant, and that is worth
-    // stopping for rather than silently picking one.
-    const matches = [...kotlin.matchAll(/internal const val PROTOCOL_VERSION\s*=\s*(\d+)/g)];
+    // exists to catch.
+    //
+    // QA round 1: comments are stripped first (see stripComments() above),
+    // so a doc comment quoting the declaration — stale *or* correct — never
+    // reaches the regex at all. `matchAll` plus an assertion of exactly one
+    // match, kept on production code only, turns a genuinely ambiguous file
+    // (two real declarations, which should never happen) into a loud
+    // failure instead of a silent guess.
+    const matches = [...stripComments(kotlin).matchAll(/internal const val PROTOCOL_VERSION\s*=\s*(\d+)/g)];
     expect(
       matches.length,
       matches.length === 0
         ? "Protocol.kt's PROTOCOL_VERSION declaration was not found in the expected shape"
         : `found ${matches.length} things that look like 'internal const val PROTOCOL_VERSION = N' in ` +
-            "Protocol.kt (a doc comment quoting the declaration, most likely) -- this parser cannot tell " +
-            "which one is the real constant, so it refuses to guess rather than silently taking the first.",
+            "Protocol.kt outside comments -- this parser cannot tell which one is the real constant, " +
+            "so it refuses to guess rather than silently taking the first.",
     ).toBe(1);
     const kotlinVersion = Number(matches[0][1]);
     expect(
