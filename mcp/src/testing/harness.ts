@@ -4,7 +4,7 @@ import net, { type AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { DeviceClient, type DeviceEvent, type Hello } from "../device.js";
+import { DeviceClient, type ConnectionState, type DeviceEvent, type Hello } from "../device.js";
 import { TimelineServer } from "../timeline.js";
 import { createPortholeServer } from "../index.js";
 
@@ -412,6 +412,76 @@ export async function buildRig(options: BuildRigOptions = {}): Promise<Rig> {
       await fakeDevice.close();
     },
   };
+}
+
+/**
+ * GRA-163: builds a rig whose ring already holds events, then leaves
+ * `device` sitting in `state`. This is the fixture GRA-157's own handshake
+ * block never had: every test there built an empty ring by construction —
+ * `buildRaceRig()` in index.test.ts never pushes anything before calling a
+ * tool — which is exactly the one input where a stale, still-buffered ring
+ * left behind by an exited process cannot appear at all. Nine commits and
+ * three QA rounds were defended against that one input.
+ *
+ * The recipe is the same for every state past "connected": connect for
+ * real, get a hello, push events so the ring is non-empty, then force a
+ * real disconnect. The ring survives it untouched — nothing but a new
+ * `hello` ever clears it (see timeline.ts) — which is the whole point:
+ * `device.lastExited` gets set (device.ts's close handler) while the ring
+ * still holds what that now-exited process produced, the exact combination
+ * GRA-163 is about.
+ *
+ * "connecting" and "handshaking" are driven by an explicit stop()/start()
+ * rather than by waiting on DeviceClient's own automatic reconnect timer —
+ * both faster (no RECONNECT_MIN_MS delay) and, for "connecting", actually
+ * deterministic: start() re-enters connect() synchronously, and
+ * connect() sets "connecting" before the asynchronous TCP handshake even
+ * begins (see device.ts), so checking state immediately after start()
+ * returns, with no `await` in between, cannot race a loopback connect that
+ * resolves in well under a millisecond. "handshaking" still needs a
+ * `waitUntil` — reaching it depends on a real socket "connect" event — but
+ * holding the reconnect's own hello open (the same trick `buildRaceRig` in
+ * index.test.ts uses for the very first connection) means it cannot then
+ * race past that state into "connected" on its own.
+ */
+export async function buildRingInState(
+  state: ConnectionState,
+  events: Array<{ event: string; t: number; data?: Record<string, unknown> }> = [
+    { event: "recompose", t: 1_000, data: { name: "Cart" } },
+  ],
+): Promise<Rig> {
+  const rig = await buildRig();
+  await rig.pushEvents(events);
+  if (state === "connected") return rig;
+
+  // Every other state needs a real disconnect first: the far end drops the
+  // socket without a goodbye, the same as a killed app.
+  rig.fakeDevice.disconnectAll();
+  await waitUntil(() => rig.device.state === "disconnected");
+  // Cancels the reconnect DeviceClient just scheduled for itself, so state
+  // does not keep moving while a test built for "disconnected" is still
+  // making assertions.
+  rig.device.stop();
+  if (state === "disconnected") return rig;
+
+  if (state === "connecting") {
+    rig.device.start();
+    if ((rig.device.state as ConnectionState) !== "connecting") {
+      throw new Error(
+        `buildRingInState: expected 'connecting' immediately after start(), got '${rig.device.state}'`,
+      );
+    }
+    return rig;
+  }
+
+  if (state === "handshaking") {
+    rig.fakeDevice.on("hello", () => new Promise(() => {}));
+    rig.device.start();
+    await waitUntil(() => rig.device.state === "handshaking", 5_000);
+    return rig;
+  }
+
+  throw new Error(`buildRingInState: unhandled state '${state}'`);
 }
 
 export type { DeviceEvent };

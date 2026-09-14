@@ -458,6 +458,57 @@ describe("GRA-157: the three sites that used to read hello without checking stat
   });
 });
 
+describe("GRA-163: the ring's session boundary", () => {
+  // The ring (`TimelineServer.buffer()`) is the thing GRA-163 is about: it
+  // is cleared on one specific signal and must be left alone by everything
+  // else. These two tests pin both halves directly against TimelineServer,
+  // without going through DeviceClient's real socket at all — the
+  // constructor's hello handler is the only place the clear happens (see
+  // timeline.ts), so this is the cheapest place to prove it does, and does
+  // not, fire.
+  it("a new hello with a different startedAt clears the ring; a repeated one does not", () => {
+    // Establishes this session's origin first, the same as production:
+    // `startedAt` is undefined until the very first hello, so that first
+    // hello also "clears" an already-empty ring — a no-op, but establishes
+    // the baseline the rest of this test is against.
+    timeline.device.emit("hello", { startedAt: 1, packageName: "com.example.shop" });
+    timeline.device.emit("event", event(1, "recompose"));
+    timeline.device.emit("event", event(2, "recompose"));
+    expect(timeline.server.buffer()).toHaveLength(2);
+
+    // The same process saying hello again (a duplicate, e.g. over a flaky
+    // link) must not discard what has already been collected — only a
+    // startedAt that actually differs means a new process.
+    timeline.device.emit("hello", { startedAt: 1, packageName: "com.example.shop" });
+    expect(timeline.server.buffer()).toHaveLength(2);
+
+    // A genuinely new process: sequence numbers restart with it, so keeping
+    // the old events would put two timelines on one axis, and make the new
+    // process's first events look like ones already seen.
+    timeline.device.emit("hello", { startedAt: 2, packageName: "com.example.shop" });
+    expect(timeline.server.buffer()).toHaveLength(0);
+  });
+
+  it("the ring is not cleared by a close — only by a new hello — so it still holds what an exited process produced", () => {
+    timeline.device.emit("hello", { startedAt: 1, packageName: "com.example.shop" });
+    timeline.device.emit("event", event(1, "recompose"));
+    expect(timeline.server.buffer()).toHaveLength(1);
+
+    // GRA-163: this is the other half of the session boundary a hello
+    // already had. A real close fires DeviceClient's "state" event with
+    // "disconnected" — exactly this — and TimelineServer has only ever
+    // listened for "event"/"state"/"hello" (see its constructor). The
+    // buffer must still hold what the exited process produced afterward:
+    // the post-mortem case, "what happened before it died", is exactly
+    // when someone needs those events most. (Whose data it is once it is
+    // read back is device.ts's `lastExited` and index.ts's
+    // `exitedProcessField()` — this test only pins that the ring itself
+    // survives.)
+    timeline.device.emit("state", "disconnected");
+    expect(timeline.server.buffer()).toHaveLength(1);
+  });
+});
+
 describe("the static files", () => {
   const uiDir = fileURLToPath(new URL("../ui/dist/", import.meta.url));
   const sibling = fileURLToPath(new URL("../ui/dist-sibling-fixture/", import.meta.url));

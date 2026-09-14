@@ -417,12 +417,21 @@ export class DeviceClient extends EventEmitter {
    * and only a close that had a `hello` ever sets it), so a fresh server
    * that has never seen a device says exactly what it said before this
    * ticket.
+   *
+   * A single `\n`, not a blank line: every tool's `ok()` helper splits its
+   * own "summary\n\n{json}" on the first blank line to hand a test the
+   * payload half (see testing/harness.ts's parsePayload()), so a second
+   * blank line inside the summary itself would be read as the boundary
+   * instead, and everything after it — this sentence, and the real JSON —
+   * would fail to parse as the payload. Single newlines nest inside the
+   * summary safely; `notConnectedMessage()` below already relies on the
+   * same thing for its own numbered list.
    */
   private withExitedSessionNote(base: string): string {
     if (!this.lastExited) return base;
     const { hello, disconnectedAt } = this.lastExited;
     return (
-      `${base}\n\nWhatever is still buffered is from ${hello.packageName} on ${hello.device}, ` +
+      `${base}\nWhatever is still buffered is from ${hello.packageName} on ${hello.device}, ` +
       `which exited at ${new Date(disconnectedAt).toISOString()}. That is the last thing it did, ` +
       "not what is happening now."
     );
