@@ -1179,9 +1179,9 @@ for the metrics that actually moved:
 | `mainThread.worstMs` | 453–649 | +43% (453→649) |
 
 `porthole compare`'s default noise floor (10% relative *and* 3ms absolute,
-`mcp/src/report.ts`) is not wide enough to absorb this: three of the four
-consecutive pairs would have printed a REGRESSED or improved line against
-each other despite nothing in the app changing. `http.calls` and
+`mcp/src/report.ts`) is not wide enough to absorb this: all three of the
+consecutive pairs the four runs form would have printed a REGRESSED or
+improved line against each other despite nothing in the app changing. `http.calls` and
 `http.p95Ms` also swung between 0 and 2 calls across otherwise-identical
 runs — a nine-second capture is short enough that whether the deep-linked
 screen's network fetch starts (let alone finishes) inside the recording

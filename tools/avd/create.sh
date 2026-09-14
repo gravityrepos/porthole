@@ -217,8 +217,17 @@ else
   # observed (QA on a471739) to still leave the AVD writing a
   # 'default_boot' snapshot on exit, because fastboot.forceFastBoot and the
   # firstboot.* keys were left at the pixel_6 profile's defaults (all "yes").
-  # Setting all five together removes the drift instead of relying on one
-  # key outranking four contradictory ones.
+  # Setting all five together guarantees every boot is a cold *load* rather
+  # than relying on one key outranking four contradictory ones: a QA boot
+  # with a default_boot snapshot present and no -no-snapshot flag reached
+  # boot_completed at 18.3s with no snapshot load in the log.
+  #
+  # It does NOT stop the snapshot being *written* on exit, and the earlier
+  # wording here claimed it did. Save-on-exit is governed by the AVD's
+  # quickbootChoice.ini ("saveOnExit = true"), which neither script writes,
+  # and by -no-snapshot-save at launch. Reproducibility is unaffected --
+  # what gets written is never read back -- but it costs ~4GB of ram.img
+  # per AVD, which is worth knowing before CI caches an AVD directory.
   set_ini_key "snapshot.present" "no"
   set_ini_key "fastboot.forceColdBoot" "yes"
   set_ini_key "fastboot.forceFastBoot" "no"

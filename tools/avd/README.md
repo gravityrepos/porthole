@@ -50,9 +50,12 @@ worse, succeeds against the wrong one.
 `system-images;android-35;google_atd;x86_64` names a package, not a fixed
 set of bits. `avd-spec.json` also records the image's `ro.build.id` and
 `ro.build.version.incremental`, read straight out of the downloaded image's
-`build.prop`. Both scripts print a warning if what actually installed
-doesn't match the recorded pin — that is the one signal that would tell you
-Google has republished the image and this spec needs a deliberate re-pin.
+`build.prop`. Both scripts **fail** — exit 1, not merely warn — if what
+actually installed doesn't match the recorded pin. That mismatch is the one
+signal that would tell you Google has republished the image and this spec
+needs a deliberate re-pin, and carrying on past it would produce a baseline
+whose device is not the device the spec names, which is the whole failure
+this pin exists to prevent.
 
 ## CI hand-off (GRA-101)
 
