@@ -43,6 +43,8 @@ internal class DeviceCollector(private val ring: EventRing) {
     private var foreground = false
     private var receiver: BroadcastReceiver? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+    private var componentCallbacks: ComponentCallbacks2? = null
 
     fun install(app: Application): Boolean {
         emitProfile(app)
@@ -55,11 +57,17 @@ internal class DeviceCollector(private val ring: EventRing) {
 
     fun stop(app: Application) {
         receiver?.let { runCatching { app.unregisterReceiver(it) } }
+        receiver = null
         networkCallback?.let { callback ->
             runCatching {
                 connectivity(app)?.unregisterNetworkCallback(callback)
             }
         }
+        networkCallback = null
+        lifecycleCallbacks?.let { runCatching { app.unregisterActivityLifecycleCallbacks(it) } }
+        lifecycleCallbacks = null
+        componentCallbacks?.let { runCatching { app.unregisterComponentCallbacks(it) } }
+        componentCallbacks = null
     }
 
     // -- the machine it is running on ---------------------------------------
@@ -135,7 +143,7 @@ internal class DeviceCollector(private val ring: EventRing) {
      * already have it.
      */
     private fun watchLifecycle(app: Application) {
-        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
                 started += 1
                 if (started == 1 && !foreground) {
@@ -157,7 +165,9 @@ internal class DeviceCollector(private val ring: EventRing) {
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, out: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
-        })
+        }
+        lifecycleCallbacks = callbacks
+        app.registerActivityLifecycleCallbacks(callbacks)
     }
 
     // -- rotation, dark mode, font scale, and memory pressure ---------------
@@ -167,7 +177,7 @@ internal class DeviceCollector(private val ring: EventRing) {
         var lastDark = isDark(app.resources.configuration)
         var lastFontScale = app.resources.configuration.fontScale
 
-        app.registerComponentCallbacks(object : ComponentCallbacks2 {
+        val callbacks = object : ComponentCallbacks2 {
             override fun onConfigurationChanged(configuration: Configuration) {
                 val rotation = rotationOf(app)
                 if (rotation != lastRotation) {
@@ -210,7 +220,9 @@ internal class DeviceCollector(private val ring: EventRing) {
             override fun onLowMemory() {
                 emit("lowMemory", emptyMap())
             }
-        })
+        }
+        componentCallbacks = callbacks
+        app.registerComponentCallbacks(callbacks)
     }
 
     // -- battery, doze, power save ------------------------------------------

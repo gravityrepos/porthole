@@ -33,6 +33,23 @@ internal class LogCollector(
      * needed writing, a dropped client would spin.
      */
     private val excludeTags: Set<String> = setOf(PORTHOLE_TAG),
+    /**
+     * How [stream] obtains the logcat process. A test seam, not a behaviour
+     * change: the default is exactly what production always did before this
+     * parameter existed. On a device or emulator `logcat` is a real process
+     * whose stdout pipe blocks the reader thread until `stop()`'s
+     * `process.destroy()` ends it — a native blocking read that
+     * `Thread.interrupt()` cannot reach. On a host with no `logcat` on PATH
+     * (this repository's own Windows CI box among them), both spawn attempts
+     * fail in milliseconds and the thread exits on its own regardless of
+     * whether `stop()` ever runs, which is exactly what let `s.logs.stop()`
+     * be deleted from `Porthole.kt` without a single test noticing. Injecting
+     * a stub here — a real, still-running process, not a fake — lets a test
+     * reproduce the blocking-pipe shape without a device.
+     */
+    private val spawn: (List<String>) -> java.lang.Process? = { command ->
+        runCatching { ProcessBuilder(command).redirectErrorStream(true).start() }.getOrNull()
+    },
 ) {
     private val entries = ArrayDeque<LogEntry>()
     private val lock = Any()
@@ -154,10 +171,6 @@ internal class LogCollector(
         if (next.t - t > CONTINUATION_WINDOW_MS) return false
         return STACK_FRAME.containsMatchIn(next.message) || THROWABLE_HEAD.matches(next.message)
     }
-
-    private fun spawn(command: List<String>): java.lang.Process? = runCatching {
-        ProcessBuilder(command).redirectErrorStream(true).start()
-    }.getOrNull()
 
     private fun record(entry: LogEntry) {
         synchronized(lock) {

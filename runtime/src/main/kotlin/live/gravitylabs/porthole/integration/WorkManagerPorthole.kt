@@ -9,6 +9,7 @@ import androidx.work.WorkQuery
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -29,10 +30,22 @@ import java.util.concurrent.TimeUnit
  * So the timeline side observes WorkManager's own change feed and opens a span
  * per attempt. Per attempt, not per job: a retry is usually the thing you are
  * hunting, and folding it into one long bar is exactly what hides it.
+ *
+ * An instance, not the stateless object this used to be. `observe()` used to
+ * build its CoroutineScope as a local variable inside a top-level function and
+ * `launch` a collector against it; nothing kept that scope, so nothing —
+ * shutdown() included — could ever cancel it, and the flow subscription plus
+ * the `inflight.workSupplier` closure it installed simply outlived every
+ * session that created them. Holding scope and inflight as fields is what
+ * gives [stop] something to undo, and constructing this only after
+ * `androidx.work.WorkManager` is confirmed present (see [live.gravitylabs.porthole.Porthole.install])
+ * is what keeps that safe: [allStates] touches [WorkInfo.State] in its
+ * initializer, so building an instance in an app without work-runtime on the
+ * classpath would throw before anything else ran.
  */
-internal object WorkManagerPorthole {
+internal class WorkManagerPorthole {
 
-    private val ALL_STATES = listOf(
+    private val allStates = listOf(
         WorkInfo.State.ENQUEUED,
         WorkInfo.State.RUNNING,
         WorkInfo.State.SUCCEEDED,
@@ -41,8 +54,12 @@ internal object WorkManagerPorthole {
         WorkInfo.State.CANCELLED,
     )
 
+    private var scope: CoroutineScope? = null
+    private var inflight: InflightCollector? = null
+
     fun install(context: Context, inflight: InflightCollector, ring: EventRing): Boolean {
         val manager = runCatching { WorkManager.getInstance(context) }.getOrNull() ?: return false
+        this.inflight = inflight
         inflight.workSupplier = { query(manager) }
         // getWorkInfosFlow arrived in work 2.9. On an older version the app
         // still gets `inflight`; it just does not get the lane.
@@ -50,11 +67,25 @@ internal object WorkManagerPorthole {
         return true
     }
 
+    /**
+     * Undoes [install]: cancels the flow subscription this opened and detaches
+     * the `inflight` query, so neither outlives the session that started them.
+     * Safe to call whether or not [install] ever got as far as [observe] —
+     * both fields are null until it does.
+     */
+    fun stop() {
+        scope?.cancel()
+        scope = null
+        inflight?.workSupplier = null
+        inflight = null
+    }
+
     private fun observe(manager: WorkManager, ring: EventRing) {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val query = WorkQuery.Builder.fromStates(ALL_STATES).build()
+        val newScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        scope = newScope
+        val query = WorkQuery.Builder.fromStates(allStates).build()
         val tracker = AttemptTracker(ring)
-        scope.launch {
+        newScope.launch {
             manager.getWorkInfosFlow(query).collect { infos -> tracker.update(infos) }
         }
     }
@@ -66,9 +97,9 @@ internal object WorkManagerPorthole {
      * including jobs that finished long ago. Only a transition *into* RUNNING
      * opens a span, so that history seeds the tracker without inventing events.
      */
-    private class AttemptTracker(private val ring: EventRing) {
+    private class Open(val spanId: String, val startedAt: Long, val attempt: Int)
 
-        private class Open(val spanId: String, val startedAt: Long, val attempt: Int)
+    private inner class AttemptTracker(private val ring: EventRing) {
 
         private val states = HashMap<String, WorkInfo.State>()
         private val running = HashMap<String, Open>()
@@ -177,5 +208,7 @@ internal object WorkManagerPorthole {
         }
     }
 
-    private const val QUERY_TIMEOUT_MS = 750L
+    private companion object {
+        const val QUERY_TIMEOUT_MS = 750L
+    }
 }

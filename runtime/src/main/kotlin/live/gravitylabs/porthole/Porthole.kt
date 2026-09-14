@@ -102,12 +102,16 @@ object Porthole {
         val frames: FrameCollector,
         val memory: MemoryCollector,
         val deviceContext: DeviceCollector,
+        val autoWire: AutoWire,
         val watchdog: MainThreadWatchdog,
         val nav: NavCollector?,
         val nav3: BackStackCollector,
+        val workManager: WorkManagerPorthole?,
         val server: PortholeSocketServer,
         val startedAt: Long,
         val collectors: List<String>,
+        val setupHandler: Handler,
+        val setupTask: Runnable,
     )
 
     // -- lifecycle ---------------------------------------------------------
@@ -147,6 +151,7 @@ object Porthole {
             val frames = FrameCollector(ring)
             val memory = MemoryCollector(ring)
             val deviceContext = DeviceCollector(ring)
+            val autoWire = AutoWire(semantics, state)
             val watchdog = MainThreadWatchdog(ring, appPackages)
 
             val collectors = mutableListOf("recompositions", "semantics_tree", "state", "inflight", "logs")
@@ -162,11 +167,46 @@ object Porthole {
             watchdog.start()
             collectors += "main_thread"
 
-            if (classPresent("androidx.work.WorkManager")) {
-                if (WorkManagerPorthole.install(app, inflight, ring)) collectors += "workmanager"
+            // Nullable and only constructed once WorkManager is confirmed
+            // present: WorkManagerPorthole's own fields reference WorkInfo,
+            // so building an instance before that check would throw
+            // NoClassDefFoundError in an app that never depended on
+            // work-runtime in the first place. An instance rather than the
+            // stateless object this used to be, so shutdown() has something
+            // to call stop() on — the coroutine scope observe() opens used to
+            // live only in that function's local variable, reachable by
+            // nothing once it returned, session included.
+            val workManager = if (classPresent("androidx.work.WorkManager")) {
+                WorkManagerPorthole().also { wm ->
+                    if (wm.install(app, inflight, ring)) collectors += "workmanager"
+                }
+            } else {
+                null
             }
 
+            snapshots.start()
+            logs.start()
+            memory.start()
+            collectors += "memory"
+            if (deviceContext.install(app)) collectors += "device"
+            if (autoWire.install(app)) collectors += "autowire"
+
+            // Snapshotted rather than handed over live: Session used to receive
+            // this same mutable list and rely on every append above already
+            // having happened by the time anything read `collectors` back, which
+            // held only because nothing had made a copy yet. Building the final
+            // list before Session exists means that is no longer something a
+            // later reordering could quietly break.
+            val finalCollectors = collectors.toList()
+
             val server = PortholeSocketServer(port, ring)
+            // Held as fields, not posted from a value nobody keeps, so
+            // shutdown() can cancel this specific callback rather than
+            // leaving it to fire into a session that has already ended. Ten
+            // install/shutdown cycles used to queue ten of these, each
+            // outliving the session that scheduled it.
+            val setupHandler = Handler(Looper.getMainLooper())
+            val setupTask = Runnable { Setup.log() }
             val s = Session(
                 app = app,
                 port = port,
@@ -181,27 +221,25 @@ object Porthole {
                 frames = frames,
                 memory = memory,
                 deviceContext = deviceContext,
+                autoWire = autoWire,
                 watchdog = watchdog,
                 nav = nav,
                 nav3 = BackStackCollector(ring),
+                workManager = workManager,
                 server = server,
                 startedAt = nowMs(),
-                collectors = collectors,
+                collectors = finalCollectors,
+                setupHandler = setupHandler,
+                setupTask = setupTask,
             )
             registerMethods(s)
-            snapshots.start()
-            logs.start()
-            memory.start()
-            collectors += "memory"
-            if (deviceContext.install(app)) collectors += "device"
-            if (AutoWire(semantics, state).install(app)) collectors += "autowire"
             server.start()
             writeConnectionFile(app, port)
             session = s
-            Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${collectors.joinToString()}")
+            Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
             // After the app has had a chance to build its clients. Asking
             // now would report everything as missing.
-            Handler(Looper.getMainLooper()).postDelayed({ Setup.log() }, SETUP_REPORT_DELAY_MS)
+            setupHandler.postDelayed(setupTask, SETUP_REPORT_DELAY_MS)
         }
     }
 
@@ -216,13 +254,18 @@ object Porthole {
     fun shutdown() {
         synchronized(this) {
             val s = session ?: return
+            s.setupHandler.removeCallbacks(s.setupTask)
             s.server.stop()
             s.snapshots.stop()
             s.logs.stop()
-            s.frames.stop()
+            s.frames.stop(s.app)
+            s.memory.stop()
+            s.deviceContext.stop(s.app)
+            s.autoWire.stop()
             s.watchdog.stop()
             s.recompositions.stop()
             s.nav?.unregister()
+            s.workManager?.stop()
             session = null
         }
     }
