@@ -959,14 +959,17 @@ describe("GRA-170: an ordinary reconnect's startedAt, not a fixture accident, de
       expect(rig.device.hello?.startedAt).toBe(pinnedStartedAt);
       expect(rig.timeline.buffer()).toHaveLength(before);
 
-      // The other half of the same claim, in the same test: a comparison
-      // that has simply stopped clearing anything (e.g. `this.startedAt`
-      // never gets assigned) would pass everything above vacuously — the
-      // ring "carries forward" whether or not startedAt equality was ever
-      // actually checked. Reconnecting once more with a genuinely different
-      // startedAt, and requiring the ring to clear *this* time, rules that
-      // out: only a comparison that treats "equal" and "different" as
-      // distinct cases passes both halves.
+      // The other half of the same claim, in the same test: inverting the
+      // comparison to clear only when startedAt EQUALS the previous value
+      // (the inverse of the real rule) leaves `this.startedAt` permanently
+      // undefined -- a real number is never `===` to it, so the assignment
+      // never fires, on this hello or any later one. The ring then never
+      // clears again for the rest of the test, which would pass everything
+      // asserted above vacuously regardless of whether the two startedAt
+      // values above actually differ. Reconnecting once more with a
+      // genuinely different startedAt, and requiring the ring to clear
+      // *this* time, rules that out: only a comparison that treats "equal"
+      // and "different" as distinct cases passes both halves.
       rig.fakeDevice.disconnectAll();
       await waitUntil(() => rig.device.state === "disconnected");
       rig.device.stop();

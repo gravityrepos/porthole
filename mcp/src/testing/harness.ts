@@ -492,6 +492,18 @@ export async function buildRingInState(
   if (state === "disconnected") return rig;
 
   if (state === "connecting") {
+    // GRA-170 note: before that ticket, the default hello handler returned
+    // the same literal startedAt on every call, so even if this reconnect
+    // finished in the background before a caller got around to asserting
+    // anything, the new hello would always compare equal to the old one and
+    // the "clear" branch could never fire. The default now advances on
+    // every call (see DEFAULT_STARTED_AT_MS above), so a reconnect that
+    // actually completes here WOULD clear the ring once its hello lands.
+    // This is safe only because every caller returns to a synchronous
+    // assertion immediately -- no `await` between this function returning
+    // and the check (see AC4 in index.test.ts) -- so the loopback connect
+    // cannot resolve in between. An `await` inserted there, or any
+    // asynchronous work before the assertion, could race this ring away.
     rig.device.start();
     if ((rig.device.state as ConnectionState) !== "connecting") {
       throw new Error(
