@@ -24,15 +24,31 @@ interface RawServer {
   write(raw: string): void;
   /** Destroys every open connection without a goodbye — a killed app, not a clean stop. */
   destroyAll(): void;
+  /**
+   * Resolves once this server has accepted at least `n` connections.
+   *
+   * The client reaches "connected" when *its* TCP connect completes, which can
+   * be before this server's accept callback has run — the two are independent
+   * halves of the same handshake. A test that destroys "every open connection"
+   * at that moment can destroy an empty list, and the client then never notices
+   * anything. That is a race, not a platform difference, and it lost on the
+   * macOS runner while passing everywhere else; wait for the accept before
+   * dropping the client.
+   */
+  whenAccepted(n?: number, timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 }
 
 async function startRawServer(options: { autoHello?: boolean } = {}): Promise<RawServer> {
   const autoHello = options.autoHello ?? true;
   const sockets: net.Socket[] = [];
+  const acceptWaiters: Array<{ n: number; resolve: () => void }> = [];
 
   const server = net.createServer((socket) => {
     sockets.push(socket);
+    for (let i = acceptWaiters.length - 1; i >= 0; i--) {
+      if (sockets.length >= acceptWaiters[i].n) acceptWaiters.splice(i, 1)[0].resolve();
+    }
     // A client calling stop() destroys its socket outright, which can arrive
     // here as ECONNRESET rather than a clean FIN. That is expected — several
     // tests deliberately abandon the connection — so it must not surface as
@@ -94,6 +110,27 @@ async function startRawServer(options: { autoHello?: boolean } = {}): Promise<Ra
     },
     destroyAll() {
       for (const socket of sockets) socket.destroy();
+    },
+    whenAccepted(n = 1, timeoutMs = 3_000) {
+      if (sockets.length >= n) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `timed out waiting for ${n} accepted connection(s); ${sockets.length} accepted`,
+              ),
+            ),
+          timeoutMs,
+        );
+        acceptWaiters.push({
+          n,
+          resolve: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+        });
+      });
     },
     async close() {
       for (const socket of sockets) socket.destroy();
@@ -309,6 +346,7 @@ describe("reconnect", () => {
 
     // First failure/retry cycle — the server is still listening, so the
     // retry succeeds.
+    await server.whenAccepted(1);
     server.destroyAll();
     await waitForState(client, "disconnected");
     await waitForState(client, "connecting");
@@ -318,6 +356,9 @@ describe("reconnect", () => {
     // the successful reconnect, this wait would be roughly double the
     // first; since the TCP connect above succeeded, it should be back to
     // the minimum.
+    // The reconnect is a second accept on this server, and the same race
+    // applies to it: "connected" is the client's half of that handshake.
+    await server.whenAccepted(2);
     const t0 = Date.now();
     server.destroyAll();
     await waitForState(client, "disconnected");
@@ -337,6 +378,7 @@ describe("reconnect", () => {
     client.start();
     await waitForState(client, "connected");
 
+    await server.whenAccepted(1);
     server.destroyAll();
     await waitForState(client, "disconnected");
 
@@ -397,6 +439,7 @@ describe("pending requests on close", () => {
     await waitForState(client, "connected");
 
     const pending = client.request("nobody_handles_this");
+    await server.whenAccepted(1);
     server.destroyAll();
 
     await expect(pending).rejects.toThrow(/disconnected/);
