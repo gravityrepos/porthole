@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildTrace, type Finding } from "./trace.js";
 import type { DeviceEvent } from "./device.js";
@@ -310,5 +310,77 @@ describe("the tool surface", () => {
     } finally {
       await rig.close();
     }
+  });
+});
+
+/**
+ * Every top-level `.ts` file in `src/` except `device.ts` itself and any
+ * `*.test.ts` — `src/` is flat other than `fixtures/` (data, not code) and
+ * `testing/` (test infrastructure, already excluded from the real build by
+ * tsconfig for the same reason test files are). Non-recursive on purpose:
+ * if `src/` grows a subdirectory of production code later, that is worth
+ * noticing and deciding about, not silently picking up.
+ */
+function productionSourceFiles(): string[] {
+  const dir = new URL("./", import.meta.url);
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "device.ts")
+    .sort();
+}
+
+/**
+ * Blanks out comments without disturbing line numbers, so an offender's
+ * reported line still points at the real line. A block comment's content
+ * becomes spaces, one per character, with its own newlines left in place —
+ * so a match that would have spanned the comment's start and end markers is
+ * neither created nor hidden by the blanking; a line ("//") comment is cut
+ * from its marker to the end of its line. This does not understand string
+ * literals — a comment marker inside a quoted string would be mistaken for
+ * a real comment — which is a known, accepted gap in a file whose own
+ * `toolSource()` above makes the same kind of trade: loose about things
+ * this codebase does not actually do, strict about the one thing that
+ * matters here.
+ */
+function stripComments(text: string): string {
+  const noBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "));
+  return noBlockComments
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+}
+
+describe("ConnectionState reads (GRA-162)", () => {
+  it("never compares .state to a literal directly outside device.ts — isAttached()/isConnected()/isHandshaking() exist for exactly this", () => {
+    // GRA-162's whole argument is that tsc catches a fifth ConnectionState,
+    // because isAttached()/isConnected()/isHandshaking()/pendingMessage() are
+    // never-guarded switches every reader is supposed to call. QA proved that
+    // argument covers *new states* but not *new comparisons*: reverting any
+    // one call site back to `something.state === "connected"` still compiles
+    // and still passes every behavioural test, because the anti-pattern and
+    // the helper that replaced it are both legal TypeScript — nothing
+    // structural stops a future edit from writing the old shape again next
+    // to the helpers rather than through them.
+    //
+    // This is the write-time half of that guarantee, and it is a grep, not a
+    // type check, on purpose: nothing else in this codebase can see the
+    // *source text* of a comparison, only its result. device.ts is excluded
+    // deliberately — isAttached()/isConnected()/isHandshaking()/
+    // pendingMessage()/setState() are the one place `.state` is compared to
+    // a literal on purpose, because they are what every other file is
+    // supposed to call instead of doing this themselves.
+    const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
+    const offenders: string[] = [];
+    for (const file of productionSourceFiles()) {
+      const text = readFileSync(new URL(file, import.meta.url), "utf8");
+      const lines = stripComments(text).split("\n");
+      lines.forEach((line, index) => {
+        if (pattern.test(line)) offenders.push(`${file}:${index + 1}`);
+      });
+    }
+    expect(
+      offenders,
+      `bare ConnectionState comparison(s) outside device.ts — route through isAttached()/` +
+        `isConnected()/isHandshaking() instead:\n${offenders.join("\n")}`,
+    ).toEqual([]);
   });
 });
