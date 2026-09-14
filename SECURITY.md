@@ -28,6 +28,35 @@ Nowhere, unless you send it there.
 - The timeline UI and the MCP server both run on your machine and talk to that
   forwarded port.
 
+## The workstation timeline server
+
+The MCP server's timeline UI (`mcp/src/timeline.ts`, `TimelineServer`) is a
+second HTTP server, distinct from the on-device socket above, and it holds
+the same event buffer the UI renders — so it is worth being just as precise
+about its boundary.
+
+It binds `127.0.0.1` only, same as the device. That keeps the network out but
+not the browser: every page open on your machine can already reach
+`127.0.0.1`, and a cross-origin request — or a WebSocket upgrade — lands
+whether or not the page making it can read the reply. Two checks close that,
+applied to every request before any routing, on the WebSocket upgrade as well
+as on ordinary HTTP: the `Host` header must name one of this server's own
+addresses (its loopback spellings, plus the Vite dev port when the UI is
+proxied through it), and a request that also carries an `Origin` must have
+that origin agree with the `Host` it named — a caller may claim to be
+`http://127.0.0.1:8678`, but only when it was also addressed to
+`127.0.0.1:8678`. Both a page on the open web (wrong `Host`) and a page
+served from an allowed port but under a different origin (`Origin` disagrees
+with `Host`) are refused with a 403 before the request reaches anything that
+reads the event buffer.
+
+What this does not yet have is a session token: a value minted at start,
+printed in the URL the CLI opens, and required on every call, which would
+close the one gap the origin check cannot — a same-origin page loaded by
+accident (a stale tab, a bookmark) rather than one from elsewhere. That is
+deferred, not implemented. The origin/host check above is what currently
+stands between the timeline server and a request that isn't the UI.
+
 A trace leaves your control only when you choose to send it — pasting a report
 into a ticket, or handing a window to an assistant with **ask agent**. That is
 the moment the redaction below matters.
