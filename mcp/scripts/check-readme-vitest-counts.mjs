@@ -44,7 +44,7 @@
 //     only the four counted numbers in the suite's own sentence are compared.
 
 import { readFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import os from "node:os";
 
@@ -184,5 +184,18 @@ function main() {
   );
 }
 
-main();
-process.exit(process.exitCode ?? 0);
+export { readmeFigure, countsFromJunit };
+
+// Guard, not a bare `main()` call: check-readme-vitest-counts.test.mjs
+// imports readmeFigure/countsFromJunit from this same file to test the
+// parsing directly, and an unguarded call would run the full CLI (reading
+// README.md, exiting the process) as a side effect of that import.
+// pathToFileURL, not a raw `file://${process.argv[1]}` template: on Windows
+// process.argv[1] is a backslash path ("C:\...\x.mjs"), which does not
+// equal the forward-slash "file:///C:/.../x.mjs" that import.meta.url uses
+// — the naive comparison is false even when running this file directly,
+// which would silently skip main() entirely on every Windows invocation.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+  process.exit(process.exitCode ?? 0);
+}
