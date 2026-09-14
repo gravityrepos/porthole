@@ -163,8 +163,9 @@ jobs:
       # JVM figure went stale three times in one day. This reads the same
       # XML and fails the build instead, naming README's figure next to the
       # suite's the moment they disagree. This job only ever runs on
-      # ubuntu-latest, so unlike the server/UI check in the `node` job below,
-      # there is no cross-platform split to reason about here.
+      # ubuntu-latest, so the full split always applies here; the script
+      # also compiles a Windows/macOS branch for when an implementer runs it
+      # by hand off this job, same reasoning as the `node` job's check below.
       - name: Check README JVM test count
         if: always()
         run: python3 tools/check-readme-test-counts.py

@@ -81,10 +81,14 @@ function readmeFigure(md, label) {
   // e.g. "451 in the MCP server (...— 449 passed, 0 failed, 2 skipped)".
   // The parenthetical in README's own prose never nests parens, so a
   // non-greedy [^)]* is enough — if a future edit adds a nested paren this
-  // stops matching and fails loudly below, which is drift too.
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // stops matching and fails loudly below, which is drift too. \s+ instead
+  // of literal spaces throughout (label included): README is hand-wrapped
+  // prose, so a run of markdown-editor rewrapping can land a line break
+  // wherever a space was — including, as measured, right before the closing
+  // number of the sentence.
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
   const re = new RegExp(
-    `(\\d+)\\s+${escaped}\\s*\\([^)]*?(\\d+) passed, (\\d+) failed, (\\d+) skipped\\)`,
+    `(\\d+)\\s+${escaped}\\s*\\([^)]*?(\\d+)\\s+passed,\\s+(\\d+)\\s+failed,\\s+(\\d+)\\s+skipped\\)`,
     "s"
   );
   const m = decode(md).match(re);
