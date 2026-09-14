@@ -32,12 +32,7 @@ function trace(over: Partial<Trace> = {}): Trace {
 }
 
 describe("parsePort", () => {
-  // GRA-159 AC4 demonstration ONLY: deliberately skipped to prove the new
-  // CI summary names a skipped test rather than hiding it in a total. This
-  // commit is temporary — see the commit message — and gets reverted once
-  // a real CI run confirms this test's name appears in the "Skipped:"
-  // section of the Node job's step summary.
-  it.skip("names the option when the value is missing", () => {
+  it("names the option when the value is missing", () => {
     // porthole ui --port with nothing after it: argv[++i] is undefined.
     expect(parsePort(undefined, "--port")).toEqual({
       message: "--port needs a port number",
