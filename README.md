@@ -404,10 +404,18 @@ checkout · 9.8s · Google sdk_gphone16k_x86_64 (60Hz) · com.example.shop
            worst 276ms · most often in swapBuffers
 
   quiet: memory
+
+  frame budget 16.7ms · 214 recompositions · 4 calls (2 still open) · 11 queries
 ```
 
-The last line is not padding. A report that only ever lists problems gives no
-signal that the things it did not mention were actually checked.
+The last "quiet" line is not padding. A report that only ever lists problems
+gives no signal that the things it did not mention were actually checked.
+
+The footer's counts include spans that were still open when the capture
+ended — a call that never came back still happened and still cost the wait —
+and the `(N still open)` qualifier travels with the number it counts so "4
+calls" cannot be misread as four completions. It is left off entirely when
+nothing was open, which is almost every run.
 
 Every finding carries how strongly it can be claimed. **observed** means the
 device said so — a query ran on the main thread, a frame missed its deadline.
