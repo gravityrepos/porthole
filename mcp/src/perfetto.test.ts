@@ -647,8 +647,14 @@ describe("runScript, against a real process", () => {
   // process handle Node holds, which is exactly the situation trace_processor_
   // shell is in (a single process, nothing it spawns further) but is not what
   // `cmd.exe /c ping` is.
-  const hang = isWindows ? "for /l %i in () do @rem" : "sleep 30";
-  const short = isWindows ? "ping -n 2 127.0.0.1 >nul" : "sleep 1";
+  //
+  // The same trap on POSIX, found by the Ubuntu leg of CI: `sh -c "sleep 30"`
+  // is one process under bash and macOS's sh, which exec a lone command, but
+  // dash — Ubuntu's /bin/sh — forks it, so killing the shell left `sleep`
+  // holding the pipe and the test waited the full 30s. `exec` makes the shell
+  // become the command on every sh, which is the shape the test needs.
+  const hang = isWindows ? "for /l %i in () do @rem" : "exec sleep 30";
+  const short = isWindows ? "ping -n 2 127.0.0.1 >nul" : "exec sleep 1";
 
   it("captures a real process's stdout and a clean exit", async () => {
     const result = await runScript(binary, args("echo hello"), "", 5_000);
