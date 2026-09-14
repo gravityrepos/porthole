@@ -27,6 +27,12 @@ Nowhere, unless you send it there.
   authorisation.
 - The timeline UI and the MCP server both run on your machine and talk to that
   forwarded port.
+- The project's website is a separate thing from the tool, and the "no
+  analytics" above is a claim about the runtime, not about the site: the
+  landing page carries Vercel Web Analytics, which is first-party and
+  cookieless — the script and the beacon it sends are both same-origin, and
+  the page's `script-src 'self'; connect-src 'self'` policy means nothing on
+  it talks to another host at all.
 
 ## The workstation timeline server
 
