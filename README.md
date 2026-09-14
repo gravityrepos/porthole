@@ -1079,6 +1079,42 @@ npm start             # in another, then call open_timeline
 
 That is how the tools and the timeline UI were verified.
 
+## CI
+
+`.github/workflows/pr.yml` runs on every pull request and on every push to
+`main`. It is meant to end up required to merge — both jobs are intended as
+required status checks on `main` — but requiring a check is a
+branch-protection setting on the repository itself, not something a workflow
+file can grant, and nobody has switched it on yet. The workflow also has not
+had a run anywhere yet for that setting to point at; the founder turns it on
+once the first run exists. Two jobs, meant to both be required:
+
+- **Gradle checks** (ubuntu) — `./gradlew check`, which since GRA-75 reaches
+  the plugin's tests too (see [Building](#building) above). Test reports
+  upload as an artifact when the job fails.
+- **Node** — a matrix of ubuntu, windows and macos, because the MCP server
+  and CLI are Node and the platform bugs live there, not in the Kotlin. Each
+  leg runs `npm ci`, `npm run build`, `npm test`, `npm run test:ui`, `npm run
+  lint`, and a check that `npm pack --dry-run` still produces exactly the
+  files listed in `mcp/expected-package-files.txt` — a fixture that exists
+  because 0.1.0 shipped once with a missing README and dangling source maps,
+  and nothing in the process was watching for that.
+
+`npm test` at the mcp root does not run `mcp/ui`'s tests — its script never
+calls the `ui` workspace's `test` — so CI calls `npm test` and `npm run
+test:ui` as two separate steps rather than relying on one script to cover
+both. The preferred fix is making `npm test` itself run both suites; that is
+a change to `mcp/package.json`, which is out of this workflow's scope, and is
+left as a follow-up.
+
+Both jobs finish with `git diff --exit-code`, so a build step that
+regenerates a file this repo commits (`site/api`, if `apiDocs` ever gets
+wired into `check`) fails the PR instead of drifting in silently.
+
+No job in this workflow ever runs a publish task, and the workflow has no
+secrets — the emulator, the AGP compatibility matrix and anything nightly are
+separate, slower checks that live outside this workflow entirely.
+
 ## Emulator
 
 A captured session is only reproducible against a known device, which
