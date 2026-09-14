@@ -373,13 +373,17 @@ describe("ConnectionState reads (GRA-162)", () => {
     // it matches one spelling — `state`, `===`/`!==`, a double-quoted
     // literal, all on one line — so a line break inside the comparison, an
     // aliased or locally-copied `state` variable, reversed operand order, or
-    // single quotes all pass it unseen. The one worth naming on purpose is a
-    // hand-rolled `switch` on `ConnectionState` with no `never`-guarded
-    // default: `switch`-on-state is this ticket's own house idiom now, tsc
-    // only catches a non-exhaustive one when that guard is present, and this
-    // regex does not look for a switch at all. So: the compiler covers a new
-    // *state*; this guard covers one spelling of a new *comparison*. Neither
-    // is complete alone, and nothing here is complete either.
+    // single quotes all pass it unseen (GRA-166 item 4 closed a different
+    // gap, not any of these five — they are still open, on purpose named
+    // here rather than silently assumed fixed). The sixth spelling that used
+    // to be open here — a hand-rolled `switch` on `ConnectionState` with no
+    // `never`-guarded default — is now caught by the companion check below
+    // ("ConnectionState switches"), which reads a switch's body for the same
+    // exhaustiveness marker device.ts's own helpers use, since a switch is a
+    // different shape of comparison this regex was never going to match. So:
+    // the compiler covers a new *state*; this guard plus the one below cover
+    // two spellings of a new *comparison*, between the two of them. The
+    // other five remain open, and nothing here is complete alone.
     const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
     const offenders: string[] = [];
     for (const file of productionSourceFiles()) {
@@ -393,6 +397,76 @@ describe("ConnectionState reads (GRA-162)", () => {
       offenders,
       `bare ConnectionState comparison(s) outside device.ts — route through isAttached()/` +
         `isConnected()/isHandshaking() instead:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+});
+
+/**
+ * The gap named above and filed as GRA-166 item 4: a hand-rolled `switch` on
+ * a ConnectionState-shaped value with no `never`-guarded default. Text-based
+ * for the same reason `toolSource()` and the `===`/`!==` guard above are:
+ * nothing else in this codebase can see the *source text* of a switch, only
+ * whether tsc accepted it — and tsc accepts a non-exhaustive switch happily
+ * whenever nothing forces the unhandled case's arm to type as `never`.
+ *
+ * Not a parser, so this looks for the *shape* of the guarantee rather than
+ * asking tsc whether the switch is actually exhaustive: a `default` arm that
+ * assigns the discriminant to a `never`-typed local and throws, the way
+ * device.ts's own isAttached()/isConnected()/isHandshaking()/
+ * pendingMessage() do. A candidate switch is one whose discriminant mentions
+ * `state` and whose body handles at least one of the four ConnectionState
+ * literals — both required, so a `switch (someOtherState)` elsewhere in the
+ * codebase, or a `switch (state)` over some unrelated enum, is not mistaken
+ * for this one. Braces are balanced by hand rather than matched with another
+ * regex, because a switch body nests further braces (blocks, object
+ * literals, the `default: { ... }` arm itself) that a lazy match would close
+ * on too early.
+ */
+function switchesOnConnectionState(text: string): { line: number; body: string }[] {
+  const results: { line: number; body: string }[] = [];
+  const opener = /\bswitch\s*\(([^)]*)\)\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = opener.exec(text))) {
+    if (!/\bstate\b/.test(match[1])) continue;
+    let depth = 1;
+    let i = match.index + match[0].length;
+    for (; i < text.length && depth > 0; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}") depth--;
+    }
+    const body = text.slice(match.index + match[0].length, i - 1);
+    if (!/case\s+"(?:disconnected|connecting|handshaking|connected)"/.test(body)) continue;
+    results.push({ line: text.slice(0, match.index).split("\n").length, body });
+  }
+  return results;
+}
+
+describe("ConnectionState switches (GRA-166 item 4)", () => {
+  it("flags a hand-rolled switch on ConnectionState with no never-guarded default, outside device.ts", () => {
+    // GRA-162 made switch-on-state the house idiom (see device.ts's
+    // isAttached() and its three siblings) and, in doing so, raised the
+    // probability of the one spelling neither tsc nor the guard above
+    // reaches: a switch that handles today's four states without a
+    // never-guarded default compiles cleanly today, and silently stops
+    // being exhaustive the day a fifth ConnectionState is added — no
+    // never-typed local to trip tsc, and no `===`/`!==` for the regex above
+    // to match. This is the write-time check that closes that gap: it does
+    // not ask whether the switch is exhaustive (only tsc can answer that),
+    // it asks whether the switch is *wired* to fail loudly if it stops
+    // being exhaustive, the same way the real device.ts helpers are.
+    const offenders: string[] = [];
+    for (const file of productionSourceFiles()) {
+      const text = stripComments(readFileSync(new URL(file, import.meta.url), "utf8"));
+      for (const { line, body } of switchesOnConnectionState(text)) {
+        const neverGuarded = /default\s*:[\s\S]*?:\s*never\b/.test(body);
+        if (!neverGuarded) offenders.push(`${file}:${line}`);
+      }
+    }
+    expect(
+      offenders,
+      `switch(es) on ConnectionState with no never-guarded default arm — give the default arm a ` +
+        `'const exhaustive: never = state; throw ...' the way device.ts's isAttached() does, so a ` +
+        `fifth ConnectionState fails tsc here too:\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
 });
