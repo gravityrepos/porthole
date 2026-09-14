@@ -8,11 +8,13 @@ import {
   findTraceProcessor,
   hoistModules,
   interpret,
+  MARKER_PREFIX,
   matchBatch,
   QUESTIONS,
   runBatch,
   runScript,
   type HoistedQuestion,
+  type Question,
   type Rows,
   type RunFn,
 } from "./perfetto.js";
@@ -250,6 +252,33 @@ describe("hoistModules", () => {
     expect(questions.map((q) => q.id)).toEqual(QUESTIONS.map((q) => q.id));
     expect(questions.map((q) => q.asks)).toEqual(QUESTIONS.map((q) => q.asks));
   });
+
+  /**
+   * Every test above iterates the real `QUESTIONS`, where no single question
+   * declares two modules — `render` and `slices` each declare one, and they
+   * happen to be the same one. That makes the loop inside `hoistModules`
+   * (`while ((match = finder.exec(...)))`) structurally untested: swap it for
+   * an `if` and every existing assertion still passes, because taking only
+   * the first match of a question that only ever has one match is
+   * indistinguishable from taking all of them. This is the exact failure the
+   * code comment on `hoistModules` names as the thing to guard against, so it
+   * needs a question that actually declares two.
+   */
+  it("hoists every module a single question declares, not just its first", () => {
+    const synthetic: Question[] = [
+      {
+        id: "synthetic",
+        asks: "a question that needs two modules at once",
+        sql: `INCLUDE PERFETTO MODULE android.binder;
+              INCLUDE PERFETTO MODULE slices.with_context;
+              SELECT 1 AS one`,
+      },
+    ];
+    const { modules, questions: hoisted } = hoistModules(synthetic);
+    expect(modules).toEqual(["android.binder", "slices.with_context"]);
+    expect(hoisted[0].sql).not.toMatch(/INCLUDE\s+PERFETTO\s+MODULE/i);
+    expect(hoisted[0].sql).toContain("SELECT 1 AS one");
+  });
 });
 
 describe("matchBatch", () => {
@@ -303,6 +332,110 @@ describe("matchBatch", () => {
     const { rows, answered } = matchBatch(stdout, ["a", "b"]);
     expect(answered).toBe(1);
     expect(rows.get("a")).toEqual([{ x: "1" }]);
+    expect(rows.has("b")).toBe(false);
+  });
+
+  /**
+   * QA's reproducer for the FAIL this shipped with: a value containing two
+   * consecutive newlines used to be indistinguishable from the blank line
+   * that separated one statement's CSV block from the next, because the old
+   * `splitBlocks` split on `/\r?\n\r?\n/` rather than looking for the marker
+   * itself. Reachable through `slices`, whose `s.name` is a developer's own
+   * atrace section name — arbitrary text via `Trace.beginSection`.
+   *
+   * Scanning for the literal next marker instead of a blank line means the
+   * whole multi-line block — the corrupted row and all — is now captured and
+   * handed to the *following* question correctly, rather than the corrupted
+   * remainder being mistaken for that question's marker. What is left over is
+   * the pre-existing, separate `parseRows` limitation this ticket is not
+   * responsible for: a single embedded newline still splits one CSV row into
+   * two garbage rows. That is the known, inherited shape asserted below —
+   * `{"name":"a","k":null}` and `{"name":'b"',"k":"99"}` — not a new failure.
+   * The property this test actually pins is that "two" and "three" are
+   * answered cleanly and never reported as unanswered.
+   */
+  it("does not lose the next question when a value contains a blank line (FAIL 1 reproducer)", () => {
+    const corrupted = `"name","k"\n"a\n\nb","99"`;
+    const stdout = [
+      `${markerBlock("one")}\n\n${corrupted}`,
+      `${markerBlock("two")}\n\n"z"\n"2"`,
+      `${markerBlock("three")}\n\n"z"\n"3"`,
+    ].join("\n\n");
+
+    const { rows, answered } = matchBatch(stdout, ["one", "two", "three"]);
+
+    expect(answered).toBe(3);
+    // The inherited (not introduced) garbage: a single embedded newline still
+    // splits this row into two, which is a separate, pre-existing bug and not
+    // this ticket's to fix.
+    expect(rows.get("one")).toEqual([
+      { name: "a", k: null },
+      { name: 'b"', k: "99" },
+    ]);
+    // The property that actually matters: the next two questions are neither
+    // corrupted nor swallowed by question one's broken block.
+    expect(rows.get("two")).toEqual([{ z: "2" }]);
+    expect(rows.get("three")).toEqual([{ z: "3" }]);
+  });
+
+  /**
+   * M5 (delete the marker *id* check, keep only the `"marker"` header check)
+   * survived the first pass because the shipped "keys every question's real
+   * rows onto its own id" test builds its fixture already in order — a batch
+   * that never actually arrives out of order cannot exercise a guard whose
+   * whole job is noticing when it does.
+   */
+  it("refuses a marker block for the wrong id, even though the header token is right (kills M5)", () => {
+    const stdout = markerBlock("b") + `\n\n"y"\n"2"`;
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    expect(answered).toBe(0);
+    expect(rows.has("a")).toBe(false);
+  });
+
+  /**
+   * M4 (delete the `"marker"` header-token check, keep only the id check).
+   * Without it, a data block whose header is `"name"` and whose row happens
+   * to be the literal string `"porthole:a"` — nothing today selects a column
+   * named `name` that returns exactly that string, but GRA-85 lets a project
+   * supply its own SQL — is consumed as if it were the real marker for `a`.
+   * This is the same forgery hole QA flagged for GRA-85's benefit.
+   */
+  it("refuses a data block whose row merely looks like the next marker (kills M4)", () => {
+    const stdout = `"name"\n"${MARKER_PREFIX}a"\n\n"y"\n"2"`;
+    const { answered } = matchBatch(stdout, ["a"]);
+    expect(answered).toBe(0);
+  });
+
+  /**
+   * The forgery the M4 test above does NOT cover, checked here rather than
+   * assumed: a question's own data whose header is the literal column name
+   * `marker` and whose first row is the literal text `porthole:<next-id>` —
+   * not a near-miss like the M4 case, but the exact two-line shape
+   * `matchBatch` treats as a real marker pair. Nothing in today's `QUESTIONS`
+   * can produce that (none select a column named `marker`), so this is
+   * unreachable today; GRA-85 lets a project supply its own SQL, at which
+   * point it becomes reachable. `matchBatch` cannot tell this apart from a
+   * real marker — the header-and-id checks it has are exactly what a forged
+   * pair also satisfies — so this pins the resulting behaviour rather than
+   * pretending it does not exist: the forged pair is consumed as `b`'s
+   * marker, which truncates `a`'s real answer to whatever preceded the
+   * forgery and leaves `a` unanswered rather than corrupting `b`'s later
+   * data. Fails safe, not silent. Closing this hole for real is GRA-85's
+   * job, not this ticket's.
+   */
+  it("a question's own data that happens to spell out the next marker gets consumed as that marker (documented, not fixed here)", () => {
+    const stdout = [
+      markerBlock("a"),
+      `${markerBlock("b")}\n"another"`, // this is `a`'s own (forged-shaped) data, not b's real marker
+      `${markerBlock("b")}\n\n"y"\n"2"`, // b's real marker and data
+    ].join("\n\n");
+    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    // `a` never gets a data block of its own: the forged pair inside what
+    // should have been its answer is mistaken for `b`'s marker, and the
+    // "block between the two markers" left for `a` is empty, which
+    // `matchBatch` already treats the same as a mid-script failure.
+    expect(answered).toBe(0);
+    expect(rows.has("a")).toBe(false);
     expect(rows.has("b")).toBe(false);
   });
 });
@@ -434,6 +567,61 @@ describe("runBatch", () => {
     expect(calls).toBe(1);
     expect(unanswered).toHaveLength(3);
     for (const u of unanswered) expect(u).toContain("ENOENT");
+  });
+
+  /**
+   * The suite stayed green while M17 deleted the `INCLUDE` emission from the
+   * built script entirely: nothing in the existing tests looks at the SQL
+   * `run` actually receives. Confirmed against the real binary and a real
+   * capture that this is not equivalent-mutant territory — with the
+   * emission gone, three of five questions failed with "no such table" and
+   * `newFindings` dropped from 6 to 2. This captures the sql `runBatch` sends
+   * and checks the hoisted modules are actually in it, ahead of the first
+   * marker (an `INCLUDE` after the marker it belongs before would still
+   * compile-fail the question that needed it).
+   */
+  it("puts every hoisted module into the script, ahead of the first marker (kills M17)", async () => {
+    const calls: string[] = [];
+    const run: RunFn = async (_binary, _args, sql) => {
+      calls.push(sql);
+      // Stop after one call — spawnError short-circuits runBatch's retry
+      // loop, and this test only cares what the first call sent.
+      return { code: null, stdout: "", stderr: "", timedOut: false, elapsedMs: 1, spawnError: new Error("stop") };
+    };
+    const modules = ["android.binder", "slices.with_context"];
+    await runBatch(questions, modules, options, run);
+
+    expect(calls).toHaveLength(1);
+    const sql = calls[0];
+    const firstMarker = sql.indexOf(`SELECT '${MARKER_PREFIX}`);
+    expect(firstMarker).toBeGreaterThan(-1);
+    for (const module of modules) {
+      const includeLine = `INCLUDE PERFETTO MODULE ${module};`;
+      const at = sql.indexOf(includeLine);
+      expect(at, `${includeLine} missing from the built script`).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(firstMarker);
+    }
+  });
+
+  /**
+   * M18 (stop escaping `'` in the package name inside `substitute()`). Low
+   * risk — pre-existing behaviour just moved when batching was built — but
+   * now untested, and a package name containing an apostrophe (an unlikely
+   * but real Android application id character) would otherwise close the SQL
+   * string early and corrupt the whole batch rather than one question.
+   */
+  it("escapes an apostrophe in the package name so the batch stays valid SQL (kills M18)", async () => {
+    const calls: string[] = [];
+    const run: RunFn = async (_binary, _args, sql) => {
+      calls.push(sql);
+      return { code: null, stdout: "", stderr: "", timedOut: false, elapsedMs: 1, spawnError: new Error("stop") };
+    };
+    // Needs a question whose SQL actually references $package — the shared
+    // `questions` fixture above does not, so the substitution would have
+    // nothing to replace and the escaped name would never show up either way.
+    const withPackage: HoistedQuestion[] = [{ id: "a", asks: "asks about a", sql: "SELECT * FROM x WHERE p = $package" }];
+    await runBatch(withPackage, [], { ...options, packageName: "o'brien" }, run);
+    expect(calls[0]).toContain("'o''brien'");
   });
 });
 

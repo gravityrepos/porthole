@@ -535,13 +535,6 @@ function buildScript(
   return lines.join("\n");
 }
 
-function splitBlocks(stdout: string): string[] {
-  return stdout
-    .split(/\r?\n\r?\n/)
-    .map((block) => block.trim())
-    .filter((block) => block.length > 0);
-}
-
 interface BatchMatch {
   rows: Map<string, Array<Record<string, unknown>>>;
   /** How many leading ids, in order, got a complete marker-then-data pair. */
@@ -549,35 +542,75 @@ interface BatchMatch {
 }
 
 /**
- * Walks the blocks trace_processor printed against the ids that were asked
- * for, in lockstep.
+ * Walks stdout line by line looking for marker pairs, rather than
+ * pre-splitting the whole stream on blank lines.
  *
- * Confirmed against the real v58.2 binary before relying on it: every
- * statement in a script — including a bare `SELECT '...' AS marker`, and
- * including one that returns zero rows — prints its own CSV block, and
- * consecutive blocks are separated by exactly one blank line. That makes the
- * blocks self-describing without needing to trust that all five questions
- * even compiled: this function stops the moment a block is not the marker it
- * expected next, and `answered` tells the caller how many leading ids to
- * trust. A marker with no data block after it — the block list simply ends —
- * is what a mid-script failure or a killed process both look like from here;
- * telling those apart is `askTrace`'s job, not this function's.
+ * This used to split stdout on `/\r?\n\r?\n/` on the assumption that a blank
+ * line is always a statement boundary. It usually is, but trace_processor
+ * writes a field's embedded newline literally, inside the quotes, and
+ * `slices`' `s.name` is a developer's own atrace section name — arbitrary
+ * text reachable through `Trace.beginSection`. A value containing two
+ * consecutive newlines therefore contains what looks exactly like a block
+ * boundary, splitting that value's own data block in half: confirmed end to
+ * end against the real binary, where it silently truncated one question's row
+ * and then reported the next question as unanswered, because the leftover
+ * half of the corrupted block was mistaken for its marker.
+ *
+ * Scanning for the literal pair — a line that is exactly `"marker"`
+ * immediately followed by a line that is exactly `"porthole:<id>"` — finds
+ * the next boundary correctly no matter how many blank lines (or garbled
+ * pieces of a multi-line value) sit inside the block before it, because no
+ * match is accepted unless both lines match exactly. That keeps the property the
+ * design comment on `buildScript` argues for: the marker is its own
+ * statement, so nothing a question returns can forge it, provided both the
+ * header token and the id are checked — checking only one of them re-opens
+ * exactly this hole (see the `matchBatch` tests guarding each check on its
+ * own).
  */
 export function matchBatch(stdout: string, ids: string[]): BatchMatch {
-  const blocks = splitBlocks(stdout);
+  const lines = stdout.split(/\r?\n/);
   const rows = new Map<string, Array<Record<string, unknown>>>();
-  let blockIndex = 0;
+
+  const isMarkerFor = (i: number, id: string): boolean => {
+    if (lines[i] !== '"marker"') return false;
+    return lines[i + 1] === `"${MARKER_PREFIX}${id}"`;
+  };
+
+  let cursor = 0;
   let questionIndex = 0;
   while (questionIndex < ids.length) {
-    const markerLines = blocks[blockIndex]?.split(/\r?\n/) ?? [];
-    const expected = `"${MARKER_PREFIX}${ids[questionIndex]}"`;
-    if (markerLines[0] !== '"marker"' || markerLines[1] !== expected) break;
-    const data = blocks[blockIndex + 1];
-    if (data === undefined) break;
-    rows.set(ids[questionIndex], parseRows(data));
-    blockIndex += 2;
+    let markerAt = -1;
+    for (let i = cursor; i < lines.length - 1; i++) {
+      if (isMarkerFor(i, ids[questionIndex])) {
+        markerAt = i;
+        break;
+      }
+    }
+    if (markerAt === -1) break;
+
+    const dataStart = markerAt + 2;
+    const nextId = ids[questionIndex + 1];
+    let dataEnd = lines.length;
+    if (nextId !== undefined) {
+      for (let i = dataStart; i < lines.length - 1; i++) {
+        if (isMarkerFor(i, nextId)) {
+          dataEnd = i;
+          break;
+        }
+      }
+    }
+
+    const block = lines.slice(dataStart, dataEnd).join("\n").trim();
+    // A marker with nothing after it — the data block is empty — is what a
+    // mid-script failure or a killed process both look like from here;
+    // telling those apart is `askTrace`'s job, not this function's.
+    if (block.length === 0) break;
+
+    rows.set(ids[questionIndex], parseRows(block));
+    cursor = dataEnd;
     questionIndex += 1;
   }
+
   return { rows, answered: questionIndex };
 }
 
@@ -611,10 +644,20 @@ export interface RunResult {
  * demand. `askTrace` is still the only caller that decides what those args
  * actually are for a real trace.
  */
+/**
+ * The `maxBuffer` the `spawnSync` this replaced enforced, carried forward:
+ * `spawn`'s streams have no such limit on their own, and a wedged or
+ * mistaken query that never stops producing rows would otherwise grow
+ * `stdout` without bound instead of failing loudly.
+ */
+const MAX_STDOUT_BYTES = 32 * 1024 * 1024;
+
 export function runScript(binary: string, args: string[], sql: string, timeoutMs: number): Promise<RunResult> {
   return new Promise((resolvePromise) => {
     const start = Date.now();
     const child = spawn(binary, args);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -625,8 +668,33 @@ export function runScript(binary: string, args: string[], sql: string, timeoutMs
       child.kill();
     }, timeoutMs);
 
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk));
+    const finish = (result: Omit<RunResult, "elapsedMs">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise({ ...result, elapsedMs: Date.now() - start });
+    };
+
+    child.stdout.on("data", (chunk: string) => {
+      if (settled) return;
+      stdout += chunk;
+      if (stdout.length > MAX_STDOUT_BYTES) {
+        child.kill();
+        finish({
+          code: null,
+          stdout,
+          stderr,
+          timedOut: false,
+          spawnError: new Error(
+            `trace_processor produced more than ${MAX_STDOUT_BYTES} bytes of stdout without finishing; ` +
+              "killed rather than let it grow without bound",
+          ),
+        });
+      }
+    });
+    child.stderr.on("data", (chunk: string) => {
+      if (!settled) stderr += chunk;
+    });
     // Writing to a child that never started, or that the timer above has
     // already killed, throws EPIPE on the stream itself rather than through
     // the promise this function returns — unhandled, that crashes the whole
@@ -636,13 +704,6 @@ export function runScript(binary: string, args: string[], sql: string, timeoutMs
     child.stdin.on("error", () => {});
     child.stdin.write(sql);
     child.stdin.end();
-
-    const finish = (result: Omit<RunResult, "elapsedMs">) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise({ ...result, elapsedMs: Date.now() - start });
-    };
 
     child.on("close", (code) => finish({ code, stdout, stderr, timedOut }));
     child.on("error", (error) => finish({ code: null, stdout, stderr, timedOut, spawnError: error }));
