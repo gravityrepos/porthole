@@ -533,13 +533,25 @@ describe("a relative sdk.dir (GRA-160)", () => {
         // A colon is an ordinary filename character on POSIX — "C:foo" has
         // no special "drive-relative" meaning there at all, so the only
         // correct answer is the same as any other plain relative value:
-        // anchored under the directory local.properties was found in. This
-        // is the assertion that fails if isWindowsDriveRelative's platform
+        // anchored under the directory local.properties was found in.
+        //
+        // Re-QA (round 2): this branch previously mocked cwd to `project`
+        // itself, the same directory used as the walk anchor — exactly the
+        // mistake the win32 branch's own comment above warns about. With
+        // cwd === anchor, "unanchored" (path.resolve(value) alone, which
+        // falls back to process.cwd() if isWindowsDriveRelative's platform
+        // gate were ever dropped) and "anchored under directory" produce the
+        // identical string, so the assertion below could not tell a
+        // gate-dropped mutant from real code — it passed either way. project
+        // (the walk anchor, via PORTHOLE_PROJECT_ROOT) and process.cwd() are
+        // now deliberately different, mirroring the win32 branch, which is
+        // what actually makes this the assertion that fails if the platform
         // gate is ever lost.
         const project = temporaryDirectory();
         const sdk = fakeSdkIn(project, "C:sdk-drive-relative");
         writeLocalProperties(project, "sdk.dir=C:sdk-drive-relative\n");
-        workingDirectory(project);
+        process.env.PORTHOLE_PROJECT_ROOT = project;
+        workingDirectory(temporaryDirectory());
 
         expect(resolveSdkDir().directory).toBe(sdk);
         expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
@@ -551,13 +563,14 @@ describe("a relative sdk.dir (GRA-160)", () => {
       // test above, fixed the same way — a branched expectation instead of
       // a host skip, so a POSIX leg actually exercises this string shape
       // rather than never seeing it.
-      const project = temporaryDirectory();
       const unc = String.raw`\\server\share\sdk`;
-      writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
-      workingDirectory(project);
 
-      const result = resolveSdkDir();
       if (process.platform === "win32") {
+        const project = temporaryDirectory();
+        writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+        workingDirectory(project);
+
+        const result = resolveSdkDir();
         expect(result.source).toBe("local.properties");
         expect(result.directory).toBe(unc);
       } else {
@@ -565,8 +578,30 @@ describe("a relative sdk.dir (GRA-160)", () => {
         // not recognized as absolute at all (isJavaStyleAbsolute's non-win32
         // branch is a plain path.isAbsolute, which agrees with Java here) —
         // it is just an oddly-named relative path segment, anchored under
-        // the project like any other relative value.
-        expect(result.directory).toBe(path.resolve(project, unc));
+        // the directory local.properties was found in, like any other
+        // relative value.
+        //
+        // Re-QA (round 2): this branch previously mocked cwd to `project`
+        // itself — the same mistake the drive-relative test's original
+        // POSIX branch made, and wrong for the same reason: if
+        // isJavaStyleAbsolute's win32 gate were ever dropped, this string
+        // (it starts with two backslashes, matching the win32-only UNC
+        // regex) would be misclassified as absolute and resolved via
+        // path.resolve(value) alone — which falls back to process.cwd() —
+        // and if cwd === project that produces the identical string to the
+        // correct, anchored answer, so the assertion could not tell a
+        // gate-dropped mutant from real code. project (the walk anchor, via
+        // PORTHOLE_PROJECT_ROOT) and process.cwd() are now deliberately
+        // different, and this goes through findAdb() against a real
+        // fixture rather than only comparing the resolved string.
+        const project = temporaryDirectory();
+        const sdk = fakeSdkIn(project, unc);
+        writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+        process.env.PORTHOLE_PROJECT_ROOT = project;
+        workingDirectory(temporaryDirectory());
+
+        expect(resolveSdkDir().directory).toBe(sdk);
+        expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
       }
     });
 
