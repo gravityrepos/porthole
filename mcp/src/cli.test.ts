@@ -603,89 +603,110 @@ describe("porthole ui: state-change messages (GRA-162)", () => {
     );
   }
 
-  it('prints the handshaking message — neither "disconnected" nor a crash — while hello is outstanding', async () => {
-    const port = await freePort();
-    const uiPort = await freePort();
-    const server = startSilentServer();
-    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
-    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
-    try {
-      await waitForStderr(proc, "connected, waiting on the app's first check-in...");
-      // The specific failure GRA-162 exists to prevent: a mutated or
-      // regressed switch treating "handshaking" as "disconnected".
-      expect(proc.stderrText()).not.toContain("waiting for the app...");
-    } finally {
-      proc.kill();
-      server.close();
-    }
-  });
+  it(
+    'prints the handshaking message — neither "disconnected" nor a crash — while hello is outstanding',
+    async () => {
+      const port = await freePort();
+      const uiPort = await freePort();
+      const server = startSilentServer();
+      await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+      const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+      try {
+        await waitForStderr(proc, "connected, waiting on the app's first check-in...");
+        // The specific failure GRA-162 exists to prevent: a mutated or
+        // regressed switch treating "handshaking" as "disconnected".
+        expect(proc.stderrText()).not.toContain("waiting for the app...");
+      } finally {
+        proc.kill();
+        server.close();
+      }
+    },
+    // Above vitest's own 5000ms default: a bare `it(...)` timeout races
+    // waitForStderr's internal one and wins, discarding its more
+    // informative message (what stderr actually held) for vitest's generic
+    // "Test timed out". Every `it` below sets this for the same reason.
+    12_000,
+  );
 
-  it("prints the connected message, naming the app and device, once hello resolves", async () => {
-    const port = await freePort();
-    const uiPort = await freePort();
-    const server = startHelloServer();
-    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
-    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
-    try {
-      await waitForStderr(proc, "connected to com.example.shop on Test Device");
-    } finally {
-      proc.kill();
-      server.close();
-    }
-  });
+  it(
+    "prints the connected message, naming the app and device, once hello resolves",
+    async () => {
+      const port = await freePort();
+      const uiPort = await freePort();
+      const server = startHelloServer();
+      await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+      const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+      try {
+        await waitForStderr(proc, "connected to com.example.shop on Test Device");
+      } finally {
+        proc.kill();
+        server.close();
+      }
+    },
+    12_000,
+  );
 
-  it("prints the disconnected message when nothing is listening on the device port", async () => {
-    const port = await freePort();
-    const uiPort = await freePort();
-    // No server bound to `port` at all: the OS refuses the connection, which
-    // is what drives DeviceClient to "disconnected" rather than leaving it
-    // stuck in "connecting" — see device.ts's close handler.
-    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
-    try {
-      await waitForStderr(proc, "waiting for the app...");
-    } finally {
-      proc.kill();
-    }
-  });
+  it(
+    "prints the disconnected message when nothing is listening on the device port",
+    async () => {
+      const port = await freePort();
+      const uiPort = await freePort();
+      // No server bound to `port` at all: the OS refuses the connection,
+      // which is what drives DeviceClient to "disconnected" rather than
+      // leaving it stuck in "connecting" — see device.ts's close handler.
+      const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+      try {
+        await waitForStderr(proc, "waiting for the app...");
+      } finally {
+        proc.kill();
+      }
+    },
+    12_000,
+  );
 
-  it("survives a reconnect — disconnected, silently through connecting again, to handshaking — without crashing", async () => {
-    // "connecting" is the one case this file cannot assert on directly: its
-    // entire contract is to print nothing (GRA-162 AC3, no behaviour
-    // change — the original if/else-if chain had no branch for it either),
-    // so there is no stderr signal that would distinguish "the switch
-    // reached this case and did nothing" from "the switch was never
-    // reached at all". It is also unreachable on the *first* connection
-    // attempt specifically: `device.start()` inside ui() emits "connecting"
-    // synchronously, before `device.on("state", ...)` is even registered
-    // (that registration waits on `await timeline.start()`), so the very
-    // first "connecting" event fires to no listener, structurally, not by
-    // race. A reconnect is different — by the time DeviceClient retries,
-    // the listener has existed for a while — so this test drives one for
-    // real: refuse the first connection (forcing "disconnected", which
-    // schedules a reconnect), then make the device answer, and check the
-    // process is still alive and reaches "handshaking" on the far side.
-    // That does not prove what "connecting" printed (nothing, by design),
-    // but it does prove the switch did not throw or misroute while passing
-    // through it — the one thing a test could get wrong here.
-    const port = await freePort();
-    const uiPort = await freePort();
-    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
-    let server: net.Server | undefined;
-    try {
-      await waitForStderr(proc, "waiting for the app...");
-      server = startSilentServer();
-      // The exact port just refused a connection and nothing ever accepted
-      // one on it, so there is no lingering socket in a wait state to
-      // conflict with binding it again immediately.
-      await new Promise<void>((resolve) => server!.listen(port, "127.0.0.1", () => resolve()));
-      // RECONNECT_MIN_MS is 500ms (device.ts); the generous timeout below
-      // covers a slow CI machine without assuming a tighter bound than the
-      // production backoff actually guarantees.
-      await waitForStderr(proc, "connected, waiting on the app's first check-in...", 10_000);
-      expect(proc.stderrText()).not.toMatch(/unhandled ConnectionState/);
-    } finally {
-      proc.kill();
-      server?.close();
-    }
-  });
+  it(
+    "survives a reconnect — disconnected, silently through connecting again, to handshaking — without crashing",
+    async () => {
+      // "connecting" is the one case this file cannot assert on directly:
+      // its entire contract is to print nothing (GRA-162 AC3, no behaviour
+      // change — the original if/else-if chain had no branch for it
+      // either), so there is no stderr signal that would distinguish "the
+      // switch reached this case and did nothing" from "the switch was
+      // never reached at all". It is also unreachable on the *first*
+      // connection attempt specifically: `device.start()` inside ui() emits
+      // "connecting" synchronously, before `device.on("state", ...)` is
+      // even registered (that registration waits on `await
+      // timeline.start()`), so the very first "connecting" event fires to
+      // no listener, structurally, not by race. A reconnect is different —
+      // by the time DeviceClient retries, the listener has existed for a
+      // while — so this test drives one for real: refuse the first
+      // connection (forcing "disconnected", which schedules a reconnect),
+      // then make the device answer, and check the process is still alive
+      // and reaches "handshaking" on the far side. That does not prove what
+      // "connecting" printed (nothing, by design), but it does prove the
+      // switch did not throw or misroute while passing through it — the
+      // one thing a test could get wrong here.
+      const port = await freePort();
+      const uiPort = await freePort();
+      const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+      let server: net.Server | undefined;
+      try {
+        await waitForStderr(proc, "waiting for the app...");
+        server = startSilentServer();
+        // The exact port just refused a connection and nothing ever
+        // accepted one on it, so there is no lingering socket in a wait
+        // state to conflict with binding it again immediately.
+        await new Promise<void>((resolve) => server!.listen(port, "127.0.0.1", () => resolve()));
+        // RECONNECT_MIN_MS is 500ms (device.ts); the generous timeout below
+        // covers a slow CI machine without assuming a tighter bound than
+        // the production backoff actually guarantees.
+        await waitForStderr(proc, "connected, waiting on the app's first check-in...", 10_000);
+        expect(proc.stderrText()).not.toMatch(/unhandled ConnectionState/);
+      } finally {
+        proc.kill();
+        server?.close();
+      }
+    },
+    15_000,
+  );
 });
