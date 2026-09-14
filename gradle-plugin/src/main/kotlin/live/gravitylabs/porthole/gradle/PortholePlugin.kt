@@ -6,8 +6,6 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
 import org.gradle.kotlin.dsl.register
-import java.io.File
-import java.util.Properties
 
 /**
  * Wires Porthole into an Android module.
@@ -127,29 +125,13 @@ class PortholePlugin : Plugin<Project> {
         val override = project.findProperty("porthole.adb") as String?
         if (!override.isNullOrBlank()) return@provider override
 
-        val sdk = sdkDirectory(project)
+        // resolveSdkDir lives in PortholeTasks.kt (GRA-150): one resolver,
+        // shared with PortholeMcpConfigTask, instead of a second copy kept in
+        // step by hand.
+        val sdk = resolveSdkDir(project.rootDir)
         val binary = if (isWindows()) "adb.exe" else "adb"
         val candidate = sdk?.resolve("platform-tools")?.resolve(binary)
         if (candidate != null && candidate.isFile) candidate.absolutePath else binary
-    }
-
-    // A blank `sdk.dir=` is absent, not a path: `File("")` resolves to the
-    // current working directory, so taking it at its word would look for adb
-    // under the daemon's cwd and then silently fall back to bare "adb" on the
-    // PATH anyway. Same reasoning as `resolveSdkDir` in PortholeTasks.kt,
-    // which mirrors this function.
-    private fun sdkDirectory(project: Project): File? {
-        val local = File(project.rootDir, "local.properties")
-        if (local.isFile) {
-            val props = Properties()
-            local.inputStream().use(props::load)
-            props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
-        }
-        return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
-            .mapNotNull { System.getenv(it) }
-            .filter { it.isNotBlank() }
-            .map(::File)
-            .firstOrNull { it.isDirectory }
     }
 
     private fun isWindows(): Boolean =

@@ -223,16 +223,16 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * whatever launched it, not by us. This task knows both with certainty at
  * configure time, so it writes `PORTHOLE_PROJECT_ROOT` (the directory
  * [configFile] lives in — always the Gradle root, since that is where
- * [PortholePlugin] points it) and `PORTHOLE_SDK_DIR` (resolved the same way
- * `PortholePlugin`'s adb lookup resolves it: `local.properties`, then
- * `ANDROID_HOME`/`ANDROID_SDK_ROOT`). `mcp/src/adb.ts` prefers the env var
- * when present and keeps its own walk as the fallback for a server started
- * some other way.
+ * [PortholePlugin] points it) and `PORTHOLE_SDK_DIR` (resolved by
+ * [resolveSdkDir]: `local.properties`, then `ANDROID_HOME`/`ANDROID_SDK_ROOT`).
+ * `mcp/src/adb.ts` prefers the env var when present and keeps its own walk as
+ * the fallback for a server started some other way.
  *
- * The resolution below duplicates `PortholePlugin.sdkDirectory` rather than
- * calling it: that method is private to a file outside this task's owned
- * set (see GRA-119's report). A follow-up should extract one shared
- * implementation once a change can touch both files.
+ * GRA-150: [resolveSdkDir] used to exist twice — once here, once as a private
+ * `sdkDirectory` in [PortholePlugin], because that method resolves `adb`
+ * itself and this task's config generation predates it (see GRA-119's
+ * report). They were kept in step by hand across two blank-`sdk.dir` fixes;
+ * now [PortholePlugin] calls this one function too.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -354,10 +354,11 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
 
 /**
  * `sdk.dir` from `local.properties` in [projectRoot], falling back to
- * `ANDROID_HOME` then `ANDROID_SDK_ROOT`. Mirrors `PortholePlugin`'s private
- * `sdkDirectory`, used to resolve `adb` — see the class doc on
- * [PortholeMcpConfigTask] for why this is a duplicate rather than a shared
- * call.
+ * `ANDROID_HOME` then `ANDROID_SDK_ROOT`. The one SDK-directory resolver for
+ * this module (GRA-150) — [PortholePlugin] calls this too, to resolve `adb`,
+ * rather than keeping its own copy. The two had drifted apart only in the
+ * sense that a bug fix (the blank-`sdk.dir` handling below) had to be applied
+ * to both by hand; nothing about them was ever meant to differ.
  *
  * `Properties.load` is what does the real work here: `local.properties` is
  * Java-properties-escaped (a Windows path's drive-letter colon and every
@@ -369,13 +370,32 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
  * directory, so a blank line would have written the Gradle daemon's cwd into
  * `.mcp.json` as the Android SDK — a confidently wrong answer, and worse than
  * the omission that lets the MCP server fall back to its own walk.
+ *
+ * GRA-150, AC3: a *relative* `sdk.dir` is resolved against [projectRoot], not
+ * against this JVM's own working directory. `File(it)` alone would do the
+ * latter — a Gradle daemon is a long-lived process the launcher reuses across
+ * unrelated project directories, so its `user.dir` is wherever the daemon
+ * happened to start, not wherever the build was invoked from — and that
+ * answer was silently wrong before this ticket rather than merely unlikely:
+ * `local.properties` is text a person can hand-edit, and Android Studio's own
+ * writes are always absolute, so the relative case is rare but not
+ * hypothetical. `File(projectRoot, it)` is also the correct answer for an
+ * already-absolute `it` (a drive letter, a UNC path): `java.io.File`'s
+ * two-argument constructor discards the parent whenever the child is
+ * absolute, so one call handles both shapes without a manual `isAbsolute`
+ * branch. `mcp/src/adb.ts`'s `sdkDirFromLocalProperties` does not resolve a
+ * relative value at all today — it returns the raw string from the file, and
+ * whatever eventually stats it resolves that string against its own process's
+ * cwd — so it does not yet agree with the answer here; see this ticket's
+ * report for why that is a TypeScript-side follow-up rather than a change
+ * made from this file.
  */
 internal fun resolveSdkDir(projectRoot: File): File? {
     val local = File(projectRoot, "local.properties")
     if (local.isFile) {
         val props = Properties()
         local.inputStream().use(props::load)
-        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
+        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(projectRoot, it) }
     }
     return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
         .mapNotNull { System.getenv(it) }
