@@ -220,22 +220,17 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         projectRoot: projectRoot.directory,
         projectRootSource: projectRoot.source,
       };
-      // The socket connecting and hello resolving are two different events,
-      // roughly 2s apart on real hardware (DeviceClient sets state="connected"
-      // on socket connect, then requests hello without awaiting it). The old
-      // `device.state === "connected" && device.hello` ternary collapsed that
-      // gap into "not connected", which made this tool's own summary disagree
-      // with its own `state: "connected"` payload field, and disagree with
-      // `findings` (which already had this third answer). Name the gap
-      // instead of hiding it in either direction, and never fall back to
-      // notConnectedMessage() while a socket is actually connected.
+      // GRA-157: DeviceClient now has a "handshaking" ConnectionState for the
+      // gap between the socket connecting and hello resolving, so this reads
+      // `device.state` alone — pendingMessage() names the disconnected and
+      // handshaking stories the same way `findings` does (AC3), and returns
+      // null only when state === "connected", which now guarantees `hello`
+      // is set, so the non-null assertion below is the invariant, not a hope.
+      const pending = device.pendingMessage();
       const summary =
-        device.state !== "connected"
-          ? device.notConnectedMessage()
-          : device.hello
-            ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
-              `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
-            : "Connected, waiting on the app's first check-in. Ask again in a moment.";
+        pending ??
+        `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
+          `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`;
       return ok(summary, payload);
     },
   );
@@ -267,20 +262,26 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to }): Promise<ToolResult> => {
       const span = resolveWindow({ sinceMs, from, to });
-      const connected = device.state === "connected";
+      // GRA-157: "connected" here is the loose sense porthole_status also
+      // uses — the socket is up, whether or not hello has landed — because
+      // that is the fact an agent deciding whether to keep polling actually
+      // wants, and it is what keeps this field agreeing with the summary
+      // text below (both handshaking and connected get the non-wall story).
+      // buildTrace(), further down, wants the strict sense instead — hello
+      // itself, not a boolean — and asks device.hello directly for it.
+      const connected = device.state === "handshaking" || device.state === "connected";
       if (!span) {
         // resolveWindow returns null whenever the ring is empty, which is not
         // the same thing as the device being unreachable — hello can have
         // landed seconds ago with nothing collected yet. Printing the full
         // troubleshooting wall in that case sends the first call after every
         // install chasing a socket that was never the problem.
-        if (!connected) {
-          return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+        const pending = device.pendingMessage();
+        if (pending !== null) {
+          return ok(pending, { window: null, findings: [], connected });
         }
-        const summary = device.hello
-          ? `Connected to ${device.hello.packageName}, nothing buffered yet. Ask again in a moment.`
-          : "Connected, waiting on the app's first check-in. Ask again in a moment.";
-        return ok(summary, { window: null, findings: [], connected: true });
+        const summary = `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`;
+        return ok(summary, { window: null, findings: [], connected });
       }
 
       const buffered = timeline.buffer();
@@ -461,9 +462,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const app = packageName ?? device.hello?.packageName;
       if (!app) {
+        // GRA-157: "Connect to the app" was printed even while the socket
+        // was already connected and just waiting on hello — telling someone
+        // to do a thing that is already in progress. Naming the handshake
+        // instead of the generic advice is the whole fix; the advice itself
+        // (pass `packageName`) still applies either way.
+        const because =
+          device.state === "handshaking"
+            ? "the app just connected and has not said hello yet — try again in a moment, "
+            : "connect to the app, ";
         return fail(
-          "No package to scope to. Connect to the app, or pass `packageName` — without it the " +
-            "questions answer for the whole device, which is a different question.",
+          `No package to scope to: ${because}or pass \`packageName\` — without it the questions ` +
+            "answer for the whole device, which is a different question.",
         );
       }
 
@@ -471,7 +481,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // boot clock, so it has to be converted before it means anything here.
       const events = timeline.buffer();
       const span = resolveWindow({ from, to });
-      if (!span) return fail("Nothing buffered, so there is no window to ask about.");
+      if (!span) {
+        // GRA-154 (absorbed into GRA-157 AC7): this used to say "Nothing
+        // buffered" unconditionally — a third, different vocabulary from
+        // findings/what_was_happening for the identical empty-ring
+        // condition. pendingMessage() brings the wording in line with
+        // theirs. This one stays an error result rather than switching to
+        // `ok` like the other two: there is genuinely no window here to ask
+        // trace_processor about, nothing partial to return the way an empty
+        // findings list or a "nothing happened here" moment still can.
+        const pending = device.pendingMessage();
+        return fail(
+          pending ??
+            "Connected, but nothing buffered yet, so there is no window to scope the trace to. " +
+              "Ask again in a moment.",
+        );
+      }
       const sample = events.find((e) => e.event === "clocks");
       const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
       const bounds = {
@@ -557,6 +582,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: false },
     },
     async ({ seconds, categories, outputDir, packages, serial }): Promise<ToolResult> => {
+      // GRA-157: `device.hello ? [...] : []` used to fall through to an
+      // unscoped capture — silently, with nothing in the result saying so —
+      // whenever this landed in the handshake window, since state was
+      // already "connected" there under the old model. An unscoped capture
+      // has none of Porthole's own slices in it, which defeats the point of
+      // this tool, so when we can name the actual reason (a hello is
+      // genuinely on its way) this fails and says so instead of guessing.
+      // Fully disconnected keeps the old permissive behaviour: apps: []
+      // captures the whole device, same as always.
+      if (!packages?.length && device.state === "handshaking") {
+        return fail(
+          "Still waiting on the app's first check-in, so there is no package to scope this " +
+            "capture to yet. Try again in a moment, or pass `packages` explicitly to capture " +
+            "unscoped right now.",
+        );
+      }
       // Default to whatever app the porthole is attached to: that is the one
       // whose sections are worth recording, and asking for it again is friction.
       const apps = packages?.length ? packages : device.hello ? [device.hello.packageName] : [];
@@ -642,7 +683,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     async ({ at, bootMs, spreadMs }): Promise<ToolResult> => {
       const events = timeline.buffer();
       if (events.length === 0) {
-        return ok(device.notConnectedMessage(), { moment: null, connected: false });
+        // GRA-154, absorbed into GRA-157 as AC7: an empty ring is not the
+        // same as a disconnected device — hello can have landed seconds ago
+        // with nothing collected yet, and printing the "Not connected" wall
+        // in that case blames the connection for a buffer that is merely
+        // young. Same distinction `findings` and `porthole_status` make,
+        // through the same method, so all three tell the same story about
+        // an empty-but-attached device instead of each guessing separately.
+        const pending = device.pendingMessage();
+        if (pending !== null) {
+          return ok(pending, { moment: null, connected: false });
+        }
+        return ok(
+          `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`,
+          { moment: null, connected: true },
+        );
       }
 
       let moment_at = at;
