@@ -1,6 +1,9 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
 import { resolveSdkDir } from "./adb.js";
 
@@ -447,6 +450,62 @@ describe("porthole_status and findings agree during the handshake race (AC7/AC9)
       expect(findings.text).toContain("Connected, waiting on the app's first check-in");
     } finally {
       await rig.close();
+    }
+  });
+});
+
+describe("resolveSdkDir's blank sdk.dir from local.properties (M6b)", () => {
+  // adb.test.ts is not in this ticket's Owns (mcp/src/index.ts,
+  // index.test.ts, device.ts, device.test.ts, adb.ts), so this fixture lives
+  // here instead of alongside adb.test.ts's other local.properties tests —
+  // per GRA-152, asking first or placing it wherever Owns allows and saying
+  // so. adb.test.ts:312 already defends a blank PORTHOLE_SDK_DIR; nothing
+  // defended a blank sdk.dir read out of local.properties (adb.ts's
+  // `sdkDirFromLocalProperties`), which QA's mutation
+  // (`if (value && value.trim()) return value.trim()` weakened to
+  // `if (value !== undefined) return value`) proved by surviving the full
+  // suite: a whitespace-only `sdk.dir=   ` would resolve as a real SDK
+  // directory and shadow ANDROID_HOME.
+  it("a whitespace-only sdk.dir in local.properties is treated as absent, not as an SDK directory", () => {
+    const savedEnv = {
+      PORTHOLE_SDK_DIR: process.env.PORTHOLE_SDK_DIR,
+      PORTHOLE_PROJECT_ROOT: process.env.PORTHOLE_PROJECT_ROOT,
+      ANDROID_HOME: process.env.ANDROID_HOME,
+      ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT,
+    };
+    const project = mkdtempSync(path.join(tmpdir(), "porthole-index-sdkdir-"));
+    const realSdk = mkdtempSync(path.join(tmpdir(), "porthole-index-realsdk-"));
+    try {
+      delete process.env.PORTHOLE_SDK_DIR;
+      process.env.PORTHOLE_PROJECT_ROOT = project;
+      // A blank value, not a missing key — this is the case
+      // `value !== undefined` (M6b) gets wrong that `value && value.trim()`
+      // gets right. Plain ASCII spaces after `=` do not reach that check at
+      // all: parseProperties' own leading-whitespace regex (`[ \t\f]`) already
+      // strips them down to an empty string before `sdkDirFromLocalProperties`
+      // ever sees the value, so both the fixed and the mutated code fall
+      // through identically and the fixture would prove nothing. U+00A0
+      // (a non-breaking space, as a real editor can produce without anyone
+      // noticing) is not in that character class, so it survives parsing as
+      // a non-empty, all-whitespace string — exactly the value `.trim()`
+      // exists to catch, and `value !== undefined` does not.
+      const blankSdkDirValue = String.fromCharCode(160, 160, 160); // three non-breaking spaces
+      const localPropertiesContent = "sdk.dir=" + blankSdkDirValue + String.fromCharCode(10);
+      writeFileSync(path.join(project, "local.properties"), localPropertiesContent);
+      process.env.ANDROID_HOME = realSdk;
+      delete process.env.ANDROID_SDK_ROOT;
+
+      const resolved = resolveSdkDir();
+      // The blank sdk.dir must not shadow ANDROID_HOME: it should be treated
+      // as though local.properties said nothing about sdk.dir at all.
+      expect(resolved).toEqual({ directory: realSdk, source: "ANDROID_HOME" });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(realSdk, { recursive: true, force: true });
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   });
 });
