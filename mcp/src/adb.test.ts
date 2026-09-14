@@ -490,9 +490,17 @@ describe("a relative sdk.dir (GRA-160)", () => {
       expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
     });
 
-    it.skipIf(process.platform !== "win32")(
-      "a Windows drive-relative sdk.dir (C:foo) is not spliced onto the project root",
-      () => {
+    it("a Windows drive-relative sdk.dir (C:foo): drive-relative and unanchored on Windows, an ordinary relative segment everywhere else", () => {
+      // Re-QA (QA round 1): this was previously gated on the host
+      // (`it.skipIf(process.platform !== "win32")`), which meant a POSIX CI
+      // leg never exercised a drive-letter-shaped value at all — so if
+      // isWindowsDriveRelative's own `process.platform === "win32"` guard
+      // were ever dropped, POSIX would start silently unanchoring "C:foo"
+      // too, exactly the shape this test exists to pin, and nothing running
+      // there would notice. It is now a branched expectation instead: it
+      // runs on every host, and asserts the two platforms' genuinely
+      // different, both-correct answers.
+      if (process.platform === "win32") {
         // GRA-150 QA's regression, TypeScript side: path.join(directory,
         // "C:foo") does not anchor this shape the way an ordinary relative
         // path is anchored — it splices the strings into
@@ -501,10 +509,10 @@ describe("a relative sdk.dir (GRA-160)", () => {
         // to path.resolve(value) alone instead, matching PortholeTasks.kt's
         // choice to leave it exactly as Java resolves it, unanchored, rather
         // than invent an answer. There is no reliable way to independently
-        // compute "the current directory on drive C" for this test to compare
-        // against — see the Kotlin test's own comment on that — so this
-        // checks the same invariant the Kotlin test does: no colon outside
-        // the drive prefix, and not spliced onto the project root.
+        // compute "the current directory on drive C" for this test to
+        // compare against — see the Kotlin test's own comment on that — so
+        // this checks the same invariant the Kotlin test does: no colon
+        // outside the drive prefix, and not spliced onto the project root.
         //
         // project (where local.properties lives, via PORTHOLE_PROJECT_ROOT)
         // and process.cwd() are deliberately different directories here:
@@ -521,26 +529,71 @@ describe("a relative sdk.dir (GRA-160)", () => {
         const produced = resolveSdkDir().directory as string;
         expect(produced.slice(2)).not.toContain(":");
         expect(produced.startsWith(project)).toBe(false);
-      },
-    );
-
-    it.skipIf(process.platform !== "win32")(
-      "a UNC sdk.dir is used as-is, not joined under the project root",
-      () => {
+      } else {
+        // A colon is an ordinary filename character on POSIX — "C:foo" has
+        // no special "drive-relative" meaning there at all, so the only
+        // correct answer is the same as any other plain relative value:
+        // anchored under the directory local.properties was found in. This
+        // is the assertion that fails if isWindowsDriveRelative's platform
+        // gate is ever lost.
         const project = temporaryDirectory();
-        const unc = String.raw`\\server\share\sdk`;
-        writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+        const sdk = fakeSdkIn(project, "C:sdk-drive-relative");
+        writeLocalProperties(project, "sdk.dir=C:sdk-drive-relative\n");
         workingDirectory(project);
 
-        const result = resolveSdkDir();
+        expect(resolveSdkDir().directory).toBe(sdk);
+        expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
+      }
+    });
+
+    it("a UNC sdk.dir: absolute and used as-is on Windows, an ordinary relative segment everywhere else", () => {
+      // Re-QA (QA round 1): same host-vs-shape gap as the drive-relative
+      // test above, fixed the same way — a branched expectation instead of
+      // a host skip, so a POSIX leg actually exercises this string shape
+      // rather than never seeing it.
+      const project = temporaryDirectory();
+      const unc = String.raw`\\server\share\sdk`;
+      writeLocalProperties(project, `sdk.dir=${javaEscaped(unc)}\n`);
+      workingDirectory(project);
+
+      const result = resolveSdkDir();
+      if (process.platform === "win32") {
         expect(result.source).toBe("local.properties");
         expect(result.directory).toBe(unc);
-      },
-    );
+      } else {
+        // A backslash has no separator meaning on POSIX, so this string is
+        // not recognized as absolute at all (isJavaStyleAbsolute's non-win32
+        // branch is a plain path.isAbsolute, which agrees with Java here) —
+        // it is just an oddly-named relative path segment, anchored under
+        // the project like any other relative value.
+        expect(result.directory).toBe(path.resolve(project, unc));
+      }
+    });
 
     it.skipIf(process.platform !== "win32")(
       "a POSIX-shaped sdk.dir (no drive letter) anchors under the project root on Windows too, agreeing with PortholeTasks.kt post-GRA-150",
       () => {
+        // Re-QA (QA round 1) asked whether this one could become a branched
+        // expectation like the two above it. It genuinely cannot, and this
+        // is that "say so plainly" case rather than an evasion: the thing
+        // this test exists to pin is a *disagreement*, on Windows only,
+        // between Node's path.isAbsolute (true — a bare leading slash roots
+        // at the current drive there) and Java's File#isAbsolute (false — it
+        // requires a drive letter), which isJavaStyleAbsolute's win32 branch
+        // resolves in Java's favour. Off Windows there is no such
+        // disagreement to pin: POSIX Node and POSIX Java both already agree
+        // that a leading "/" is absolute, isJavaStyleAbsolute's non-win32
+        // branch is nothing but a bare `path.isAbsolute(value)` call with no
+        // special-casing of its own to regress, and "/opt/android-sdk" would
+        // just be the ordinary absolute-path case the "drive-letter
+        // absolute" test above already covers — asserting it again here
+        // would only be a second copy of that test wearing this one's name,
+        // not a check of anything Windows-specific. isJavaStyleAbsolute's
+        // win32 gate itself — "does this fall through to plain
+        // path.isAbsolute on every other platform" — is exercised by the
+        // UNC test above, which does use a Windows-shaped string on a POSIX
+        // host and asserts the POSIX (relative, joined) answer.
+        //
         // Node's own path.isAbsolute considers a bare leading slash absolute
         // on Windows (it roots at the current drive) — but Java's
         // File#isAbsolute() does not, and GRA-150's QA moved the Kotlin
@@ -576,6 +629,12 @@ describe("a relative sdk.dir (GRA-160)", () => {
       const message = stderr.mock.calls[0][0] as string;
       expect(message).toContain(empty);
       expect(message).toContain("platform-tools");
+      // Re-QA (QA round 1): the ticket's own mechanism section says the
+      // property missing from today's failure mode is that nothing names
+      // sdk.dir specifically — asserting only "platform-tools" and the
+      // directory would still pass a mutant that renamed this message to
+      // something that never says which property was at fault.
+      expect(message).toContain("sdk.dir");
       stderr.mockRestore();
     });
 
@@ -584,6 +643,28 @@ describe("a relative sdk.dir (GRA-160)", () => {
       const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
       expect(findAdb()).toBe(BINARY);
+      expect(stderr).not.toHaveBeenCalled();
+      stderr.mockRestore();
+    });
+
+    it("says nothing on stderr on the ordinary, successful path — a resolved sdk.dir with adb actually under it", () => {
+      // Re-QA (QA round 1): the pair above covered "fires when platform-tools
+      // is missing" and "silent when nothing named an SDK", but not the
+      // third and most common state — a directory resolved AND adb found
+      // there. Without this, a mutant that moved the stderr.write above the
+      // success return (so it fired on every successful lookup too) would
+      // have left the whole suite green: the healthy path is exercised by
+      // nearly every other test in this file, but none of them assert
+      // silence on it. A warning that also fires on the healthy path is the
+      // exact failure mode AC3 exists to prevent — it trains whoever reads
+      // stderr to ignore the line, and then the real one gets ignored too.
+      const sdk = fakeSdk();
+      const project = temporaryDirectory();
+      writeLocalProperties(project, `sdk.dir=${javaEscaped(sdk)}\n`);
+      workingDirectory(project);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
       expect(stderr).not.toHaveBeenCalled();
       stderr.mockRestore();
     });
