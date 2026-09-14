@@ -513,8 +513,11 @@ runtime's own atrace sections are already inside it: navigations, HTTP calls,
 queries and stalls, so the capture arrives annotated with what the app was
 doing and not only what the kernel was doing. The result says how many of
 those labels it found, which is how you know the annotation actually
-happened — and on at least one physical device (see Status) that count came
-back zero, so treat it as something to check per device rather than assumed.
+happened — and on the verified device (see Status) that count tracks what the
+app actually did inside the window, not whether `--app` was honoured: a
+capture of a screen sitting idle, with no navigation, HTTP, DB or stall
+activity inside it, comes back with zero labels correctly, because there was
+nothing for the runtime to annotate.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of five questions — jank, thread states,
@@ -1389,15 +1392,24 @@ also written but never observed — the emulator did not produce one.
 **Verified on a physical device:** wave 2's integration QA ran end to end on a
 real Pixel 10 Pro XL, fingerprint
 `google/mustang_beta/mustang:17/CP41.260814.003.B1/16166531:user/release-keys`
-(Android 17, API 37), and passed. One hard negative from that run is worth
-recording plainly rather than folding into a PASS: this device does not
-honour `perfetto --app <pkg>` — a capture came back with `portholeLabels: 0`
-and `ATRACE_TAG_APP` stayed clear, and the same thing reproduced running
-`perfetto` by hand outside Porthole entirely, so it is not this tool's own
-bug. Whether that is the beta build or the Android 17 platform is not yet
-known — it needs a second device to tell apart. Read this as neither "works
-on Android 17" nor "broken on Android 17"; it is an open question on one
-fingerprint.
+(Android 17, API 37), and passed. A separate hardware run on that same device
+and fingerprint checked the trace half directly: `perfetto --app
+com.example.shop` is accepted and honoured — a real capture carried `porthole:
+http`, `recompose` and `screen` slices with real durations, and it still
+worked when the app process predated the tracing session. All five curated
+`ask_system_trace` questions answered on the first try, returning six
+differentiated findings and none empty, including 31ms of main-thread
+runnable-but-not-scheduled that Porthole's own collectors cannot see. The
+trace's own `App Deadline Missed` (119.47ms) matched the frame Porthole
+independently reported at `totalMs: 125`. An earlier report of this device
+refusing `--app` (`portholeLabels: 0`, `ATRACE_TAG_APP` reading clear) does
+not hold up: it was read off `debug.atrace.tags.enableflags`, which is a
+device-wide tag mask that cannot show a tag enabled for one package — it
+reads "off" on a setup that is working correctly, which is exactly what
+happened. The only check that actually answers the question is the trace
+itself. Read this as neither "works on Android 17" as a platform claim nor a
+closed question generally; it is one behaviour, confirmed on one device and
+one fingerprint.
 
 **Not done:** multi-process apps, and Compose versions other than the one in
 the version catalog. A second physical device, to separate the app-label gap
