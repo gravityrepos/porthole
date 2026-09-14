@@ -1365,19 +1365,24 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-723 tests: 312 on the JVM (`./gradlew test`, which covers both build types of
-`runtime` and `runtime-noop` plus the Gradle plugin — 2 skipped, 0 failures),
-301 in the MCP server (`cd mcp && npm test` — 1 skipped, gated on a real
-`trace_processor` binary and a real capture both being present on the
-machine, which they are not on a fresh checkout), and 110 in the timeline UI
-(`cd mcp && npm run test:ui`, a separate suite from the server's). The
+816 tests: 346 on the JVM (`./gradlew test`, which covers both build types of
+`runtime` and `runtime-noop` plus the Gradle plugin — 3 skipped, 0 failures:
+one test that assumes a POSIX path survives `java.io.File` and does not on
+Windows, and the two-test AGP compatibility pair below), 358 in the MCP
+server (`cd mcp && npm test` — 1 skipped, gated on a real `trace_processor`
+binary and a real capture both being present on the machine, which they are
+not on a fresh checkout), and 112 in the timeline UI (`cd mcp && npm run
+test:ui`, a separate suite from the server's). The
 runtime's arithmetic is covered where it has been wrong before — a long freeze
 counted in refreshes rather than in relaxed deadlines, and a stalled thread's
 stack ordered so the app's own frames lead. A parity test compares the public
 surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
-integration. The 2 JVM skips are the AGP compatibility pair, which needs an
-SDK and the network and skips cleanly without a version to check.
+integration. Two of the three JVM skips are the AGP compatibility pair, which
+needs an SDK and the network and skips cleanly without a version to check;
+the third asserts a `PORTHOLE_SDK_DIR` resolved from `local.properties`
+keeps its POSIX shape, which `java.io.File` normalizes away on Windows, so it
+skips on the platform this project runs its own primary shell on.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
