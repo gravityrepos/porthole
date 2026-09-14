@@ -91,6 +91,22 @@ class McpConfigTest : StubAdbFunctionalTest() {
     // where local.properties is the ONLY correct answer (see GRA-87).
     private val noSdkEnv = mapOf("PATH" to (System.getenv("PATH") ?: ""))
 
+    /**
+     * Provenance (GRA-111 pattern): captured verbatim from a real
+     * `local.properties` written by an actual Android Studio install, on a
+     * Windows 11 development workstation, 2026-09-14 — the same file this
+     * repository ships gitignored, so every developer's own copy is written
+     * by the same tool the same way. Only the username segment
+     * (`C:\Users\<name>\...`) was changed, to a neutral `builder`, per
+     * GRA-150 QA's note not to commit a personal filesystem path; the
+     * escaping under test — the drive-letter colon and every doubled
+     * backslash — is exactly what Android Studio's `Properties.store()`
+     * wrote, untouched. If this ever needs refreshing, replace this whole
+     * block with a fresh capture and update the date above and the expected
+     * value in the test that reads it.
+     */
+    private val capturedLocalProperties = "sdk.dir=C\\:\\\\Users\\\\builder\\\\AppData\\\\Local\\\\Android\\\\Sdk\n"
+
     @Test
     fun `writes PORTHOLE_PROJECT_ROOT as the real root project directory`() {
         scratch(registerTask())
@@ -204,28 +220,234 @@ class McpConfigTest : StubAdbFunctionalTest() {
     }
 
     @Test
-    fun `local properties escaping round-trips against the real file on this machine`() {
-        // AC4. Every Windows-shaped test above writes an escaped string this
-        // suite constructed by hand, which proves the parser reads back what
-        // was assumed it would write — precisely the failure mode behind this
-        // project's oldest lesson (self-written fixtures test the format you
-        // assumed, not the one that arrives). This one instead copies the
-        // real local.properties Android Studio wrote for this repository,
-        // byte for byte, and compares against an independent read of it
-        // (java.util.Properties, not resolveSdkDir) rather than a literal.
+    fun `a Windows drive-relative sdk dir does not get spliced into the project root`() {
+        // GRA-150 QA regression: `C:foo` (a drive letter and colon with no
+        // separator) is Windows' "drive-relative" shape — "foo, relative to
+        // whatever the current directory on drive C happens to be" — which
+        // File.isAbsolute correctly reports as false. Joining it onto
+        // projectRoot the same way an ordinary relative path is joined does
+        // NOT anchor it under the project: WinNTFileSystem splices the two
+        // strings together as "<projectRoot>\C:foo", a colon inside a path
+        // segment that Windows refuses to open at all — worse than doing
+        // nothing, and worse than what this resolver did before GRA-150. See
+        // the comment on resolveSdkDir/isWindowsDriveRelative for why this
+        // shape is deliberately left exactly as Java resolves it alone
+        // (valid, just not anchored to the project) rather than given an
+        // invented answer. Not compared against a literal
+        // `File("C:sdk-drive-relative").absolutePath` computed in this test's
+        // own JVM: Windows tracks "the current directory on drive C"
+        // per-process, and this build forks a separate TestKit daemon JVM
+        // with its own value for it, so the two processes can legitimately
+        // resolve the same drive-relative string to different (both valid)
+        // answers. What must hold regardless of which process resolves it is
+        // the actual regression this guards: the result must not be
+        // projectRoot with "C:sdk-drive-relative" appended to it.
+        assumeTrue("drive-relative paths are a Windows shape", isWindowsHost())
+
+        write("local.properties", "sdk.dir=C:sdk-drive-relative\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        val produced = env["PORTHOLE_SDK_DIR"] as String
+        assertFalse(
+            "a colon must never appear outside the drive prefix; got $produced",
+            produced.drop(2).contains(':'),
+        )
+        assertFalse(
+            "must not be spliced onto the project root; got $produced",
+            produced.startsWith(projectDir.root.absolutePath),
+        )
+    }
+
+    @Test
+    fun `a dot-relative sdk dir resolves under the project root`() {
+        // QA-flagged gap: "./foo" is a shape nothing exercised. It is not
+        // normalized (the "." segment goes verbatim into the resolved path,
+        // same as PortholeMcpConfigTask writes it into .mcp.json) — that is a
+        // deliberate non-goal of this ticket, not an oversight; what matters
+        // is that it is still anchored under projectRoot rather than user.dir.
+        projectDir.newFolder("sdk-dot-relative")
+        write("local.properties", "sdk.dir=./sdk-dot-relative\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(File(projectDir.root, "./sdk-dot-relative").absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `a parent-relative sdk dir resolves against the project root's parent`() {
+        // QA-flagged gap: "../foo" has a real, useful meaning — a shared SDK
+        // checkout that lives next to several projects — and it is worth
+        // proving the anchor is projectRoot and not some other directory by
+        // computing the expected answer independently (via projectDir.root's
+        // own parentFile) rather than by re-running the same File(...) call
+        // resolveSdkDir itself would run. Compared via canonicalFile, not a
+        // literal string: resolveSdkDir does not normalize ".." out of the
+        // path it returns (see the dot-relative test above), so the raw
+        // string still contains "..\sdk-parent-relative-..." — canonicalizing
+        // both sides is what makes this an independent check of where the
+        // path actually points rather than a re-derivation of the same
+        // unnormalized string.
+        val sibling = File(projectDir.root.parentFile, "sdk-parent-relative-${System.nanoTime()}")
+        sibling.mkdirs()
+        try {
+            write("local.properties", "sdk.dir=../${sibling.name}\n")
+            scratch(registerTask())
+
+            val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+            assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+            val env = readEnvBlock()
+            val produced = File(env["PORTHOLE_SDK_DIR"] as String)
+            assertEquals(sibling.canonicalFile, produced.canonicalFile)
+        } finally {
+            sibling.delete()
+        }
+    }
+
+    @Test
+    fun `a trailing separator on a relative sdk dir does not change the resolved path`() {
+        // QA-flagged gap. A forward slash is accepted by java.io.File as a
+        // separator on every platform this suite runs on, so it is used here
+        // rather than choosing the escaped-backslash spelling on Windows only.
+        val sdk = projectDir.newFolder("sdk-relative-trailing")
+        write("local.properties", "sdk.dir=${sdk.name}/\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `a relative sdk dir with spaces resolves under the project root`() {
+        // QA-flagged gap: the existing spaces coverage is all on absolute
+        // paths (see the Windows/UNC/POSIX tests above); this is the
+        // relative case, which goes through the projectRoot-join branch
+        // those never touch.
+        val sdk = projectDir.newFolder("sdk relative with spaces")
+        write("local.properties", "sdk.dir=${sdk.name}\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `a POSIX-shaped sdk dir resolves under the project root on Windows too`() {
+        // QA-flagged gap: `writes PORTHOLE_SDK_DIR ... surviving a POSIX
+        // path` above is assumeFalse(isWindowsHost()), so it structurally
+        // never runs here, and this ticket changed Windows' own answer for
+        // this shape — main gave "C:\opt\android-sdk" (the current drive
+        // root; java.io.File treats a leading "/" as belonging to the
+        // current drive on Windows, not the filesystem root), this resolver
+        // now gives "<projectRoot>\opt\android-sdk" (the relative-join
+        // branch, since "/opt/android-sdk" is not absolute by
+        // File.isAbsolute's Windows definition). That is a real behaviour
+        // change worth pinning explicitly rather than leaving to a test that
+        // cannot run on this host.
+        assumeTrue(isWindowsHost())
+
+        write("local.properties", "sdk.dir=/opt/android-sdk\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        val produced = env["PORTHOLE_SDK_DIR"]
+        assertEquals(File(projectDir.root, "/opt/android-sdk").absolutePath, produced)
+        assertFalse(
+            "expected the projectRoot-anchored answer, not the pre-GRA-150 current-drive answer",
+            produced == "C:\\opt\\android-sdk",
+        )
+    }
+
+    @Test
+    fun `local properties escaping round-trips against a real Android Studio capture, committed`() {
+        // AC4, and this is now the *primary* proof, not the only one — QA
+        // (GRA-150) correctly flagged that the machine-local test below is
+        // the GRA-75 / GRA-137 / GRA-144 shape: it silently skips wherever
+        // local.properties is absent (every fresh checkout, all of CI), the
+        // suite total does not move, and the build stays green. A green
+        // build that ran one fewer test is indistinguishable from one that
+        // passed, which defeats the entire point of AC4.
+        //
+        // capturedLocalProperties below is not reconstructed from the escaping
+        // rules this suite assumes — it is the literal bytes read from a
+        // local.properties Android Studio wrote on a real Windows workstation
+        // (this project's GRA-111 pattern: a committed real artifact, with
+        // provenance, rather than a hand-built fixture). The only change from
+        // what was captured is the username, replaced with a neutral
+        // placeholder per GRA-150 QA's note not to commit a personal
+        // filesystem path — the escaping under test (the drive colon and
+        // every doubled backslash) is untouched. This test needs no file on
+        // disk and no assumeTrue: it runs identically on this machine, a
+        // fresh clone and CI.
+        assumeTrue("this escaping shape is Windows-specific", isWindowsHost())
+
+        write("local.properties", capturedLocalProperties)
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(
+            "C:\\Users\\builder\\AppData\\Local\\Android\\Sdk",
+            env["PORTHOLE_SDK_DIR"],
+        )
+    }
+
+    @Test
+    fun `local properties escaping round-trips against the real file on this machine, when one is present`() {
+        // AC4's belt-and-suspenders half: the committed capture above is now
+        // the unconditional proof, so this one is free to be exactly what its
+        // name says — an *additional* real-world cross-check on whatever
+        // local.properties this run's machine actually has, which may catch
+        // something the fixed capture above cannot (a different SDK layout,
+        // a different Windows locale, a genuinely different escaping choice
+        // by whatever wrote it). Per QA's finding, its skip must be visible
+        // rather than silent, so both the run and the skip print a banner —
+        // grep test output for "[McpConfigTest][AC4]" to see which happened
+        // without opening the JUnit XML.
         //
         // System.getProperty("user.dir") here is this JVM's own working
         // directory, not the scratch project's — Gradle sets a test task's
         // working directory to its module (gradle-plugin), so the parent is
         // the repository root, same as PortholeAgpCompatibilityTest.
         val real = File(File(System.getProperty("user.dir")).parentFile, "local.properties")
+        if (!real.isFile) {
+            println("[McpConfigTest][AC4] SKIPPED: no local.properties at ${real.absolutePath} — " +
+                "this environment gets AC4's coverage only from the committed capture above.")
+        }
         assumeTrue("no local.properties next to the real build; nothing to compare against", real.isFile)
 
         val props = Properties()
         real.inputStream().use(props::load)
         val rawSdkDir = props.getProperty("sdk.dir")
+        if (rawSdkDir.isNullOrBlank()) {
+            println("[McpConfigTest][AC4] SKIPPED: ${real.absolutePath} has no usable sdk.dir.")
+        }
         assumeTrue("the real local.properties has no usable sdk.dir", !rawSdkDir.isNullOrBlank())
         val expected = File(rawSdkDir)
+        if (!(expected.isAbsolute && expected.isDirectory)) {
+            println(
+                "[McpConfigTest][AC4] SKIPPED: ${real.absolutePath}'s sdk.dir ($expected) is not an " +
+                    "absolute, existing directory.",
+            )
+        }
         assumeTrue(
             "expected an absolute, existing SDK directory from the real file, got $expected",
             expected.isAbsolute && expected.isDirectory,
@@ -239,6 +461,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
         val env = readEnvBlock()
         assertEquals(expected.absolutePath, env["PORTHOLE_SDK_DIR"])
+        println("[McpConfigTest][AC4] RAN against the real ${real.absolutePath}: ${env["PORTHOLE_SDK_DIR"]}")
     }
 
     @Test

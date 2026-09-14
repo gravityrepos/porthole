@@ -390,10 +390,31 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
  * cost an hour to a failing `Windows-shaped path` test before the explicit
  * `isAbsolute` check below was added; the mistake is worth naming so nobody
  * reaches for the two-argument constructor here again. `File(it).isAbsolute`
- * correctly recognises a drive letter and a UNC path, and correctly refuses a
- * POSIX-shaped `/…` on Windows (it belongs to the current drive, not the
- * filesystem root), matching the platform-dependent shapes this file's tests
- * already document.
+ * correctly recognises a *fully* absolute drive-letter path (`C:\…`) and a UNC
+ * path, and correctly refuses a POSIX-shaped `/…` on Windows (it belongs to
+ * the current drive, not the filesystem root), matching the platform-dependent
+ * shapes this file's tests already document. It does **not** recognise a
+ * drive-letter path with no separator after the colon (`C:foo`) as absolute —
+ * that shape gets its own check below, because it is not "relative" either.
+ *
+ * GRA-150 QA: a **drive-relative** `sdk.dir` — `C:foo`, meaning "foo, relative
+ * to whatever the current directory on drive C happens to be", a real Windows
+ * path concept distinct from both absolute and ordinary-relative — is not
+ * absolute by `File.isAbsolute`'s definition, so it fell into the
+ * `File(projectRoot, it)` branch on the first pass of this fix. That branch
+ * does not "resolve it against projectRoot" for this shape; `WinNTFileSystem`
+ * splices the two strings together as `<projectRoot>\C:foo`, a colon inside a
+ * path segment that Windows refuses to open — worse than doing nothing, and
+ * worse than what this function did before GRA-150 (`File(it).absolutePath`
+ * alone, which Windows resolves against the drive's own current directory: a
+ * valid path, merely not anchored to the project). There is no reliable way
+ * to ask the JVM what "the current directory on drive C" is, so rather than
+ * invent an answer, this shape is deliberately left exactly as it resolved
+ * before this ticket: [isWindowsDriveRelative] routes it to `candidate`
+ * unjoined, matching `main`'s old behaviour on the one input where this
+ * ticket would otherwise have made things worse. On every other platform a
+ * colon is an ordinary filename character, so `C:foo` there is exactly as
+ * relative as it looks and takes the normal `File(projectRoot, it)` branch.
  *
  * `mcp/src/adb.ts`'s `sdkDirFromLocalProperties` does not resolve a relative
  * value at all today — it returns the raw string from the file, and whatever
@@ -409,7 +430,11 @@ internal fun resolveSdkDir(projectRoot: File): File? {
         local.inputStream().use(props::load)
         props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let {
             val candidate = File(it)
-            return if (candidate.isAbsolute) candidate else File(projectRoot, it)
+            return when {
+                candidate.isAbsolute -> candidate
+                isWindowsDriveRelative(it) -> candidate
+                else -> File(projectRoot, it)
+            }
         }
     }
     return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
@@ -418,6 +443,22 @@ internal fun resolveSdkDir(projectRoot: File): File? {
         .map(::File)
         .firstOrNull { it.isDirectory }
 }
+
+/**
+ * True for a Windows drive-relative path — a letter, a colon, and then
+ * anything other than a separator (`C:foo`, or bare `C:`) — which is neither
+ * absolute (`File.isAbsolute` says so correctly) nor safely joinable with a
+ * parent (see the comment on [resolveSdkDir]). Gated on [isWindowsHost]
+ * because the same string is an unremarkable relative filename everywhere
+ * else: a colon is legal in a POSIX filename, and `File(projectRoot, "C:foo")`
+ * there is a normal, correct join.
+ */
+private fun isWindowsDriveRelative(value: String): Boolean =
+    isWindowsHost() && value.length >= 2 && value[0].isLetter() && value[1] == ':' &&
+        (value.length == 2 || (value[2] != '\\' && value[2] != '/'))
+
+private fun isWindowsHost(): Boolean =
+    System.getProperty("os.name").orEmpty().lowercase().contains("win")
 
 /**
  * Fetches Perfetto's trace_processor, once, and says where it went.
