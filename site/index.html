@@ -377,29 +377,98 @@
         font-weight: 500;
       }
 
-      /* hero */
-      header {
+      /* hero — GRA-134, concept 2 "the aperture": the fold is the view. One
+         porthole, sized off the fold's own height so the crop is the same
+         shape at every width, with the copy set on the hull to its left. */
+      header#top {
         position: relative;
         overflow: hidden;
         border-bottom: 1px solid var(--line-soft);
-        background: radial-gradient(110% 130% at 15% -10%, #182231 0%, #0f141d 52%, #0d1117 100%);
+        /* One ground a step darker than --ground so the teal glass reads.
+           Scoped to the hero on purpose — no other section changes. */
+        --hull: #0b0e14;
+        /* The copy column. 520px was the floor GRA-136 held for this hero; it
+           now grows with the wrap, because at 1600 a 520px column left the
+           founder's "wasted space" on the right of the fold instead of under
+           the gutters. 46% of the wrap: 542px at 1280, 609 at 1440, 736 at
+           1600 and up. The paragraph keeps its own 60ch measure inside it, so
+           what the extra width buys is headline, not longer lines. */
+        --copy: clamp(520px, calc(var(--wrap) * 0.46), 780px);
+        /* Left edge of the art box = gutter + the hero's own 24px pad + the
+           copy column + clearance. Anchored to the copy column, never the
+           viewport edge: anchored to the edge the disc drifts left as the
+           window narrows and the headline ends up lying across a bright lane
+           at about 1024px. vw rather than %, because this value is also used
+           in a height below, where a percentage would resolve against the
+           wrong axis; the ~7px the scrollbar adds only widens the clearance. */
+        --art-left: calc(max(0px, (100vw - var(--wrap)) / 2) + 24px + var(--copy) + 44px);
+        background: radial-gradient(80% 110% at 6% 0%, #161e2b 0%, #0e131c 44%, var(--hull) 100%);
       }
-      .rules {
+      .art {
+        position: absolute;
+        top: 50%;
+        left: var(--art-left);
+        /* 118% of the fold is the shape the concept was drawn at. The middle
+           term keeps the disc running off the right edge once the window is
+           wider than that — at 1920 a fold-sized disc stops short of the edge
+           and leaves the hole the founder complained about. The 156% ceiling
+           is where the rim stops reading as a circle. */
+        height: clamp(118%, calc(100vw - var(--art-left) + 6vw), 156%);
+        width: auto;
+        aspect-ratio: 1 / 1;
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+      .disc {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* Feathers the glass into the hull on the copy's side, so the words sit
+         on flat ground and the picture starts where they stop. */
+      .scrim {
         position: absolute;
         inset: 0;
-        opacity: 0.45;
-        background-image: linear-gradient(to right, #1a2130 1px, transparent 1px);
-        background-size: 8.33% 100%;
+        pointer-events: none;
+        background: linear-gradient(
+          97deg,
+          rgba(11, 14, 20, 0.97) 0%,
+          rgba(11, 14, 20, 0.94) 24%,
+          rgba(11, 14, 20, 0.7) 40%,
+          rgba(11, 14, 20, 0.16) 56%,
+          rgba(11, 14, 20, 0) 68%
+        );
+      }
+      /* The only motion in the fold: one linear translate of the lane group by
+         exactly one tile, so the loop has no seam. The resting state at
+         translateX(0) is a fully composed frame — nothing fades in, nothing is
+         parked at opacity 0 — so switching the animation off leaves the same
+         picture rather than a blank. */
+      @keyframes drift {
+        to {
+          transform: translateX(-1440px);
+        }
+      }
+      .flow {
+        transform-box: view-box;
+        transform-origin: 0 0;
+        will-change: transform;
+        animation: drift 78s linear infinite;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .flow {
+          animation: none;
+        }
       }
       .hero {
         position: relative;
         max-width: var(--wrap);
         margin: 0 auto;
-        padding: 44px 24px 36px;
+        padding: clamp(56px, 6vw, 104px) 24px clamp(58px, 6.2vw, 108px);
         display: flex;
         flex-direction: column;
-        align-items: center;
-        text-align: center;
+        align-items: flex-start;
+        text-align: left;
         gap: 20px;
       }
       .badge {
@@ -440,25 +509,26 @@
       .actions {
         display: flex;
         flex-wrap: wrap;
-        justify-content: center;
         gap: 10px;
       }
-      /* Kept to 520px so hero concept 2 (GRA-134, the aperture) has room
-         beside the words instead of under them. */
+      /* Held off the porthole by --copy, which is where the art's left edge is
+         measured from — the words never sit on the glass. */
       .hero-copy {
         display: flex;
         flex-direction: column;
-        align-items: center;
-        gap: 14px;
-        max-width: 520px;
+        align-items: flex-start;
+        gap: 16px;
+        max-width: min(var(--copy), 100%);
       }
-      /* The global h1 size (clamp up to 60px, 20ch box) was tuned for a
-         hero with no column limit. At 520px it wraps to four lines, so this
-         narrower headline gets its own, smaller clamp. */
+      /* The global h1 size (clamp up to 60px, 20ch box) was tuned for a hero
+         with no column limit, and GRA-136's 36px cap for a 520px one. The
+         column now grows with the wrap and the headline grows with it: two
+         lines at 1440 and up, three at 1280 and below. */
       .hero-copy h1 {
         max-width: none;
-        font-size: clamp(26px, 3.8vw, 36px);
-        line-height: 1.15;
+        font-size: clamp(28px, 3.4vw, 52px);
+        line-height: 1.07;
+        letter-spacing: -0.03em;
       }
       .hero-cmd {
         margin: 0;
@@ -480,6 +550,42 @@
         content: "❯ ";
         color: var(--teal);
         user-select: none;
+      }
+      /* Narrow: one media query, scoped to the hero's own classes. Below this
+         width there is no room for a column beside the disc, so the porthole
+         stops being a right-edge crop and rises out of the top edge instead,
+         the scrim turns vertical, and the copy sits under it on clean ground.
+         All three are driven off one --disc length rather than percentages of
+         the fold: the fold's height depends on how many lines the copy takes,
+         so a scrim measured in percent of it slides down under a long
+         paragraph and leaves the badge sitting on the glass. */
+      @media (max-width: 860px) {
+        header#top {
+          --disc: clamp(300px, 122vw, 560px);
+        }
+        .art {
+          top: -26px;
+          left: 50%;
+          width: var(--disc);
+          height: auto;
+          aspect-ratio: auto;
+          transform: translateX(-50%);
+        }
+        .scrim {
+          background: linear-gradient(
+            180deg,
+            rgba(11, 14, 20, 0) 0,
+            rgba(11, 14, 20, 0.08) calc(var(--disc) * 0.22),
+            rgba(11, 14, 20, 0.72) calc(var(--disc) * 0.46),
+            var(--hull) calc(var(--disc) * 0.62)
+          );
+        }
+        /* Solid hull by 0.62 of the disc, first line of copy at 0.66 of it:
+           the badge lands on flat ground at every width inside this query. */
+        .hero {
+          padding-top: calc(var(--disc) * 0.66);
+          padding-bottom: 56px;
+        }
       }
 
       /* quick start */
@@ -874,7 +980,49 @@
          contentinfo landmark. -->
     <main id="main-content" tabindex="-1">
     <header id="top">
-      <div class="rules"></div>
+      <!-- brand/hero.svg — generated by brand/hero.mjs, do not edit here -->
+      <div class="art">
+<!-- Copyright 2026 Gravity Labs -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" class="disc" viewBox="0 0 1020 1020" role="presentation" aria-hidden="true" focusable="false">
+<defs>
+<radialGradient id="hero-tint" cx="0.38" cy="0.28" r="0.8">
+<stop offset="0" stop-color="#7fdcc6" stop-opacity="0.18"/>
+<stop offset="0.5" stop-color="#5ec8b0" stop-opacity="0.06"/>
+<stop offset="1" stop-color="#060a0f" stop-opacity="0.66"/>
+</radialGradient>
+<radialGradient id="hero-vign" cx="0.5" cy="0.5" r="0.5">
+<stop offset="0.58" stop-color="#0d1117" stop-opacity="0"/>
+<stop offset="1" stop-color="#05080c" stop-opacity="0.9"/>
+</radialGradient>
+<linearGradient id="hero-collar" x1="0.12" y1="0" x2="0.85" y2="1">
+<stop offset="0" stop-color="#273244" stop-opacity="0.9"/>
+<stop offset="0.48" stop-color="#131a25" stop-opacity="0.35"/>
+<stop offset="1" stop-color="#080c12" stop-opacity="0.8"/>
+</linearGradient>
+<clipPath id="hero-aperture"><circle cx="510" cy="510" r="440"/></clipPath>
+<g id="hero-tile"><g fill="#f0883e" opacity="0.92"><rect x="26.97" y="0" width="43.08" height="24" rx="3"/><rect x="92.94" y="0" width="13.67" height="24" rx="3"/><rect x="177.79" y="0" width="36.12" height="24" rx="3"/><rect x="276.91" y="0" width="30.67" height="24" rx="3"/><rect x="336.35" y="0" width="11.12" height="24" rx="3"/><rect x="393.62" y="0" width="21" height="24" rx="3"/><rect x="500.85" y="0" width="17.53" height="24" rx="3"/><rect x="561.75" y="0" width="39.54" height="24" rx="3"/><rect x="659.02" y="0" width="34.76" height="24" rx="3"/><rect x="755.13" y="0" width="36.93" height="24" rx="3"/><rect x="836.63" y="0" width="15.07" height="24" rx="3"/><rect x="880" y="0" width="23.53" height="24" rx="3"/><rect x="989.02" y="0" width="36.93" height="24" rx="3"/><rect x="1096.17" y="0" width="28.11" height="24" rx="3"/><rect x="1173.49" y="0" width="37.74" height="24" rx="3"/><rect x="1234.82" y="0" width="22.78" height="24" rx="3"/><rect x="1305.24" y="0" width="33.42" height="24" rx="3"/><rect x="1379.34" y="0" width="13.35" height="24" rx="3"/></g><g fill="#a371f7" opacity="0.85"><rect x="71.69" y="44" width="5.95" height="24" rx="3"/><rect x="295.46" y="44" width="7.18" height="24" rx="3"/><rect x="380.15" y="44" width="7.28" height="24" rx="3"/><rect x="522.41" y="44" width="7.56" height="24" rx="3"/><rect x="623.21" y="44" width="7.06" height="24" rx="3"/><rect x="783.61" y="44" width="6.74" height="24" rx="3"/><rect x="876.49" y="44" width="6.49" height="24" rx="3"/><rect x="970.29" y="44" width="6.75" height="24" rx="3"/><rect x="1112.89" y="44" width="6.86" height="24" rx="3"/><rect x="1275.97" y="44" width="6.68" height="24" rx="3"/></g><g fill="#56c88c" opacity="0.92"><rect x="179.46" y="88" width="153.08" height="24" rx="3"/><rect x="643.86" y="88" width="171.56" height="24" rx="3"/><rect x="1187.86" y="88" width="161.08" height="24" rx="3"/></g><g fill="#539bf5" opacity="0.92"><rect x="101.16" y="132" width="75.65" height="24" rx="3"/><rect x="295.84" y="132" width="106.29" height="24" rx="3"/><rect x="599.33" y="132" width="140.38" height="24" rx="3"/><rect x="886.49" y="132" width="118.69" height="24" rx="3"/><rect x="1120.79" y="132" width="65.69" height="24" rx="3"/></g><g fill="#e3b341" opacity="0.92"><rect x="25.11" y="176" width="7.1" height="24" rx="3"/><rect x="95.15" y="176" width="20.96" height="24" rx="3"/><rect x="165.03" y="176" width="11.68" height="24" rx="3"/><rect x="194.73" y="176" width="12.74" height="24" rx="3"/><rect x="223.76" y="176" width="5.84" height="24" rx="3"/><rect x="246.59" y="176" width="17.51" height="24" rx="3"/><rect x="323.28" y="176" width="9.74" height="24" rx="3"/><rect x="374.39" y="176" width="24.27" height="24" rx="3"/><rect x="443.92" y="176" width="8.69" height="24" rx="3"/><rect x="493.82" y="176" width="19.3" height="24" rx="3"/><rect x="573.25" y="176" width="22.14" height="24" rx="3"/><rect x="654.99" y="176" width="11.11" height="24" rx="3"/><rect x="696.42" y="176" width="16.33" height="24" rx="3"/><rect x="733.84" y="176" width="22.38" height="24" rx="3"/><rect x="774.84" y="176" width="24.65" height="24" rx="3"/><rect x="825.08" y="176" width="23.14" height="24" rx="3"/><rect x="899.39" y="176" width="22.89" height="24" rx="3"/><rect x="957.82" y="176" width="8.88" height="24" rx="3"/><rect x="987.5" y="176" width="23.07" height="24" rx="3"/><rect x="1033.51" y="176" width="16.03" height="24" rx="3"/><rect x="1103.21" y="176" width="19.16" height="24" rx="3"/><rect x="1177.61" y="176" width="21.86" height="24" rx="3"/><rect x="1229.03" y="176" width="16.52" height="24" rx="3"/><rect x="1272.35" y="176" width="10.71" height="24" rx="3"/><rect x="1313.52" y="176" width="17.71" height="24" rx="3"/><rect x="1364.81" y="176" width="16.82" height="24" rx="3"/></g><g fill="#db61a2" opacity="0.92"><rect x="314.24" y="220" width="111.97" height="24" rx="3"/><rect x="784.81" y="220" width="137.9" height="24" rx="3"/></g><polyline points="0,288 309.6,268.36 324,286.56 669.6,268.45 684,286.56 1029.6,272.19 1044,286.56 1389.6,266.18 1404,286.56 1440,288" fill="none" stroke="#6cb6ff" stroke-width="1.4" stroke-linejoin="round" opacity="0.9"/><polygon points="0,288 0,288 309.6,268.36 324,286.56 669.6,268.45 684,286.56 1029.6,272.19 1044,286.56 1389.6,266.18 1404,286.56 1440,288 1440,288" fill="#6cb6ff" opacity="0.14"/><g fill="#56d4dd" opacity="0.85"><rect x="212.64" y="308" width="6.2" height="24" rx="3"/><rect x="548.15" y="308" width="7.7" height="24" rx="3"/><rect x="768.66" y="308" width="7.44" height="24" rx="3"/><rect x="961.23" y="308" width="8.39" height="24" rx="3"/><rect x="1183.88" y="308" width="8.23" height="24" rx="3"/><rect x="1382.22" y="308" width="8.39" height="24" rx="3"/></g><g fill="#5ec8b0" opacity="0.5"><rect x="2" y="399.91" width="3" height="9.69" rx="1.2"/><rect x="23" y="399.67" width="3" height="9.93" rx="1.2"/><rect x="65" y="393.64" width="3" height="15.96" rx="1.2"/><rect x="86" y="397.81" width="3" height="11.79" rx="1.2"/><rect x="107" y="398.35" width="3" height="11.25" rx="1.2"/><rect x="128" y="395.06" width="3" height="14.54" rx="1.2"/><rect x="149" y="395.61" width="3" height="13.99" rx="1.2"/><rect x="170" y="400.39" width="3" height="9.21" rx="1.2"/><rect x="191" y="398.77" width="3" height="10.83" rx="1.2"/><rect x="233" y="401.01" width="3" height="8.59" rx="1.2"/><rect x="254" y="398.92" width="3" height="10.68" rx="1.2"/><rect x="275" y="396.79" width="3" height="12.81" rx="1.2"/><rect x="296" y="400.73" width="3" height="8.87" rx="1.2"/><rect x="317" y="395.21" width="3" height="14.39" rx="1.2"/><rect x="338" y="396.08" width="3" height="13.52" rx="1.2"/><rect x="359" y="397.84" width="3" height="11.76" rx="1.2"/><rect x="380" y="399.19" width="3" height="10.41" rx="1.2"/><rect x="401" y="398.41" width="3" height="11.19" rx="1.2"/><rect x="422" y="393.56" width="3" height="16.04" rx="1.2"/><rect x="443" y="400.77" width="3" height="8.83" rx="1.2"/><rect x="464" y="393.75" width="3" height="15.85" rx="1.2"/><rect x="485" y="395.28" width="3" height="14.32" rx="1.2"/><rect x="506" y="402.35" width="3" height="7.25" rx="1.2"/><rect x="527" y="401.59" width="3" height="8.01" rx="1.2"/><rect x="548" y="396.07" width="3" height="13.53" rx="1.2"/><rect x="569" y="395.16" width="3" height="14.44" rx="1.2"/><rect x="590" y="395.32" width="3" height="14.28" rx="1.2"/><rect x="611" y="397.05" width="3" height="12.55" rx="1.2"/><rect x="632" y="400.2" width="3" height="9.4" rx="1.2"/><rect x="653" y="398.85" width="3" height="10.75" rx="1.2"/><rect x="674" y="398.37" width="3" height="11.23" rx="1.2"/><rect x="695" y="399" width="3" height="10.6" rx="1.2"/><rect x="716" y="397.03" width="3" height="12.57" rx="1.2"/><rect x="737" y="401.59" width="3" height="8.01" rx="1.2"/><rect x="758" y="395" width="3" height="14.6" rx="1.2"/><rect x="779" y="402.15" width="3" height="7.45" rx="1.2"/><rect x="800" y="393.57" width="3" height="16.03" rx="1.2"/><rect x="842" y="399.85" width="3" height="9.75" rx="1.2"/><rect x="863" y="400.44" width="3" height="9.16" rx="1.2"/><rect x="884" y="399.17" width="3" height="10.43" rx="1.2"/><rect x="905" y="400.37" width="3" height="9.23" rx="1.2"/><rect x="947" y="395.05" width="3" height="14.55" rx="1.2"/><rect x="968" y="401.79" width="3" height="7.81" rx="1.2"/><rect x="989" y="400.15" width="3" height="9.45" rx="1.2"/><rect x="1010" y="396.42" width="3" height="13.18" rx="1.2"/><rect x="1031" y="393.74" width="3" height="15.86" rx="1.2"/><rect x="1052" y="394.48" width="3" height="15.12" rx="1.2"/><rect x="1073" y="399.42" width="3" height="10.18" rx="1.2"/><rect x="1094" y="397.32" width="3" height="12.28" rx="1.2"/><rect x="1115" y="399.98" width="3" height="9.62" rx="1.2"/><rect x="1136" y="398.1" width="3" height="11.5" rx="1.2"/><rect x="1157" y="395.44" width="3" height="14.16" rx="1.2"/><rect x="1178" y="402.29" width="3" height="7.31" rx="1.2"/><rect x="1199" y="396.15" width="3" height="13.45" rx="1.2"/><rect x="1220" y="398.43" width="3" height="11.17" rx="1.2"/><rect x="1241" y="398.15" width="3" height="11.45" rx="1.2"/><rect x="1262" y="394.36" width="3" height="15.24" rx="1.2"/><rect x="1283" y="397.75" width="3" height="11.85" rx="1.2"/><rect x="1304" y="395.13" width="3" height="14.47" rx="1.2"/><rect x="1325" y="402.04" width="3" height="7.56" rx="1.2"/><rect x="1346" y="401.49" width="3" height="8.11" rx="1.2"/><rect x="1367" y="393.58" width="3" height="16.02" rx="1.2"/><rect x="1388" y="395.26" width="3" height="14.34" rx="1.2"/><rect x="1409" y="394.06" width="3" height="15.54" rx="1.2"/><rect x="1430" y="398.66" width="3" height="10.94" rx="1.2"/></g><g fill="#f85149" opacity="0.95"><rect x="44" y="364.22" width="3" height="45.38" rx="1.2"/><rect x="212" y="361.2" width="3" height="48.4" rx="1.2"/><rect x="821" y="360.92" width="3" height="48.68" rx="1.2"/><rect x="926" y="368.14" width="3" height="41.46" rx="1.2"/></g></g>
+</defs>
+<circle cx="510" cy="510" r="486" fill="#141b26" stroke="#2b3648" stroke-width="1"/>
+<circle cx="510" cy="510" r="486" fill="url(#hero-collar)"/>
+<circle cx="510" cy="42" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="689.1" cy="77.62" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="840.93" cy="179.07" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="942.38" cy="330.9" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="978" cy="510" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="942.38" cy="689.1" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="840.93" cy="840.93" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="689.1" cy="942.38" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="510" cy="978" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="330.9" cy="942.38" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="179.07" cy="840.93" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="77.62" cy="689.1" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="42" cy="510" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="77.62" cy="330.9" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="179.07" cy="179.07" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/><circle cx="330.9" cy="77.62" r="6" fill="#1e2634" stroke="#46546e" stroke-width="1.2"/>
+<circle cx="510" cy="510" r="440" fill="#070b11"/>
+<g clip-path="url(#hero-aperture)">
+<g class="flow">
+<g transform="translate(-120 305.2)"><use href="#hero-tile"/></g>
+<g transform="translate(1320 305.2)"><use href="#hero-tile"/></g>
+</g>
+<rect x="70" y="70" width="880" height="880" fill="url(#hero-tint)"/>
+<rect x="70" y="70" width="880" height="880" fill="url(#hero-vign)"/>
+<path d="M 170 360 A 440 440 0 0 1 460 72 L 402 160 A 340 340 0 0 0 242 418 Z" fill="#eaf6f2" opacity="0.05"/>
+</g>
+<circle cx="510" cy="510" r="440" fill="none" stroke="#5ec8b0" stroke-width="4.5" opacity="0.92"/>
+<circle cx="510" cy="510" r="486" fill="none" stroke="#5ec8b0" stroke-width="1" opacity="0.14"/>
+<circle cx="510" cy="510" r="10" fill="#7fdcc6"/>
+<circle cx="510" cy="510" r="21" fill="none" stroke="#7fdcc6" stroke-width="1.3" opacity="0.4"/>
+</svg>
+      </div>
+      <div class="scrim"></div>
       <div class="hero">
         <div class="hero-copy">
           <span class="badge">Apache-2.0 · debug builds only · Android</span>
