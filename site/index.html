@@ -88,6 +88,15 @@
       a:hover {
         color: var(--teal-lit);
       }
+      /* No :focus-visible rule existed anywhere on the page — keyboard focus
+         fell back to the UA default ring on a #0d1117 ground. One rule,
+         applied broadly, since a keyboard user hits it on every screen. */
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--teal);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
       h1,
       h2 {
         margin: 0;
@@ -165,13 +174,32 @@
         overflow-wrap: anywhere;
       }
 
+      /* skip link — hidden until focused, first stop before the sticky nav */
+      .skip-link {
+        position: absolute;
+        top: -100%;
+        left: 12px;
+        z-index: 100;
+        background: var(--teal);
+        color: #0f1620;
+        font-family: var(--mono);
+        font-size: 13px;
+        font-weight: 600;
+        padding: 10px 16px;
+        border-radius: 8px;
+        text-decoration: none;
+      }
+      .skip-link:focus {
+        top: 12px;
+      }
+
       /* nav */
       nav {
         position: sticky;
         top: 0;
         z-index: 20;
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         align-items: center;
         gap: 10px 20px;
         padding: 13px 24px;
@@ -187,17 +215,29 @@
         font-weight: 700;
         letter-spacing: 0.15em;
         color: var(--bright);
+        flex-shrink: 0;
       }
       .nav-links {
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         align-items: center;
         gap: 6px 18px;
         font-family: var(--mono);
         font-size: 12px;
+        /* A phone at 375px cannot fit six links and stay one row wrapped —
+           so it scrolls instead of wrapping. Wrapping cost 86px of an
+           812px viewport (§1.7); a horizontal scroller costs the nav's own
+           height and nothing more, on every screen of the page. */
+        overflow-x: auto;
+        scrollbar-width: none;
+        min-width: 0;
+      }
+      .nav-links::-webkit-scrollbar {
+        display: none;
       }
       .nav-links a {
         color: var(--muted);
+        flex-shrink: 0;
       }
       .nav-links a:hover {
         color: var(--text);
@@ -255,7 +295,7 @@
         position: relative;
         max-width: 1120px;
         margin: 0 auto;
-        padding: 76px 24px 64px;
+        padding: 44px 24px 36px;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -303,13 +343,43 @@
         justify-content: center;
         gap: 10px;
       }
+      /* Kept to 520px so hero concept 2 (GRA-134, the aperture) has room
+         beside the words instead of under them. */
+      .hero-copy {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+        max-width: 520px;
+      }
+      /* The global h1 size (clamp up to 60px, 20ch box) was tuned for a
+         hero with no column limit. At 520px it wraps to four lines, so this
+         narrower headline gets its own, smaller clamp. */
+      .hero-copy h1 {
+        max-width: none;
+        font-size: clamp(26px, 3.8vw, 36px);
+        line-height: 1.15;
+      }
+      .hero-cmd {
+        margin: 0;
+      }
+      .hero-cmd code {
+        display: inline-block;
+        font-family: var(--mono);
+        font-size: 13px;
+        color: #cfd8e5;
+        background: var(--ground-2);
+        border: 1px solid #222a38;
+        border-radius: 8px;
+        padding: 9px 16px;
+      }
 
       /* quick start */
       .step {
-        padding: 18px;
+        padding: 12px;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 7px;
       }
       .step-head {
         display: flex;
@@ -329,10 +399,94 @@
         font-weight: 600;
         color: #eaf0f7;
       }
+      .path-card-title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        color: #eaf0f7;
+      }
+      .path-card pre {
+        font-size: 11px;
+      }
+      #install pre {
+        line-height: 1.45;
+        padding: 10px 12px;
+      }
+      #install .path-screen pre {
+        font-size: 10.5px;
+      }
       .step p {
         font-size: 12.5px;
         line-height: 1.55;
         color: var(--muted);
+      }
+
+      /* the implementer's path — six screens stacked inside #install, each
+         a plain divider row rather than a card, so six of them read as one
+         continuous walkthrough instead of six competing panels. */
+      .path-screen {
+        padding: 22px 0;
+        border-top: 1px solid var(--line-soft);
+      }
+      .path-screen:first-child {
+        padding-top: 0;
+        border-top: none;
+      }
+      .path-screen h2 {
+        margin: 6px 0 12px;
+        font-size: clamp(19px, 2.3vw, 24px);
+      }
+      .path-screen h3 {
+        margin: 2px 0 8px;
+        font-size: 15px;
+        font-weight: 600;
+        color: #eaf0f7;
+      }
+      .path-body {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-width: 68ch;
+      }
+      .path-body p {
+        font-size: 13.5px;
+        line-height: 1.55;
+        color: #a8b4c4;
+      }
+      .path-body code {
+        font-family: var(--mono);
+        font-size: 0.93em;
+        color: #cfd8e5;
+      }
+      .ask-example {
+        margin: 0;
+        padding: 10px 14px;
+        border-left: 3px solid var(--teal);
+        background: var(--ground-2);
+        border-radius: 0 6px 6px 0;
+        font-size: 13px;
+        font-style: italic;
+        color: #cfd8e5;
+      }
+      .path-screen.secondary h2 {
+        font-size: 17px;
+      }
+      .path-links {
+        list-style: none;
+        margin: 22px 0 0;
+        padding: 20px 0 0;
+        border-top: 1px solid var(--line-soft);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .path-links li {
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+      .path-links a {
+        font-weight: 500;
       }
 
       /* lanes */
@@ -582,6 +736,7 @@
     </style>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <nav>
       <a class="wordmark" href="#top">
         <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true">
@@ -601,75 +756,133 @@
       </div>
     </nav>
 
+    <!-- One <main> landmark for the whole document. GRA-127 owns the nav, the
+         hero and #install; everything from #lanes down belongs to later site
+         tickets, so this wrapper only encloses their markup — it does not
+         change it. Closed just before <footer>, which stays its own
+         contentinfo landmark. -->
+    <main id="main-content">
     <header id="top">
       <div class="rules"></div>
       <div class="hero">
-        <span class="badge">Apache-2.0 · debug builds only</span>
-        <h1>A window into your running app</h1>
-        <p>
-          Porthole is a debug-only window into a running Android app — for the developer watching
-          it, and the coding agent fixing it.
-        </p>
-        <div class="actions">
-          <a class="btn btn-primary" href="https://github.com/gravityrepos/porthole">get porthole</a>
-          <a class="btn btn-ghost" href="#install">read the quick start</a>
+        <div class="hero-copy">
+          <span class="badge">Apache-2.0 · debug builds only · Android</span>
+          <h1>Let your coding agent see the running Android app</h1>
+          <p>
+            Porthole is a debug-only Android library and an MCP server: your coding agent asks what
+            recomposed, what dropped a frame, and what is holding the main thread — against the app
+            in front of you.
+          </p>
+          <p class="hero-cmd">
+            <code>./gradlew portholeMcpConfig portholeConnect</code>
+          </p>
+          <div class="actions">
+            <a class="btn btn-primary" href="#install">Start here</a>
+            <a class="btn btn-ghost" href="https://github.com/gravityrepos/porthole">GitHub</a>
+          </div>
         </div>
       </div>
     </header>
 
     <section id="install" style="background: var(--ground-2)">
-      <div class="wrap">
-        <div class="heading">
+      <div class="wrap" style="padding-top: 26px; padding-bottom: 26px">
+        <div class="heading" style="margin-bottom: 10px">
           <span class="eyebrow">QUICK START</span>
-          <h2>The plugin, and one line per client</h2>
-          <p class="lede" style="margin-top: 4px">
-            The runtime starts with your process and finds the Activity itself, so there is nothing
-            to wrap. What it cannot discover is your HTTP and database clients: instrumenting one
-            means being handed the builder before it is built.
-          </p>
+          <h2 style="font-size: 22px">From zero to an agent that can answer</h2>
         </div>
+
         <div class="grid cols-mid">
-          <div class="card step">
+          <div class="card step path-card">
             <div class="step-head">
               <span class="step-num">01</span>
-              <span class="step-name">Apply the plugin</span>
+              <h3 class="path-card-title">Install</h3>
             </div>
             <pre>plugins {
-  id("live.gravitylabs.porthole")
+    id("com.android.application")
+    id("live.gravitylabs.porthole") version "0.1.0"
 }</pre>
             <p>
-              It puts the runtime on your debug build types and a no-op with the same API on
-              everything else.
+              <code>runtime:0.1.0</code> on debug builds, <code>runtime-noop:0.1.0</code> elsewhere
+              — same API, empty bodies. minSdk 26 · Gradle 8.14/9.7 · AGP 8.9/9.4.
             </p>
           </div>
 
-          <div class="card step">
+          <div class="card step path-card">
             <div class="step-head">
               <span class="step-num">02</span>
-              <span class="step-name">Instrument your clients</span>
+              <h3 class="path-card-title">Connect the agent</h3>
             </div>
-            <pre>import live.gravitylabs.porthole.*
-
-OkHttpClient.Builder().installPorthole()
-Room.databaseBuilder(…).installPorthole()</pre>
+            <pre>./gradlew :app:installDebug
+./gradlew portholeMcpConfig   # writes .mcp.json
+./gradlew portholeConnect     # adb forward, loopback only</pre>
             <p>
-              Ktor and SQLDelight too. Forget one and the lane says so, rather than looking like an
-              app that made no requests.
+              <code>portholeMcpConfig</code> merges rather than overwrites.
+              <code>portholeConnect</code> is the whole bridge — nothing leaves the machine.
             </p>
           </div>
 
-          <div class="card step">
+          <div class="card step path-card">
             <div class="step-head">
               <span class="step-num">03</span>
-              <span class="step-name">Open the window</span>
+              <h3 class="path-card-title">Ask, in prose</h3>
             </div>
-            <pre>./gradlew portholeUi</pre>
+            <p class="ask-example">
+              "The cart screen stutters when I add an item. What is actually happening?"
+            </p>
             <p>
-              Forwards the port, serves the timeline, opens your browser. No restart, no launch
-              flag.
+              Starts at <code>findings</code>. <strong>observed</strong> means the device saw it;
+              <strong>correlated</strong> means only nearby in time — not proof.
             </p>
           </div>
         </div>
+
+        <div class="path-screen" style="padding: 12px 0">
+          <div class="step-head" style="margin-bottom: 8px">
+            <h3 class="path-card-title">One line per HTTP and database client</h3>
+          </div>
+          <div class="path-body" style="gap: 8px">
+            <pre>OkHttpClient.Builder().installPorthole().build()
+Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().build()</pre>
+            <p>
+              Ktor and SQLDelight are the same one line each; forget one and the runtime says so.
+              Rather watch than ask? <code>./gradlew portholeUi</code> — the same session, drawn.
+            </p>
+          </div>
+        </div>
+
+        <div class="path-screen" style="padding: 12px 0 0">
+          <div class="step-head" style="margin-bottom: 8px">
+            <span class="step-num">04</span>
+            <h3 class="path-card-title">What comes back</h3>
+          </div>
+          <div class="path-body" style="gap: 8px">
+            <pre>findings — 3, ranked
+  error    query on the main thread   observed     CartDao.itemsBlocking, 41ms       → blocking
+  warning  recomposition hotspot      correlated   Cart.ItemRow x490, 445 after tick → recompositions
+  warning  158 frames missed in 8s    observed     worst 276ms, in swapBuffers       → frames</pre>
+            <p>
+              The frame drop is the compositor, not your code. <code>capture_system_trace</code> +
+              <code>ask_system_trace</code> go one level down, into a Perfetto trace — setup once
+              with <code>portholeTraceProcessor</code>. Nobody opens ui.perfetto.dev.
+            </p>
+          </div>
+        </div>
+
+        <ul class="path-links">
+          <li>
+            <a href="https://github.com/gravityrepos/porthole/blob/main/README.md#setup"
+              >Setup, in full</a
+            >
+            ·
+            <a
+              href="https://github.com/gravityrepos/porthole/blob/main/README.md#payloads-what-gets-captured-and-what-does-not"
+              >What gets captured</a
+            >
+            · <a href="https://github.com/gravityrepos/porthole/blob/main/SECURITY.md">SECURITY.md</a>
+            · <a href="/api/">API reference</a> ·
+            <a href="https://www.npmjs.com/package/@gravitylabsllc/porthole">npm</a>
+          </li>
+        </ul>
       </div>
     </section>
 
@@ -915,6 +1128,7 @@ Room.databaseBuilder(…).installPorthole()</pre>
         </div>
       </div>
     </section>
+    </main>
 
     <footer>
       <div class="foot">
