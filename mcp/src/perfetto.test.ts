@@ -10,6 +10,7 @@ import {
   interpret,
   MARKER_PREFIX,
   markerText,
+  newNonce,
   matchBatch,
   QUESTIONS,
   runBatch,
@@ -454,10 +455,12 @@ describe("matchBatch", () => {
  */
 function fakeRun(
   plan: Record<string, { rows?: Array<Record<string, string | number | null>>; fail?: string }>,
-): { run: RunFn; callCount: () => number } {
+): { run: RunFn; callCount: () => number; scripts: string[] } {
   let calls = 0;
+  const scripts: string[] = [];
   const run: RunFn = async (_binary, _args, sql) => {
     calls++;
+    scripts.push(sql);
     const markers = [...sql.matchAll(/SELECT 'porthole:([0-9a-f]{16}):([\w.]+)' AS marker;/g)];
     let stdout = "";
     for (const [, nonce, id] of markers) {
@@ -476,8 +479,26 @@ function fakeRun(
     }
     return { code: 0, stdout, stderr: "", timedOut: false, elapsedMs: 1 };
   };
-  return { run, callCount: () => calls };
+  return { run, callCount: () => calls, scripts };
 }
+
+/**
+ * The whole marker argument rests on one property: a value recorded in the
+ * trace before this call cannot contain the nonce. That is only true if the
+ * nonce is unpredictable and drawn fresh, and neither was pinned by a test —
+ * a `newNonce` that returned a constant left the suite green while restoring
+ * the forgery the nonce exists to stop, verbatim, against the real binary.
+ */
+describe("newNonce", () => {
+  it("is sixteen hex characters", () => {
+    expect(newNonce()).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("differs from call to call", () => {
+    const seen = new Set(Array.from({ length: 32 }, () => newNonce()));
+    expect(seen.size).toBe(32);
+  });
+});
 
 describe("runBatch", () => {
   const question = (id: string): HoistedQuestion => ({ id, asks: `asks about ${id}`, sql: "SELECT 1" });
@@ -490,6 +511,21 @@ describe("runBatch", () => {
     toNs: 1,
     timeoutMs: 5_000,
   };
+
+  it("draws a fresh nonce for every script, including a retry", async () => {
+    const { run, scripts } = fakeRun({
+      a: { rows: [{ x: "1" }] },
+      b: { fail: "no such table: bogus" },
+      c: { rows: [{ x: "3" }] },
+    });
+    await runBatch(questions, [], options, run);
+    expect(scripts).toHaveLength(2);
+    const nonceOf = (script: string) => /SELECT 'porthole:([0-9a-f]{16}):/.exec(script)?.[1];
+    const [first, second] = scripts.map(nonceOf);
+    expect(first).toMatch(/^[0-9a-f]{16}$/);
+    expect(second).toMatch(/^[0-9a-f]{16}$/);
+    expect(second).not.toBe(first);
+  });
 
   it("answers everything in one call when nothing fails", async () => {
     const { run, callCount } = fakeRun({

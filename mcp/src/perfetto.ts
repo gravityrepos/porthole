@@ -585,7 +585,7 @@ function buildScript(
   const lines: string[] = [];
   for (const module of modules) lines.push(`INCLUDE PERFETTO MODULE ${module};`);
   for (const question of questions) {
-    lines.push(`SELECT '${markerText(nonce, question.id)}' AS marker;`);
+    lines.push(`SELECT '${markerText(nonce, question.id).replace(/'/g, "''")}' AS marker;`);
     lines.push(`${substitute(question.sql, packageName, fromNs, toNs)};`);
   }
   return lines.join("\n");
