@@ -212,9 +212,24 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
     write(
         "settings.gradle.kts",
         """
+        // The live.gravitylabs.porthole group — the plugin marker, runtime
+        // and runtime-noop alike — may come only from the isolated
+        // mavenLocal() this run just published into, never from Google,
+        // Maven Central or the Plugin Portal, even though this consumer
+        // deliberately keeps those reachable for everything else (AGP
+        // itself, AndroidX transitively). Without exclusiveContent scoping
+        // this by group, the day the Plugin Portal approves
+        // live.gravitylabs.porthole, a marker sitting there but never
+        // published to this run's mavenLocal() would resolve from the
+        // Portal instead, and this whole check would go green having
+        // proved nothing about what publishToMavenLocal just did
+        // (GRA-100 QA, second pass).
         pluginManagement {
             repositories {
-                mavenLocal()
+                exclusiveContent {
+                    forRepository { mavenLocal() }
+                    filter { includeGroup("live.gravitylabs.porthole") }
+                }
                 google()
                 mavenCentral()
                 gradlePluginPortal()
@@ -223,7 +238,10 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
         dependencyResolutionManagement {
             repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
             repositories {
-                mavenLocal()
+                exclusiveContent {
+                    forRepository { mavenLocal() }
+                    filter { includeGroup("live.gravitylabs.porthole") }
+                }
                 google()
                 mavenCentral()
             }
@@ -251,6 +269,23 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
             compileOptions {
                 sourceCompatibility = JavaVersion.VERSION_17
                 targetCompatibility = JavaVersion.VERSION_17
+            }
+        }
+
+        // `:app:dependencies` is a *report* task: it renders an unresolved
+        // dependency as "FAILED" inside the printed tree and still exits 0,
+        // so it cannot be the thing releaseDryRun asserts against — it never
+        // actually resolves anything (GRA-100 QA, second pass). Calling
+        // Configuration.resolve() directly forces real resolution and throws
+        // (ResolveException, non-zero exit) the moment an artifact is
+        // missing. Both classpaths are resolved, not just debug's: the
+        // plugin wires the debug build type to `runtime` and every other
+        // build type to `runtime-noop` (AndroidWiring.kt), so only resolving
+        // debugRuntimeClasspath would leave runtime-noop untested.
+        tasks.register("resolvePorthole") {
+            doLast {
+                configurations.getByName("debugRuntimeClasspath").resolve()
+                configurations.getByName("releaseRuntimeClasspath").resolve()
             }
         }
         """.trimIndent() + "\n",
@@ -431,12 +466,12 @@ tasks.register("releaseDryRun") {
         val consumerDir = layout.buildDirectory.dir("releaseDryRun/consumer").get().asFile
         writeScratchConsumer(consumerDir, version, agpVersion)
 
-        logger.lifecycle("releaseDryRun: resolving the plugin and the AAR from mavenLocal() in a separate project")
+        logger.lifecycle("releaseDryRun: resolving the plugin and both AARs from mavenLocal() in a separate project")
         exec {
             commandLine(
                 gradlewCommand(
                     "--project-dir", consumerDir.absolutePath,
-                    ":app:dependencies", "--configuration", "debugRuntimeClasspath",
+                    ":app:resolvePorthole",
                     "--rerun-tasks",
                 ),
             )
@@ -466,8 +501,11 @@ tasks.register("releaseDryRun") {
             |  npm pack would ship ${actualFiles.size} files, matching mcp/expected-package-files.txt
             |  publishToMavenLocal (root, then -p gradle-plugin) produced
             |    live.gravitylabs.porthole:runtime:$version, :runtime-noop:$version and the plugin
-            |    itself, and a separate project (no includeBuild) resolved all three from
-            |    mavenLocal() alone — the same resolution a real consumer app performs
+            |    itself, and a separate project (no includeBuild, and scoped so the
+            |    live.gravitylabs.porthole group can resolve only from mavenLocal()) actually
+            |    resolved the plugin marker plus both the debug and release runtime
+            |    classpaths — the same resolution a real consumer app performs, and one that
+            |    fails loudly and non-zero if the marker, runtime, or runtime-noop is missing
             |  validatePlugins found no problems with the plugin's own structure, entirely locally
             |
             |A real release still ends with the four commands `release` prints — this only

@@ -900,8 +900,13 @@ by actually publishing something, using no credentials at all: `npm pack
 `publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false` for the two runtime
 AARs, `-p gradle-plugin publishToMavenLocal` for the plugin itself — a
 separate included build the root `publishToMavenLocal` never reaches — then
-resolving all three from `mavenLocal()` in a separate scratch project, no
-`includeBuild`, the consumer path a real app takes; and `validatePlugins`,
+actually resolving, not just reporting on, the plugin marker plus both the
+debug and release runtime classpaths in a separate scratch project, no
+`includeBuild`, the consumer path a real app takes. That project's
+repositories admit the `live.gravitylabs.porthole` group only from that
+`mavenLocal()`, so the step fails loudly and non-zero the moment the marker,
+`runtime`, or `runtime-noop` is missing, and can't be rescued by a remote
+even after the Plugin Portal accepts the plugin. Then `validatePlugins`,
 checking the plugin's own structure with no network call. Deliberately not
 `publishPlugins --validate-only`: measured against the real Gradle Plugin
 Portal, that flag still authenticates and POSTs the plugin bundle — it only
