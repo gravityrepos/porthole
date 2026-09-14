@@ -1422,5 +1422,10 @@ the main thread [observed].
         </div>
       </div>
     </footer>
+    <!-- The one script on the page: Vercel's own analytics, served from this
+         origin, cookieless, no personal data. Pageviews and referrers, which
+         is all the question is. The CSP in vercel.json opens script-src and
+         connect-src to 'self' for it and to nothing else. -->
+    <script defer src="/_vercel/insights/script.js"></script>
   </body>
 </html>
