@@ -158,6 +158,17 @@ jobs:
           path: '**/build/test-results/'
           if-no-files-found: warn
 
+      # GRA-164: the summary step above prints a number a human has to read
+      # and copy into README.md by hand, which is exactly how README.md's
+      # JVM figure went stale three times in one day. This reads the same
+      # XML and fails the build instead, naming README's figure next to the
+      # suite's the moment they disagree. This job only ever runs on
+      # ubuntu-latest, so unlike the server/UI check in the `node` job below,
+      # there is no cross-platform split to reason about here.
+      - name: Check README JVM test count
+        if: always()
+        run: python3 tools/check-readme-test-counts.py
+
       # The heavier HTML reports stay failure-only, unchanged from before
       # this ticket: they are for a human digging into a red build, not for
       # the every-PR signal AC1 asks for, and uploading them unconditionally
@@ -315,6 +326,24 @@ jobs:
           name: vitest-test-results-${{ matrix.os }}
           path: mcp/test-results/
           if-no-files-found: warn
+
+      # GRA-164: same defect as the Gradle job's summary step above — a
+      # number a human has to copy into README.md by hand goes stale, and
+      # README's server/UI figures had. This reads the JUnit XML this job
+      # just wrote and fails instead of printing. It runs on all three legs
+      # of this matrix, but README's passed/failed/skipped split names
+      # ubuntu-latest specifically (the skip set is not the same on every
+      # platform), so the script only compares the total on windows-latest
+      # and macos-latest and says so rather than failing for a reason that
+      # has nothing to do with drift. Run from mcp/ (this job's working
+      # directory) — the script resolves README.md and the XML relative to
+      # its own path, not the cwd.
+      - name: Check README server test count
+        if: always()
+        run: node scripts/check-readme-vitest-counts.mjs server
+      - name: Check README timeline-UI test count
+        if: always()
+        run: node scripts/check-readme-vitest-counts.mjs ui
 
       - run: npm run lint
 
