@@ -1147,17 +1147,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 /**
  * True only when this file is the process's actual entry point (`node
  * dist/index.js`, or the `porthole-mcp` bin it is published as) — never when
- * it is merely imported, which is what every test does. Importing this
- * module must never open a socket, attach to stdio, or install signal
- * handlers; only running it as a program may.
+ * it is merely imported, which is what every test does, and what `cli.ts`
+ * now does too (it calls `bootPortholeServer()` explicitly instead of
+ * relying on this guard). Importing this module must never open a socket,
+ * attach to stdio, or install signal handlers; only running it as a program,
+ * or explicitly asking it to boot, may.
  */
 function isMainModule(): boolean {
   if (!process.argv[1]) return false;
   return pathToFileURL(process.argv[1]).href === import.meta.url;
 }
 
-if (isMainModule()) {
-  const { server, device, timeline } = createPortholeServer();
+/**
+ * The one boot path: create the server, start the device, wire shutdown, and
+ * connect stdio. `node dist/index.js` and `porthole mcp` (`cli.ts`) both call
+ * this instead of each having their own copy — `porthole mcp` used to boot by
+ * `import("./index.js")`ing this module for its side effect, which broke the
+ * moment that side effect moved behind `isMainModule()`: `argv[1]` is
+ * `cli.js` when the CLI does the importing, so the guard can never see
+ * itself as the entry point and nothing started. Calling this function is
+ * the boot; the `isMainModule()` block below is just the one caller that
+ * also happens to be `node dist/index.js` itself.
+ */
+export async function bootPortholeServer(
+  options: PortholeServerOptions = {},
+): Promise<PortholeServer> {
+  const rig = createPortholeServer(options);
+  const { server, device, timeline } = rig;
 
   device.start();
 
@@ -1174,4 +1190,10 @@ if (isMainModule()) {
 
   await server.connect(new StdioServerTransport());
   process.stderr.write(`[porthole] MCP server ready, device target ${HOST}:${PORT}\n`);
+
+  return rig;
+}
+
+if (isMainModule()) {
+  await bootPortholeServer();
 }
