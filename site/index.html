@@ -66,6 +66,13 @@
         --device: #56d4dd;
         --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
         --sans: "Space Grotesk", system-ui, sans-serif;
+        /* Founder feedback (DECISIONS.md, "Landing page layout"): 1120px left
+           "huge gutters and wasted space" from ~1440px up. One variable, so
+           every wrap cap moves together; chosen by looking at 1440 and 1920
+           in a real browser, not by guessing (see the 1440/1920 measurements
+           this ticket recorded). Text measures (.lede, .hero p, 64ch/68ch)
+           are untouched — only the boxes get more room. */
+        --wrap: min(1600px, 92vw);
       }
       * {
         box-sizing: border-box;
@@ -113,13 +120,19 @@
         border-bottom: 1px solid var(--line-soft);
       }
       .wrap {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 66px 24px;
       }
       .split {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        /* min(300px, 100%): a bare minmax() floor is a hard minimum even
+           when the container is narrower than it (GRA-136 measurement — this
+           already forced 4px of page-level horizontal scroll at 320px,
+           pre-existing from GRA-127). Clamping the floor to the container
+           fixes it without changing anything at a width that already had
+           300px to give. */
+        grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
         gap: 34px;
         align-items: start;
       }
@@ -152,13 +165,44 @@
         gap: 14px;
       }
       .cols-wide {
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
       }
       .cols-mid {
-        grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+        /* #install's only user: Install, Connect, Ask. The Connect card needs
+           ~570px for its widest pre (GRA-136 measurement), so three columns
+           never fit inside the 1600px wrap and auto-fit always gave two —
+           which put Ask on a second row under Install with the whole height of
+           the Connect card as empty space between them, because a grid row is
+           as tall as its tallest card. Placed explicitly instead: Connect
+           takes the right column for both rows, Install and Ask stack on the
+           left with no gap. DOM order stays 01, 02, 03 for reading order. */
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-areas:
+          "install connect"
+          "ask connect";
+      }
+      .cols-mid > :nth-child(1) {
+        grid-area: install;
+      }
+      .cols-mid > :nth-child(2) {
+        grid-area: connect;
+      }
+      .cols-mid > :nth-child(3) {
+        grid-area: ask;
+      }
+      @media (max-width: 1160px) {
+        /* Two 520px columns plus the gap no longer fit the wrap; one column,
+           in reading order. */
+        .cols-mid {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-areas:
+            "install"
+            "connect"
+            "ask";
+        }
       }
       .cols-tight {
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
       }
       pre {
         margin: 0;
@@ -176,6 +220,58 @@
            keeps that promise, wrapping it does not. */
         white-space: pre;
         overflow-x: auto;
+      }
+
+      /* Three monospace treatments (founder feedback, DECISIONS.md — "a
+         different font colour for the terminal commands and output"). Every
+         pre/code block on the page is one of: a command you type, output you
+         see, or a file you paste — classed below so a reader can tell them
+         apart at a glance instead of every block reading the same. The base
+         `pre` rule above stays the "file" look; these two add to it, and the
+         hero chip (a `code`, not a `pre`) gets its own small rule further
+         down next to `.hero-cmd`. */
+
+      /* command: prompt glyph is generated content (::before), which no
+         browser includes in a text selection or copy — exactly why it is a
+         pseudo-element and not a literal "$ " character in the markup. */
+      pre.pre-cmd {
+        color: var(--teal-lit);
+      }
+      pre.pre-cmd .ln {
+        display: block;
+      }
+      pre.pre-cmd .ln::before {
+        content: "❯ ";
+        color: var(--teal);
+        user-select: none;
+      }
+      pre.pre-cmd .cmt {
+        color: var(--dim);
+      }
+
+      /* output: muted, transcript-like, with a thin rule standing in for a
+         terminal's left margin — no prompt, since nobody typed this. */
+      pre.pre-output {
+        color: var(--muted);
+        border-left: 2px solid var(--line);
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+      }
+
+      /* file: the plain pre look, plus a small label naming the file this
+         gets pasted into, where one file is the obvious home. Tried as an
+         attr()'d ::before on the pre itself first — but a pre's own
+         overflow-x: auto forces overflow-y to auto too (an unset axis can't
+         stay visible next to a non-visible one, CSS Overflow §3), which
+         clipped anything positioned outside the box. A label has to live
+         outside the pre's own box to survive that, hence the sibling. */
+      .file-label {
+        display: block;
+        margin: 0 0 6px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        letter-spacing: 0.04em;
+        color: var(--dim);
       }
 
       /* skip link — hidden until focused, first stop before the sticky nav */
@@ -297,7 +393,7 @@
       }
       .hero {
         position: relative;
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 44px 24px 36px;
         display: flex;
@@ -367,15 +463,23 @@
       .hero-cmd {
         margin: 0;
       }
+      /* The hero chip is a command (GRA-136: "the hero's inline command chip
+         follows the command treatment") — same glyph-via-::before and teal
+         text as pre.pre-cmd, just on an inline chip instead of a block. */
       .hero-cmd code {
         display: inline-block;
         font-family: var(--mono);
         font-size: 13px;
-        color: #cfd8e5;
+        color: var(--teal-lit);
         background: var(--ground-2);
         border: 1px solid #222a38;
         border-radius: 8px;
         padding: 9px 16px;
+      }
+      .hero-cmd code::before {
+        content: "❯ ";
+        color: var(--teal);
+        user-select: none;
       }
 
       /* quick start */
@@ -708,7 +812,7 @@
 
       /* footer */
       .foot {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 56px 24px 40px;
         display: flex;
@@ -733,7 +837,7 @@
         color: var(--dim);
       }
       .colophon {
-        max-width: 1120px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 16px 24px;
         font-family: var(--mono);
@@ -809,7 +913,8 @@
               <span class="step-num">01</span>
               <h3 class="path-card-title">Install</h3>
             </div>
-            <pre>plugins {
+            <span class="file-label">app/build.gradle.kts</span>
+            <pre class="pre-file">plugins {
     id("com.android.application")
     id("live.gravitylabs.porthole") version "0.1.0"
 }</pre>
@@ -824,10 +929,8 @@
               <span class="step-num">02</span>
               <h3 class="path-card-title">Connect the agent</h3>
             </div>
-            <pre>./gradlew :app:installDebug     # your app, as usual
-./gradlew portholeMcpConfig     # writes the porthole entry into .mcp.json
-./gradlew portholeConnect       # forwards the device port to localhost</pre>
-            <pre>[porthole] added porthole to .mcp.json
+            <pre class="pre-cmd"><span class="ln">./gradlew :app:installDebug     <span class="cmt"># your app, as usual</span></span><span class="ln">./gradlew portholeMcpConfig     <span class="cmt"># writes the porthole entry into .mcp.json</span></span><span class="ln">./gradlew portholeConnect       <span class="cmt"># forwards the device port to localhost</span></span></pre>
+            <pre class="pre-output">[porthole] added porthole to .mcp.json
 [porthole] next: ./gradlew portholeConnect, launch the debug build, and the
            tools go live in your-project.
 [porthole] forwarded 127.0.0.1:8677 to the device</pre>
@@ -835,7 +938,8 @@
               <code>portholeMcpConfig</code> merges rather than overwrites — a different existing
               entry is left alone. It writes a four-line entry:
             </p>
-            <pre>{ "mcpServers": { "porthole": {
+            <span class="file-label">.mcp.json</span>
+            <pre class="pre-file">{ "mcpServers": { "porthole": {
     "command": "npx", "args": ["-y", "@gravitylabsllc/porthole"],
     "env": { "PORTHOLE_PORT": "8677" } } } }</pre>
             <p>
@@ -865,7 +969,7 @@
             <h3 class="path-card-title">The few lines it cannot discover</h3>
           </div>
           <div class="path-body" style="gap: 8px">
-            <pre>import live.gravitylabs.porthole.*
+            <pre class="pre-file">import live.gravitylabs.porthole.*
 
 OkHttpClient.Builder().installPorthole().build()
 Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().build()</pre>
@@ -874,7 +978,7 @@ Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().bui
               few seconds after start. Everything else needs nothing at all: frames, the main
               thread, memory, WorkManager, device context, logs, and the semantics tree.
             </p>
-            <pre>LaunchedEffect(navController) { Porthole.registerNavController(navController) }</pre>
+            <pre class="pre-file">LaunchedEffect(navController) { Porthole.registerNavController(navController) }</pre>
             <p>
               One more line if you use Navigation — it is also how screen-scoped view models get
               their names. Rather watch than ask? <code>./gradlew portholeUi</code> — the same
@@ -889,7 +993,7 @@ Room.databaseBuilder(context, AppDb::class.java, "app.db").installPorthole().bui
             <h3 class="path-card-title">What comes back</h3>
           </div>
           <div class="path-body" style="gap: 8px">
-            <pre>findings
+            <pre class="pre-output">findings
 
 4 finding(s) over 225s (3 error, 1 warning). Worst: 1 database query ran on
 the main thread [observed].
