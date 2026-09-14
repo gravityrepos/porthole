@@ -1,0 +1,200 @@
+name: PR
+
+# One workflow, run on every pull request and on every push to main. There is
+# deliberately no publish path here: this workflow only ever runs tests and
+# checks. It never runs a Gradle publish task, never `npm publish`, never a
+# Vercel deploy, and it carries no registry credentials or other secrets of
+# any kind — that is an explicit acceptance criterion, not an oversight. A
+# future ticket that wants this workflow to also publish needs its own
+# credentials review; it does not get to grow into this one.
+#
+# The emulator, the AGP compatibility matrix and anything nightly are out of
+# scope on purpose (see GRA-101) — they are slow and belong on their own
+# schedule, not blocking every PR.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A new commit on the same PR (or the same branch) supersedes whatever this
+# workflow was already running for that ref — nobody is waiting on a stale
+# head commit's result once a newer one exists, and it frees the runner.
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow reads the repository to build and test it,
+# and writes nothing back anywhere — no PR comments, no pushed commits, no
+# packages, no releases, no deployments. GITHUB_TOKEN gets exactly the one
+# scope that requires, and every other scope defaults to "none".
+permissions:
+  contents: read
+
+jobs:
+  gradle:
+    name: Gradle checks
+    runs-on: ubuntu-latest
+    # A generous ceiling, not the target. The ticket's target is a green PR
+    # in under 8 minutes; this exists only to stop a genuinely wedged build
+    # (a hung emulator-adjacent task, a network stall fetching the toolchain)
+    # from burning CI minutes for hours instead of failing loudly.
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # GRA-98 added the foojay toolchain resolver to both settings.gradle.kts
+      # files precisely so a runner whose default JDK is not 17 can still
+      # resolve one for every `jvmToolchain(17)` in the build. This step's own
+      # JDK only has to be new enough to run Gradle itself.
+      #
+      # No Android SDK setup step here: ubuntu-latest ships one preinstalled
+      # (ANDROID_HOME already set), which is what the runtime module's AGP
+      # tasks need. If GitHub ever changes that default image, this is the
+      # first thing to check when this job starts failing on SDK location.
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Caches the Gradle User Home — dependencies, wrapper distribution and
+      # build cache — keyed on the wrapper files and the build scripts,
+      # including gradle/libs.versions.toml. That catalog is this build's
+      # closest equivalent to a lockfile: every version the build resolves
+      # against traces back to it. Deliberately not also setting `cache:
+      # gradle` on setup-java above — that would be a second, cruder cache
+      # keyed the same way, fighting this one instead of adding to it.
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      # The one command this whole ticket exists to make trustworthy. Before
+      # GRA-75, `./gradlew check` run from the root never reached
+      # :gradle-plugin:test at all — the included build's lifecycle tasks
+      # were not wired to the including build's, so a red plugin test could
+      # sit underneath a green root build indefinitely. --warning-mode all
+      # rather than the default `summary`: a build that quietly accumulates
+      # deprecation warnings on every green run is a build nobody reads the
+      # warnings of until they become the next major-version break.
+      - name: ./gradlew check
+        run: ./gradlew check --warning-mode all
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gradle-test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          if-no-files-found: warn
+
+      # site/api (Dokka's HTML) and the generated PortholeVersion.kt are the
+      # two files a build in this repo could regenerate differently than what
+      # is committed. Checked by hand before wiring this in: `check` never
+      # runs the `apiDocs` task that produces site/api (that task is
+      # registered but not attached to any lifecycle task — see
+      # runtime/build.gradle.kts — and is only ever run by hand before a
+      # deploy), and PortholeVersion.kt is written under build/, which git
+      # never tracks in the first place. So today this step never fires. It
+      # stays in anyway as a tripwire: the day either of those gets wired into
+      # `check`, or a new generated-and-committed file joins them, this is
+      # what turns a silent rewrite of checked-in output into a failed PR
+      # instead of a diff nobody notices until review.
+      - name: Fail on uncommitted changes from the build
+        run: git diff --exit-code
+
+  node:
+    name: Node (${{ matrix.os }})
+    strategy:
+      # One platform's failure should not hide whether the other two pass —
+      # this is a matrix specifically about platform-shaped bugs, so seeing
+      # all three results matters more than failing fast.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    defaults:
+      run:
+        # Git Bash on the Windows runner, so the multi-line steps below (the
+        # tarball check especially) read the same on all three platforms
+        # instead of half of them needing pwsh syntax.
+        shell: bash
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      # `npm test` at the mcp root runs only the server-side vitest suite —
+      # it does not reach mcp/ui's tests at all, silently, because its script
+      # in mcp/package.json never calls the ui workspace's `test`. The
+      # preferred fix is making `npm test` itself run both suites, but that is
+      # an edit to mcp/package.json, which GRA-97 merged into main today and
+      # which this ticket does not own (this ticket's `Owns` line is
+      # `.github/workflows/pr.yml` and `README.md#ci` only). Calling both
+      # scripts here is the workaround; fixing `npm test` is left as a
+      # follow-up for whoever next owns mcp/package.json.
+      - run: npm test
+      - run: npm run test:ui
+
+      - run: npm run lint
+
+      # `npm pack --dry-run` writes its human-readable file list to stderr,
+      # and that output's exact wording has already changed across npm
+      # versions and reads slightly differently by platform — matching it as
+      # text would make this step flaky on exactly the windows and macos legs
+      # it most needs to be reliable on. `--json` is the stable alternative:
+      # it is what produced expected-package-files.txt in the first place
+      # (see that file's own header), and it is written to stdout as
+      # parseable JSON on every platform and every npm version tested here.
+      # The one thing still normalised by hand is the content hash Vite
+      # stamps into the UI's built asset filenames — it changes on every UI
+      # edit and says nothing about which files ended up in the tarball.
+      - name: Check npm tarball contents against expected-package-files.txt
+        run: |
+          node -e '
+            const { execSync } = require("node:child_process");
+            const fs = require("node:fs");
+
+            const raw = execSync("npm pack --dry-run --json", { encoding: "utf8" });
+            const packed = JSON.parse(raw)[0].files.map((f) => f.path.replace(/\\/g, "/"));
+
+            const normalise = (p) =>
+              p.replace(/(ui\/dist\/assets\/index-)[^./]+(\.(css|js))$/, "$1*$2");
+
+            const actual = packed.map(normalise).sort();
+            const expected = fs
+              .readFileSync("expected-package-files.txt", "utf8")
+              .split(/\r?\n/)
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith("#"))
+              .sort();
+
+            const actualText = actual.join("\n");
+            const expectedText = expected.join("\n");
+
+            if (actualText !== expectedText) {
+              console.error("Packed tarball contents do not match mcp/expected-package-files.txt.");
+              console.error("If this file list change was intentional, update the fixture.");
+              console.error("--- expected ---");
+              console.error(expectedText);
+              console.error("--- actual ---");
+              console.error(actualText);
+              process.exit(1);
+            }
+
+            console.log(`npm pack matches expected-package-files.txt (${actual.length} files).`);
+          '
+
+      # Same tripwire as the Gradle job, same two files. Neither is written by
+      # anything `npm run build` touches, so this is a no-op today and cheap
+      # insurance against tomorrow.
+      - name: Fail on uncommitted changes from the build
+        run: git diff --exit-code
