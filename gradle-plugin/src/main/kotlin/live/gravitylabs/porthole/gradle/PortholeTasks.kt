@@ -372,30 +372,45 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
  * the omission that lets the MCP server fall back to its own walk.
  *
  * GRA-150, AC3: a *relative* `sdk.dir` is resolved against [projectRoot], not
- * against this JVM's own working directory. `File(it)` alone would do the
- * latter — a Gradle daemon is a long-lived process the launcher reuses across
- * unrelated project directories, so its `user.dir` is wherever the daemon
- * happened to start, not wherever the build was invoked from — and that
- * answer was silently wrong before this ticket rather than merely unlikely:
- * `local.properties` is text a person can hand-edit, and Android Studio's own
- * writes are always absolute, so the relative case is rare but not
- * hypothetical. `File(projectRoot, it)` is also the correct answer for an
- * already-absolute `it` (a drive letter, a UNC path): `java.io.File`'s
- * two-argument constructor discards the parent whenever the child is
- * absolute, so one call handles both shapes without a manual `isAbsolute`
- * branch. `mcp/src/adb.ts`'s `sdkDirFromLocalProperties` does not resolve a
- * relative value at all today — it returns the raw string from the file, and
- * whatever eventually stats it resolves that string against its own process's
- * cwd — so it does not yet agree with the answer here; see this ticket's
- * report for why that is a TypeScript-side follow-up rather than a change
- * made from this file.
+ * against this JVM's own working directory. `File(it).absolutePath` alone
+ * would do the latter — a Gradle daemon is a long-lived process the launcher
+ * reuses across unrelated project directories, so its `user.dir` is wherever
+ * the daemon happened to start, not wherever the build was invoked from —
+ * and that answer was silently wrong before this ticket rather than merely
+ * unlikely: `local.properties` is text a person can hand-edit, and Android
+ * Studio's own writes are always absolute, so the relative case is rare but
+ * not hypothetical.
+ *
+ * The absolute case has to be handled explicitly rather than left to
+ * `File(projectRoot, it)`: on Windows, `java.io.File`'s two-argument
+ * constructor does *not* discard the parent just because the child looks
+ * absolute — `File(File("C:\\a"), "C:\\b")` is `C:\a\b`, not `C:\b`, whenever
+ * parent and child share a drive letter (`WinNTFileSystem.resolve`, working
+ * as documented — a real quirk, not a bug — but the wrong tool here). This
+ * cost an hour to a failing `Windows-shaped path` test before the explicit
+ * `isAbsolute` check below was added; the mistake is worth naming so nobody
+ * reaches for the two-argument constructor here again. `File(it).isAbsolute`
+ * correctly recognises a drive letter and a UNC path, and correctly refuses a
+ * POSIX-shaped `/…` on Windows (it belongs to the current drive, not the
+ * filesystem root), matching the platform-dependent shapes this file's tests
+ * already document.
+ *
+ * `mcp/src/adb.ts`'s `sdkDirFromLocalProperties` does not resolve a relative
+ * value at all today — it returns the raw string from the file, and whatever
+ * eventually stats it resolves that string against its own process's cwd —
+ * so it does not yet agree with the answer here; see this ticket's report for
+ * why that is a TypeScript-side follow-up rather than a change made from this
+ * file.
  */
 internal fun resolveSdkDir(projectRoot: File): File? {
     val local = File(projectRoot, "local.properties")
     if (local.isFile) {
         val props = Properties()
         local.inputStream().use(props::load)
-        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(projectRoot, it) }
+        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let {
+            val candidate = File(it)
+            return if (candidate.isAbsolute) candidate else File(projectRoot, it)
+        }
     }
     return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
         .mapNotNull { System.getenv(it) }
