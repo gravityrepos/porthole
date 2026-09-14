@@ -789,48 +789,6 @@
         text-wrap: pretty;
       }
 
-      /* roadmap */
-      .roadmap {
-        display: flex;
-        flex-direction: column;
-        gap: 1px;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        background: var(--line);
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        overflow: hidden;
-      }
-      .road-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 14px;
-        padding: 13px 14px;
-        background: var(--panel);
-        font-size: 13.5px;
-        color: #dbe3ef;
-      }
-      .road-tag {
-        font-family: var(--mono);
-        font-size: 10.5px;
-        white-space: nowrap;
-        border-radius: 999px;
-        padding: 3px 9px;
-      }
-      .road-tag.next {
-        color: var(--recompose);
-        background: rgba(240, 136, 62, 0.12);
-      }
-      .road-tag.exploring {
-        color: var(--state);
-        background: rgba(163, 113, 247, 0.12);
-      }
-      .road-tag.planned {
-        color: #96a2b4;
-        background: rgba(150, 162, 180, 0.12);
-      }
 
       /* footer */
       .foot {
@@ -1226,8 +1184,8 @@ the main thread [observed].
     </section>
 
     <section id="faq">
-      <div class="wrap split">
-        <div>
+      <div class="wrap">
+        <div style="max-width: 68ch">
           <div class="heading" style="margin-bottom: 20px">
             <span class="eyebrow">FAQ</span>
             <h2>The usual objections</h2>
@@ -1272,30 +1230,10 @@ the main thread [observed].
               </dd>
             </div>
           </dl>
-        </div>
-        <div>
-          <div class="heading" style="margin-bottom: 20px">
-            <span class="eyebrow">ROADMAP</span>
-            <h2>Next up</h2>
-          </div>
-          <ul class="roadmap">
-            <li class="road-row">
-              Publish to Maven Central and the Plugin Portal <span class="road-tag next">next</span>
-            </li>
-            <li class="road-row">
-              Compose Multiplatform core <span class="road-tag exploring">exploring</span>
-            </li>
-            <li class="road-row">
-              Control surface for out-of-process drivers
-              <span class="road-tag exploring">exploring</span>
-            </li>
-            <li class="road-row">
-              Verified on a physical device <span class="road-tag planned">planned</span>
-            </li>
-            <li class="road-row">
-              Stack symbolication for minified builds <span class="road-tag planned">planned</span>
-            </li>
-          </ul>
+          <p class="lede" style="margin-top: 28px; font-size: 14px">
+            What is next, and what is not yet verified, lives with the code:
+            <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+          </p>
         </div>
       </div>
     </section>
@@ -1311,10 +1249,7 @@ the main thread [observed].
             </svg>
             PORTHOLE
           </div>
-          <p>
-            Open source, Apache-2.0. Debug builds only — release builds link a no-op with the same
-            API, so the calls stay in your code and compile to nothing.
-          </p>
+          <p>Open source, Apache-2.0.</p>
           <span class="foot-meta">v0.1.0 · Android · Jetpack Compose</span>
         </div>
       </div>
