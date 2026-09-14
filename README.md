@@ -847,18 +847,53 @@ recorded.
 
 ## Publishing
 
-Nothing is published yet, but the build is now configured for all three
-registries. Publishing is a deliberate act and needs credentials that are not in
-this repo.
+0.1.0 is live on Maven Central and npm; the Gradle Plugin Portal submission
+was pending review at last check. Publishing itself is still a deliberate,
+credentialed act that this repo never performs on its own — but the bump,
+changelog, full-suite run and tag that used to precede it by hand are now one
+command, and the rehearsal that used to mean actually publishing something is
+another:
 
-The order is not arbitrary. `portholeUi` launches the timeline with `npx
---package @gravitylabsllc/porthole@<version>`, and the plugin points at the AAR
-coordinates, so each step wants the one before it to already exist:
+```bash
+./gradlew release -Pversion=0.2.0     # bump, changelog, full suite, commit, tag
+./gradlew releaseDryRun               # rehearse all of it with no credentials
+```
+
+`release` refuses on a dirty tree, on any branch but `main`, on a version that
+does not match `X.Y.Z` or `X.Y.Z-suffix`, and on an empty `## [Unreleased]`
+section in [`CHANGELOG.md`](CHANGELOG.md) — each with a one-line reason.
+Given a version, it:
+
+1. writes `porthole` under `[versions]` in `gradle/libs.versions.toml`, the
+   only place the version is authored, then regenerates `mcp/package.json`'s
+   `version` field from it. `VersionConsistencyTest` still fails the build if
+   the two disagree — the generator is what keeps that check green, not
+   something you now fix by hand when it goes red.
+2. runs the full check, both Android builds, and both npm test suites.
+3. cuts CHANGELOG.md's Unreleased section into a dated `## [X.Y.Z]` section.
+4. commits and tags `vX.Y.Z` (annotated).
+5. prints the four publish commands below, in order, and runs none of them.
+
+`releaseDryRun` rehearses the parts of a release that used to be caught only
+by actually publishing something, using no credentials at all: `npm pack
+--dry-run` diffed against the committed `mcp/expected-package-files.txt`;
+`publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false` followed by resolving
+the plugin and the runtime AAR from `mavenLocal()` in a separate scratch
+project — no `includeBuild`, the consumer path a real app takes; and
+`publishPlugins --validate-only` against the Portal's own metadata checks. If
+the plugin ever pointed a consumer at a runtime version nobody actually
+published, this is where that shows up — not in someone else's build.
+
+The publish order itself is not arbitrary. `portholeUi` launches the timeline
+with `npx --package @gravitylabsllc/porthole@<version>`, and the plugin
+points at the AAR coordinates, so each step wants the one before it to
+already exist:
 
 ```bash
 cd mcp && npm publish                              # @gravitylabsllc/porthole
 ./gradlew publishToMavenCentral                    # the two AARs, staged
 ./gradlew -p gradle-plugin publishPlugins          # the Gradle Plugin Portal
+npx vercel deploy --prod                           # the landing page and API docs
 ```
 
 Credentials live in `~/.gradle/gradle.properties` or the environment, never
@@ -873,42 +908,14 @@ gradle.publish.key=...
 gradle.publish.secret=...
 ```
 
-Still to do before any of that will succeed:
-
-- Ownership of `gravitylabs.live` proved by DNS record, to claim the
-  `live.gravitylabs` namespace on the Central Portal.
-- A GPG key. `RELEASE_SIGNING_ENABLED=true` means an unsigned release fails
-  rather than quietly uploading something Central will reject.
-The version is settled. It is written once, as `porthole` under `[versions]` in
-`gradle/libs.versions.toml`, and everything else derives from it: the AARs and
-the plugin take it as their project version, and `PortholeVersion.kt` is
-generated from it so the runtime version the plugin hands a consumer cannot be
-stale. `mcp/package.json` is the one copy that is still edited by hand, and
-`VersionConsistencyTest` fails the build if it disagrees.
-
-That test earns its place the same way the AGP one does. A wrong version here
-breaks nothing locally — this build compiles and the publish succeeds — and
-surfaces later as an unresolvable dependency in the build of whoever applied
-the plugin.
-
 `publishToMavenCentral` stages without releasing, and
 `SONATYPE_AUTOMATIC_RELEASE=false` keeps it that way: the staged bundle is
-promoted by hand after you have looked at it.
-
-To try the consumer path without publishing anywhere:
-
-```bash
-./gradlew publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false
-```
-
-The flag is needed because the version is no longer a snapshot: signing is
-skipped for snapshots and required for everything else, so without it a local
-publish fails on a missing signatory rather than on anything you did.
-
-then add `mavenLocal()` to a separate project's `pluginManagement` and
-`dependencyResolutionManagement` repositories and apply the plugin by id. That
-is how the consumer story here was checked — a separate project, no
-`includeBuild`.
+promoted by hand after you have looked at it. `RELEASE_SIGNING_ENABLED=true`
+means an unsigned release fails outright rather than quietly uploading
+something Central would reject; `releaseDryRun`'s
+`-PRELEASE_SIGNING_ENABLED=false` is what lets it publish to `mavenLocal()`
+without a signing key, since signing is otherwise required for anything that
+is not a snapshot.
 
 ## Working on the UI
 

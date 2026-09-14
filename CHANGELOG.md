@@ -1,0 +1,96 @@
+# Changelog
+
+All notable changes to Porthole are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the version
+numbers are the one `porthole` entry in `gradle/libs.versions.toml`, which
+`./gradlew release -Pversion=X.Y.Z` is the only thing that ever writes.
+
+Reconstructed back to 0.1.0 from the commit history: 0.1.0 predates this
+file, so that section is a best-effort summary rather than a per-PR record.
+From here on, `release` refuses to run against an empty `## [Unreleased]`
+section, so every release after 0.1.0 carries one — add to it as part of the
+PR that makes the change, not after the fact.
+
+## [Unreleased]
+
+### Added
+
+- System traces: capture a Perfetto trace on demand and ask it questions
+  through `ask_system_trace` / `capture_system_trace`, backed by five
+  curated SQL questions (jank, thread_states, binder, render, slices)
+  interpreted into findings with a `severity` and a `confidence`.
+- `portholeTraceProcessor`, a Gradle task that fetches Perfetto's
+  `trace_processor` (pinned v58.2, SHA-256 verified) and caches it under
+  `~/.porthole/trace-processor/<version>/`.
+- `system_context` (what the rest of the device was doing around a moment)
+  and `what_was_happening` ("what was I doing at this exact time").
+- Porthole's own collector spans (frames, recomposition, nav, DB, HTTP) are
+  now written into the system trace alongside the OS's own slices, with
+  `ClockOffsets` reconciling `SystemClock.uptimeMillis()` against Perfetto's
+  `CLOCK_BOOTTIME`.
+- A single MCP entry point and shared window/session model tying the tools
+  together, and `portholeMcpConfig` now writes the client config entry
+  directly instead of printing it for hand-copying.
+- A pinned Android Virtual Device, runnable identically on a laptop and in
+  CI (GRA-106).
+- CI: Gradle checks plus a three-OS Node matrix on every pull request
+  (GRA-101).
+- The landing page: an above-the-fold hero section (GRA-134), quick-start
+  step placement and coloured severities (GRA-143), a desktop-width layout
+  with terminal-styled commands (GRA-136), and the implementer's path from
+  "what is this" to an agent answering (GRA-127).
+- Vercel Web Analytics on the landing page: same-origin, cookieless
+  (GRA-149).
+- A README for the npm package, with source maps that resolve to sources
+  actually in the tarball (GRA-97).
+
+### Fixed
+
+- `Porthole.shutdown()` no longer leaks the collectors it started (GRA-86),
+  and the same leak defences now actually run where CI runs (GRA-137).
+- The timeline server refuses an origin it was not also addressed to
+  (GRA-78).
+- `portholeConnect` no longer reports success without having run `adb`
+  (GRA-76); `portholeDisconnect` no longer reports itself up to date when
+  it isn't (GRA-118).
+- The Gradle plugin looks for the Android SDK in one place instead of
+  several inconsistent ones (GRA-87).
+- Zero-duration nav and stall markers now render with width instead of
+  vanishing; trace slices are named by shape rather than by statement or
+  instance, so high-cardinality names stop exploding tracks.
+- Stopped reading a cooling device's temperature sensor as if it were
+  still under load.
+- Closed three system-trace query gaps (an ignored limit, a silent time
+  window, two missing questions), and both halves of an answer now show in
+  one list instead of two.
+- The UI port is reported in plain language instead of a stack trace when
+  it is unavailable.
+- The insights panel no longer asks the server once per animation frame —
+  debounced, aborted and ordered correctly (GRA-80).
+- Rejected nonsense CLI arguments instead of silently accepting them
+  (GRA-93).
+- The blocking-window sweep is centred on the boundary it was meant to
+  straddle (GRA-84); parents are indexed once instead of rescanned for
+  each lookup (GRA-94); dead code and the claims it did not honour were
+  removed (GRA-95).
+- `gradlew` is marked executable so CI can run it, and CI's toolchain is
+  pointed at a real JDK 17 source (GRA-98).
+- The publishing commands no longer reference a build cache they were
+  never going to use (GRA-75).
+
+## [0.1.0] - 2026-09-11
+
+### Added
+
+- Initial release: the Gradle plugin, the Android runtime and its no-op
+  release artifact, the MCP server and CLI, the timeline UI, and the
+  landing page and docs.
+- Published `@gravitylabsllc/porthole` to npm.
+- The API reference is served at a URL its own links resolve from.
+
+### Fixed
+
+- Made the version a single value across the catalog, the plugin and the
+  npm package, and fail the build when it drifts — the check that grew
+  into `VersionConsistencyTest`.
+- Fixed two routing faults the deployment exposed.
