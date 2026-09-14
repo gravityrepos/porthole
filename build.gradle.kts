@@ -134,15 +134,27 @@ fun writeCatalogVersion(catalogFile: File, newVersion: String) {
     catalogFile.writeText(pattern.replaceFirst(text, "porthole = \"$newVersion\""))
 }
 
-val changelogUnreleasedHeading = "## [Unreleased]"
+// Anchored to the start of a line on purpose: this file's own intro prose
+// mentions `` `## [Unreleased]` `` inline as documentation, and a plain
+// substring search (`String.indexOf`) matched that mention instead of the
+// actual heading — found by running `release` for real in a scratch clone,
+// where it silently mistook the whole Unreleased section for empty. Only a
+// `##` at column zero is a heading; nothing that appears mid-line counts.
+val changelogUnreleasedHeadingPattern = Regex("""^## \[Unreleased\]""", RegexOption.MULTILINE)
+val changelogVersionHeadingPattern = Regex("""^## \[""", RegexOption.MULTILINE)
 
-/** Everything between `## [Unreleased]` and the next `## [` heading (or EOF). */
-fun changelogUnreleasedBody(changelog: String): String {
-    val start = changelog.indexOf(changelogUnreleasedHeading)
-    require(start >= 0) { "CHANGELOG.md has no '$changelogUnreleasedHeading' heading" }
-    val bodyStart = changelog.indexOf('\n', start).let { if (it < 0) changelog.length else it + 1 }
-    val next = Regex("""^## \[""", RegexOption.MULTILINE).find(changelog, bodyStart)
+/** The `[bodyStart, bodyEnd)` offsets between `## [Unreleased]` and the next `## [` heading (or EOF). */
+fun changelogUnreleasedBounds(changelog: String): Pair<Int, Int> {
+    val heading = changelogUnreleasedHeadingPattern.find(changelog)
+    requireNotNull(heading) { "CHANGELOG.md has no '## [Unreleased]' heading at the start of a line" }
+    val bodyStart = changelog.indexOf('\n', heading.range.last).let { if (it < 0) changelog.length else it + 1 }
+    val next = changelogVersionHeadingPattern.find(changelog, bodyStart)
     val bodyEnd = next?.range?.first ?: changelog.length
+    return bodyStart to bodyEnd
+}
+
+fun changelogUnreleasedBody(changelog: String): String {
+    val (bodyStart, bodyEnd) = changelogUnreleasedBounds(changelog)
     return changelog.substring(bodyStart, bodyEnd)
 }
 
@@ -156,10 +168,7 @@ fun hasReleasableChanges(unreleasedBody: String): Boolean =
  * no entries are dropped rather than carried forward empty.
  */
 fun cutChangelog(changelog: String, newVersion: String, date: String): String {
-    val start = changelog.indexOf(changelogUnreleasedHeading)
-    val bodyStart = changelog.indexOf('\n', start).let { if (it < 0) changelog.length else it + 1 }
-    val next = Regex("""^## \[""", RegexOption.MULTILINE).find(changelog, bodyStart)
-    val bodyEnd = next?.range?.first ?: changelog.length
+    val (bodyStart, bodyEnd) = changelogUnreleasedBounds(changelog)
     val body = changelog.substring(bodyStart, bodyEnd)
 
     val carried = body.split(Regex("""(?=^### )""", RegexOption.MULTILINE))
@@ -206,6 +215,14 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
         target.parentFile.mkdirs()
         target.writeText(text)
     }
+    write(
+        "gradle.properties",
+        """
+        # The runtime AAR pulls in AndroidX (Compose) transitively, and AGP
+        # refuses to resolve those against a project that has not opted in.
+        android.useAndroidX=true
+        """.trimIndent() + "\n",
+    )
     write(
         "settings.gradle.kts",
         """
@@ -395,8 +412,21 @@ tasks.register("releaseDryRun") {
             )
         }
 
-        logger.lifecycle("releaseDryRun: publishPlugins --validate-only")
-        exec { commandLine(gradlewCommand("-p", "gradle-plugin", "publishPlugins", "--validate-only")) }
+        // Not `publishPlugins --validate-only`: measured against the real
+        // Portal, that flag still POSTs the plugin bundle with real
+        // credentials — it came back "Plugin ... exists already" rather than
+        // actually publishing only because 0.1.0 already happens to be there.
+        // Pointed at a version that had never been published, the same call
+        // would have published it. That is the opposite of what a task
+        // required to run with no publishing credentials, on a clean
+        // checkout, is for. `validatePlugins` — from `java-gradle-plugin`,
+        // not `com.gradle.plugin-publish` — checks the plugin's own
+        // structure (task and artifact-transform parameter annotations)
+        // entirely locally, with no network call and nothing to authenticate.
+        // It does not check the Portal-side metadata (id, tags, description)
+        // the way `publishPlugins` does, but nothing that stays local can.
+        logger.lifecycle("releaseDryRun: validatePlugins (local only; publishPlugins --validate-only still calls the Portal)")
+        exec { commandLine(gradlewCommand("-p", "gradle-plugin", "validatePlugins", "--rerun-tasks")) }
 
         println(
             """
@@ -407,7 +437,7 @@ tasks.register("releaseDryRun") {
             |  publishToMavenLocal produced live.gravitylabs.porthole:runtime:$version and
             |    :runtime-noop:$version, and a separate project (no includeBuild) resolved both
             |    of those plus the plugin itself from mavenLocal() alone
-            |  publishPlugins --validate-only found no problems with the Portal metadata
+            |  validatePlugins found no problems with the plugin's own structure, entirely locally
             |
             |A real release still ends with the four commands `release` prints — this only
             |proves each one would have something real to publish.
