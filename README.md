@@ -6,7 +6,7 @@
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-5ec8b0?style=flat-square"></a>
   <img alt="Android API 26 and up" src="https://img.shields.io/badge/android-API%2026%2B-56c88c?style=flat-square">
   <img alt="Debug builds only" src="https://img.shields.io/badge/builds-debug%20only-f0883e?style=flat-square">
-  <img alt="Version 0.1.0, unpublished" src="https://img.shields.io/badge/version-0.1.0%20unpublished-9aa6b8?style=flat-square">
+  <img alt="Version 0.1.0, published" src="https://img.shields.io/badge/version-0.1.0%20published-9aa6b8?style=flat-square">
 </p>
 
 # Porthole
@@ -335,6 +335,28 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 The MCP server and the UI are independent. Run either, or both at once — they
 each open their own connection to the device.
 
+**Environment variables**, for anyone not going through the generated
+`.mcp.json` above:
+
+| variable | default | what it sets |
+| --- | --- | --- |
+| `PORTHOLE_HOST` | `127.0.0.1` | host the forwarded device socket is reachable on |
+| `PORTHOLE_PORT` | `8677` | device port the porthole listens on |
+| `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
+| `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for [system traces](#system-traces) |
+| `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |
+
+Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
+and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by
+`portholeMcpConfig`, which knows both with certainty — the Gradle root
+project directory, and the SDK resolved the same way the plugin resolves it
+for `adb` itself — rather than guessing from whatever directory an MCP
+client happened to launch the server in. `porthole_status` reports which
+source each came from (`PORTHOLE_PROJECT_ROOT` or `cwd` for the root;
+`PORTHOLE_SDK_DIR`, `local.properties`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or
+`PATH` for the SDK), which is where to look first if a resolved path looks
+wrong.
+
 ## What you actually have to write
 
 The short answer to "is it just the plugin and a dependency": nearly.
@@ -513,8 +535,11 @@ runtime's own atrace sections are already inside it: navigations, HTTP calls,
 queries and stalls, so the capture arrives annotated with what the app was
 doing and not only what the kernel was doing. The result says how many of
 those labels it found, which is how you know the annotation actually
-happened — and on at least one physical device (see Status) that count came
-back zero, so treat it as something to check per device rather than assumed.
+happened — and on the verified device (see Status) that count tracks what the
+app actually did inside the window, not whether `--app` was honoured: a
+capture of a screen sitting idle, with no navigation, HTTP, DB or stall
+activity inside it, comes back with zero labels correctly, because there was
+nothing for the runtime to annotate.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of five questions — jank, thread states,
@@ -1348,7 +1373,9 @@ Copyright 2026 Gravity Labs.
 
 ## Status
 
-Version 0.1.0, unpublished. Verified end to end on an emulator against
+Version 0.1.0, live on Maven Central and npm; the Gradle Plugin Portal
+submission was pending review at last check (see [Publishing](#publishing)).
+Verified end to end on an emulator against
 `sample/`: the plugin puts `:runtime` on debug and `:runtime-noop` on release,
 the porthole installs itself on process start, and every tool returns real data
 — including request and response bodies captured from a one-shot streaming
@@ -1360,19 +1387,24 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-723 tests: 312 on the JVM (`./gradlew test`, which covers both build types of
-`runtime` and `runtime-noop` plus the Gradle plugin — 2 skipped, 0 failures),
-301 in the MCP server (`cd mcp && npm test` — 1 skipped, gated on a real
-`trace_processor` binary and a real capture both being present on the
-machine, which they are not on a fresh checkout), and 110 in the timeline UI
-(`cd mcp && npm run test:ui`, a separate suite from the server's). The
+816 tests: 346 on the JVM (`./gradlew test`, which covers both build types of
+`runtime` and `runtime-noop` plus the Gradle plugin — 3 skipped, 0 failures:
+one test that assumes a POSIX path survives `java.io.File` and does not on
+Windows, and the two-test AGP compatibility pair below), 358 in the MCP
+server (`cd mcp && npm test` — 1 skipped, gated on a real `trace_processor`
+binary and a real capture both being present on the machine, which they are
+not on a fresh checkout), and 112 in the timeline UI (`cd mcp && npm run
+test:ui`, a separate suite from the server's). The
 runtime's arithmetic is covered where it has been wrong before — a long freeze
 counted in refreshes rather than in relaxed deadlines, and a stalled thread's
 stack ordered so the app's own frames lead. A parity test compares the public
 surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
-integration. The 2 JVM skips are the AGP compatibility pair, which needs an
-SDK and the network and skips cleanly without a version to check.
+integration. Two of the three JVM skips are the AGP compatibility pair, which
+needs an SDK and the network and skips cleanly without a version to check;
+the third asserts a `PORTHOLE_SDK_DIR` resolved from `local.properties`
+keeps its POSIX shape, which `java.io.File` normalizes away on Windows, so it
+skips on the platform this project runs its own primary shell on.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
@@ -1389,16 +1421,27 @@ also written but never observed — the emulator did not produce one.
 **Verified on a physical device:** wave 2's integration QA ran end to end on a
 real Pixel 10 Pro XL, fingerprint
 `google/mustang_beta/mustang:17/CP41.260814.003.B1/16166531:user/release-keys`
-(Android 17, API 37), and passed. One hard negative from that run is worth
-recording plainly rather than folding into a PASS: this device does not
-honour `perfetto --app <pkg>` — a capture came back with `portholeLabels: 0`
-and `ATRACE_TAG_APP` stayed clear, and the same thing reproduced running
-`perfetto` by hand outside Porthole entirely, so it is not this tool's own
-bug. Whether that is the beta build or the Android 17 platform is not yet
-known — it needs a second device to tell apart. Read this as neither "works
-on Android 17" nor "broken on Android 17"; it is an open question on one
-fingerprint.
+(Android 17, API 37), and passed. A separate hardware run on that same device
+and fingerprint checked the trace half directly: `perfetto --app
+com.example.shop` is accepted and honoured — a real capture carried `porthole:
+http`, `recompose` and `screen` slices with real durations, and it still
+worked when the app process predated the tracing session. All five curated
+`ask_system_trace` questions answered on the first try, returning six
+differentiated findings and none empty, including 31ms of main-thread
+runnable-but-not-scheduled that Porthole's own collectors cannot see. The
+trace's own `App Deadline Missed` (119.47ms) matched the frame Porthole
+independently reported at `totalMs: 125`. An earlier report of this device
+refusing `--app` (`portholeLabels: 0`, `ATRACE_TAG_APP` reading clear) does
+not hold up: it was read off `debug.atrace.tags.enableflags`, which is a
+device-wide tag mask that cannot show a tag enabled for one package — it
+reads "off" on a setup that is working correctly, which is exactly what
+happened. The only check that actually answers the question is the trace
+itself. Read this as neither "works on Android 17" as a platform claim nor a
+closed question generally; it is one behaviour, confirmed on one device and
+one fingerprint.
 
 **Not done:** multi-process apps, and Compose versions other than the one in
-the version catalog. A second physical device, to separate the app-label gap
-above from this specific build.
+the version catalog. A second physical device is still wanted — not to
+settle the `--app` question above, which is now answered, but because GRA-67
+wants everything in 0.1.0 proved on two physical devices and GRA-111 wants
+real artifacts with provenance from more than one.

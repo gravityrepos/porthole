@@ -509,7 +509,8 @@ tasks.register("releaseDryRun") {
             |  validatePlugins found no problems with the plugin's own structure, entirely locally
             |
             |A real release still ends with the four commands `release` prints — this only
-            |proves each one would have something real to publish.
+            |proves three of them (not npx vercel deploy --prod, which this task never
+            |touches) would have something real to publish.
             """.trimMargin(),
         )
     }
