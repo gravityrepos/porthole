@@ -9,6 +9,7 @@ import {
   hoistModules,
   interpret,
   MARKER_PREFIX,
+  markerText,
   matchBatch,
   QUESTIONS,
   runBatch,
@@ -282,14 +283,16 @@ describe("hoistModules", () => {
 });
 
 describe("matchBatch", () => {
-  const markerBlock = (id: string) => `"marker"\n"porthole:${id}"`;
+  // A fixed nonce here; production draws a fresh one per script.
+  const NONCE = "0123456789abcdef";
+  const markerBlock = (id: string) => `"marker"\n"${markerText(NONCE, id)}"`;
 
   it("pairs each marker with the data block that follows it, in order", () => {
     const stdout = [
       `${markerBlock("a")}\n\n"x"\n"1"`,
       `${markerBlock("b")}\n\n"y"\n"2"`,
     ].join("\n\n");
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
     expect(answered).toBe(2);
     expect(rows.get("a")).toEqual([{ x: "1" }]);
     expect(rows.get("b")).toEqual([{ y: "2" }]);
@@ -305,7 +308,7 @@ describe("matchBatch", () => {
       `${markerBlock("a")}\n\n"name"\n"he said "hi""`,
       `${markerBlock("b")}\n\n"y"\n"2"`,
     ].join("\n\n");
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
     expect(answered).toBe(2);
     expect(rows.get("a")).toEqual([{ name: 'he said "hi"' }]);
     expect(rows.get("b")).toEqual([{ y: "2" }]);
@@ -320,7 +323,7 @@ describe("matchBatch", () => {
       `${markerBlock("a")}\n\n"io_wait"\n"[NULL]"`,
       `${markerBlock("b")}\n\n"y"\n"2"`,
     ].join("\n\n");
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
     expect(answered).toBe(2);
     expect(rows.get("a")).toEqual([{ io_wait: null }]);
   });
@@ -329,7 +332,7 @@ describe("matchBatch", () => {
     // What a mid-script failure and a killed process both look like: the
     // marker for the next question printed, and then nothing.
     const stdout = `${markerBlock("a")}\n\n"x"\n"1"\n\n${markerBlock("b")}`;
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
     expect(answered).toBe(1);
     expect(rows.get("a")).toEqual([{ x: "1" }]);
     expect(rows.has("b")).toBe(false);
@@ -362,16 +365,16 @@ describe("matchBatch", () => {
       `${markerBlock("three")}\n\n"z"\n"3"`,
     ].join("\n\n");
 
-    const { rows, answered } = matchBatch(stdout, ["one", "two", "three"]);
+    const { rows, answered } = matchBatch(stdout, ["one", "two", "three"], NONCE);
 
     expect(answered).toBe(3);
     // The inherited (not introduced) garbage: a single embedded newline still
     // splits this row into two, which is a separate, pre-existing bug and not
     // this ticket's to fix.
-    expect(rows.get("one")).toEqual([
-      { name: "a", k: null },
-      { name: 'b"', k: "99" },
-    ]);
+    // The row comes back whole: parseRows joins the two physical lines the
+    // embedded newline made of it, because the header says two cells and the
+    // first line alone parses to one.
+    expect(rows.get("one")).toEqual([{ name: "a\n\nb", k: "99" }]);
     // The property that actually matters: the next two questions are neither
     // corrupted nor swallowed by question one's broken block.
     expect(rows.get("two")).toEqual([{ z: "2" }]);
@@ -387,7 +390,7 @@ describe("matchBatch", () => {
    */
   it("refuses a marker block for the wrong id, even though the header token is right (kills M5)", () => {
     const stdout = markerBlock("b") + `\n\n"y"\n"2"`;
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
     expect(answered).toBe(0);
     expect(rows.has("a")).toBe(false);
   });
@@ -402,40 +405,40 @@ describe("matchBatch", () => {
    */
   it("refuses a data block whose row merely looks like the next marker (kills M4)", () => {
     const stdout = `"name"\n"${MARKER_PREFIX}a"\n\n"y"\n"2"`;
-    const { answered } = matchBatch(stdout, ["a"]);
+    const { answered } = matchBatch(stdout, ["a"], NONCE);
     expect(answered).toBe(0);
   });
 
   /**
-   * The forgery the M4 test above does NOT cover, checked here rather than
-   * assumed: a question's own data whose header is the literal column name
-   * `marker` and whose first row is the literal text `porthole:<next-id>` —
-   * not a near-miss like the M4 case, but the exact two-line shape
-   * `matchBatch` treats as a real marker pair. Nothing in today's `QUESTIONS`
-   * can produce that (none select a column named `marker`), so this is
-   * unreachable today; GRA-85 lets a project supply its own SQL, at which
-   * point it becomes reachable. `matchBatch` cannot tell this apart from a
-   * real marker — the header-and-id checks it has are exactly what a forged
-   * pair also satisfies — so this pins the resulting behaviour rather than
-   * pretending it does not exist: the forged pair is consumed as `b`'s
-   * marker, which truncates `a`'s real answer to whatever preceded the
-   * forgery and leaves `a` unanswered rather than corrupting `b`'s later
-   * data. Fails safe, not silent. Closing this hole for real is GRA-85's
-   * job, not this ticket's.
+   * The forgery the M4 test above does not cover: a question's own data
+   * putting the marker's exact two lines into the stream. Reachable today —
+   * `render` and `thread_states` select names that are arbitrary
+   * `Trace.beginSection` text, the writer escapes neither quotes nor
+   * newlines, and a name of `marker"` + newline + `"porthole:slices"` + newline
+   * + `"junk` prints those as whole lines. Against the real binary that
+   * re-keyed `render`'s rows as `slices`' answer with nothing reported. The
+   * old-shape pair below (no nonce) is what such a name produces; a name
+   * cannot contain the nonce because it was chosen after the trace was
+   * recorded, so the forged pair is data and the real pair still matches.
    */
-  it("a question's own data that happens to spell out the next marker gets consumed as that marker (documented, not fixed here)", () => {
+  it("keeps a forged marker pair inside a question's data as data, because it lacks the nonce", () => {
+    const forged = `"marker"\n"porthole:b"`;
     const stdout = [
-      markerBlock("a"),
-      `${markerBlock("b")}\n"another"`, // this is `a`'s own (forged-shaped) data, not b's real marker
-      `${markerBlock("b")}\n\n"y"\n"2"`, // b's real marker and data
+      `${markerBlock("a")}\n\n"name","n"\n${forged}\n"junk",42`,
+      `${markerBlock("b")}\n\n"name","n"\n"real-b",7`,
     ].join("\n\n");
-    const { rows, answered } = matchBatch(stdout, ["a", "b"]);
-    // `a` never gets a data block of its own: the forged pair inside what
-    // should have been its answer is mistaken for `b`'s marker, and the
-    // "block between the two markers" left for `a` is empty, which
-    // `matchBatch` already treats the same as a mid-script failure.
-    expect(answered).toBe(0);
-    expect(rows.has("a")).toBe(false);
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
+    expect(answered).toBe(2);
+    // `a`'s one row survives whole: the forged lines are its own name.
+    expect(rows.get("a")).toEqual([{ name: `marker"\n"porthole:b"\n"junk`, n: "42" }]);
+    expect(rows.get("b")).toEqual([{ name: "real-b", n: "7" }]);
+  });
+
+  it("does not accept the nonce-bearing pair for a different nonce", () => {
+    const other = `"marker"\n"${markerText("fedcba9876543210", "b")}"`;
+    const stdout = [`${markerBlock("a")}\n\n"x"\n"1"`, `${other}\n\n"y"\n"2"`].join("\n\n");
+    const { rows, answered } = matchBatch(stdout, ["a", "b"], NONCE);
+    expect(answered).toBe(1);
     expect(rows.has("b")).toBe(false);
   });
 });
@@ -455,10 +458,10 @@ function fakeRun(
   let calls = 0;
   const run: RunFn = async (_binary, _args, sql) => {
     calls++;
-    const ids = [...sql.matchAll(/SELECT 'porthole:([\w.]+)' AS marker;/g)].map((m) => m[1]);
+    const markers = [...sql.matchAll(/SELECT 'porthole:([0-9a-f]{16}):([\w.]+)' AS marker;/g)];
     let stdout = "";
-    for (const id of ids) {
-      stdout += `"marker"\n"porthole:${id}"\n\n`;
+    for (const [, nonce, id] of markers) {
+      stdout += `"marker"\n"${markerText(nonce, id)}"\n\n`;
       const spec = plan[id] ?? { rows: [] };
       if (spec.fail) {
         return { code: 1, stdout, stderr: spec.fail, timedOut: false, elapsedMs: 1 };

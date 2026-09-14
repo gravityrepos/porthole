@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -384,13 +385,39 @@ function why(stderr: string | undefined, error: Error | undefined): string {
  * which is the right data in the wrong shape.
  */
 export function parseRows(stdout: string): Array<Record<string, unknown>> {
-  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  const lines = stdout.trim().split(/\r?\n/);
   if (lines.length < 2) return [];
   const header = parseCsvLine(lines[0]);
-  return lines.slice(1).map((line) => {
-    const cells = parseCsvLine(line);
-    return Object.fromEntries(header.map((key, i) => [key, cells[i] ?? null]));
-  });
+  const rows: Array<Record<string, unknown>> = [];
+
+  // A row is not a line. trace_processor writes an embedded newline inside
+  // a quoted value literally, so a slice named across two lines arrives as
+  // two lines, and reading each as its own row produced one truncated row
+  // and one garbage row where there should have been one. Lines are joined
+  // until the row has as many cells as the header — the one fact the stream
+  // does give reliably, since every statement prints every column. That
+  // leaves the single-column case ambiguous by construction (a one-cell row
+  // is complete after one line whatever it contains), which is the price of
+  // a writer that neither escapes quotes nor terminates rows.
+  let pending: string | null = null;
+  const emit = (text: string) => {
+    const cells = parseCsvLine(text);
+    rows.push(Object.fromEntries(header.map((key, i) => [key, cells[i] ?? null])));
+  };
+  for (const line of lines.slice(1)) {
+    if (pending === null) {
+      if (line.length === 0) continue;
+      pending = line;
+    } else {
+      pending += "\n" + line;
+    }
+    if (parseCsvLine(pending).length >= header.length) {
+      emit(pending);
+      pending = null;
+    }
+  }
+  if (pending !== null) emit(pending);
+  return rows;
 }
 
 /**
@@ -433,6 +460,28 @@ export interface AskResult {
 
 /** Exported so tests can build a marker line without duplicating the format. */
 export const MARKER_PREFIX = "porthole:";
+
+/**
+ * The text a marker statement selects: the prefix, a nonce, the question id.
+ *
+ * The nonce is what makes a marker unforgeable. trace_processor's CSV neither
+ * escapes an embedded quote nor terminates a row, so a slice name can contain
+ * a quote followed by a newline and put whatever it likes on a line of its
+ * own — including the exact two lines a marker prints. A fixed marker text is
+ * therefore reachable from `Trace.beginSection`: shown against the real
+ * binary, where a forged pair inside one question's data re-keyed its rows as
+ * the next question's answer and nothing said so. A slice name captured
+ * before this process started cannot contain sixteen hex characters chosen
+ * after it, which closes the whole class rather than the one shape tested.
+ */
+export function markerText(nonce: string, id: string): string {
+  return `${MARKER_PREFIX}${nonce}:${id}`;
+}
+
+/** Sixteen hex characters, fresh per script. */
+export function newNonce(): string {
+  return randomBytes(8).toString("hex");
+}
 
 /**
  * How long one trace_processor invocation gets before it is presumed wedged.
@@ -516,8 +565,14 @@ function substitute(sql: string, packageName: string, fromNs: number, toNs: numb
  * `[NULL]`. A slice name containing a quote, or a row that is `[NULL]` in
  * every selected column, is indistinguishable from the marker under that
  * scheme. Giving the marker its own statement instead means it is always its
- * own block — one column literally named `marker`, one row, nothing a real
- * question could produce by accident.
+ * own block — one column literally named `marker`, one row.
+ *
+ * "Nothing a real question could produce by accident" turned out to be true
+ * only of accidents. A value can put the marker's two lines into the stream
+ * on purpose, or by the misfortune of a name containing a quote and a
+ * newline, because the writer escapes neither. So the marker also carries a
+ * nonce — see [markerText] — which no value in a trace recorded before this
+ * call can contain.
  */
 function buildScript(
   modules: string[],
@@ -525,11 +580,12 @@ function buildScript(
   packageName: string,
   fromNs: number,
   toNs: number,
+  nonce: string,
 ): string {
   const lines: string[] = [];
   for (const module of modules) lines.push(`INCLUDE PERFETTO MODULE ${module};`);
   for (const question of questions) {
-    lines.push(`SELECT '${MARKER_PREFIX}${question.id}' AS marker;`);
+    lines.push(`SELECT '${markerText(nonce, question.id)}' AS marker;`);
     lines.push(`${substitute(question.sql, packageName, fromNs, toNs)};`);
   }
   return lines.join("\n");
@@ -557,23 +613,26 @@ interface BatchMatch {
  * half of the corrupted block was mistaken for its marker.
  *
  * Scanning for the literal pair — a line that is exactly `"marker"`
- * immediately followed by a line that is exactly `"porthole:<id>"` — finds
- * the next boundary correctly no matter how many blank lines (or garbled
- * pieces of a multi-line value) sit inside the block before it, because no
- * match is accepted unless both lines match exactly. That keeps the property the
- * design comment on `buildScript` argues for: the marker is its own
- * statement, so nothing a question returns can forge it, provided both the
- * header token and the id are checked — checking only one of them re-opens
- * exactly this hole (see the `matchBatch` tests guarding each check on its
- * own).
+ * immediately followed by a line that is exactly the marker text for the
+ * expected id — finds the next boundary correctly no matter how many blank
+ * lines (or garbled pieces of a multi-line value) sit inside the block before
+ * it, because no match is accepted unless both lines match exactly.
+ *
+ * Exact is not the same as unforgeable. Scanning every line, rather than only
+ * block boundaries, means a value that contains the pair on lines of its own
+ * would be accepted mid-block — and a value can, since the writer escapes
+ * nothing. What stops it is the nonce in the marker text, not the scan: the
+ * expected id line includes sixteen characters chosen after the trace was
+ * recorded. Both the header token and the nonce-bearing id are checked;
+ * dropping either check is what the `matchBatch` tests guard against.
  */
-export function matchBatch(stdout: string, ids: string[]): BatchMatch {
+export function matchBatch(stdout: string, ids: string[], nonce: string): BatchMatch {
   const lines = stdout.split(/\r?\n/);
   const rows = new Map<string, Array<Record<string, unknown>>>();
 
   const isMarkerFor = (i: number, id: string): boolean => {
     if (lines[i] !== '"marker"') return false;
-    return lines[i + 1] === `"${MARKER_PREFIX}${id}"`;
+    return lines[i + 1] === `"${markerText(nonce, id)}"`;
   };
 
   let cursor = 0;
@@ -751,7 +810,8 @@ export async function runBatch(
   const unanswered: string[] = [];
 
   while (pending.length > 0) {
-    const script = buildScript(modules, pending, options.packageName, options.fromNs, options.toNs);
+    const nonce = newNonce();
+    const script = buildScript(modules, pending, options.packageName, options.fromNs, options.toNs, nonce);
     const result = await run(options.binary, ["query", "-f", "-", options.trace], script, options.timeoutMs);
 
     if (result.spawnError) {
@@ -764,7 +824,7 @@ export async function runBatch(
       break;
     }
 
-    const { rows: batchRows, answered } = matchBatch(result.stdout, pending.map((q) => q.id));
+    const { rows: batchRows, answered } = matchBatch(result.stdout, pending.map((q) => q.id), nonce);
     for (const [id, questionRows] of batchRows) {
       (rows as Record<string, unknown>)[id] = questionRows;
     }

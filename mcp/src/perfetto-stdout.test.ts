@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { askTrace, findTraceProcessor, interpret, matchBatch, parseRows, type Rows } from "./perfetto.js";
+import { askTrace, findTraceProcessor, interpret, markerText, matchBatch, parseRows, type Rows } from "./perfetto.js";
 
 /**
  * The other fixtures are JSON exported from the trace viewer. These are the
@@ -161,8 +161,9 @@ describe("interpret, on what trace_processor prints", () => {
  */
 describe("matchBatch, on the five real fixtures concatenated in question order", () => {
   const ids = ["jank", "thread_states", "binder", "render", "slices"];
-  const batched = ids.map((id) => `"marker"\n"porthole:${id}"\n\n${stdout(id).trimEnd()}`).join("\n\n");
-  const { rows: matched, answered } = matchBatch(batched, ids);
+  const NONCE = "0123456789abcdef";
+  const batched = ids.map((id) => `"marker"\n"${markerText(NONCE, id)}"\n\n${stdout(id).trimEnd()}`).join("\n\n");
+  const { rows: matched, answered } = matchBatch(batched, ids, NONCE);
 
   it("answers all five from one concatenated script", () => {
     expect(answered).toBe(5);
