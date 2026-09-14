@@ -7,7 +7,7 @@ import { z } from "zod";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { runAdb } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf } from "./moment.js";
 import {
   CPU_PROBE,
@@ -200,6 +200,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async (): Promise<ToolResult> => {
+      // GRA-119 AC5: name which SDK and which project root this run resolved
+      // to, and where each came from, so "adb resolved to the wrong SDK" is
+      // something this tool can actually diagnose instead of something an
+      // agent has to take on faith. resolveSdkDir()/resolveProjectRoot() in
+      // adb.ts already compute both; this just reports them.
+      const sdkDir = resolveSdkDir();
+      const projectRoot = resolveProjectRoot();
       const payload = {
         state: device.state,
         host: HOST,
@@ -208,6 +215,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         timelineUi: timeline.isRunning() ? timeline.url() : null,
         bufferedEvents: timeline.buffer().length,
         lastError: device.lastError,
+        sdkDir: sdkDir.directory,
+        sdkDirSource: sdkDir.source,
+        projectRoot: projectRoot.directory,
+        projectRootSource: projectRoot.source,
       };
       const summary =
         device.state === "connected" && device.hello

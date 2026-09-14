@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
 import { buildRig, type Rig } from "./testing/harness.js";
+import { resolveSdkDir } from "./adb.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -61,6 +62,75 @@ describe("the harness", () => {
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: true, findings: [] });
       expect(result.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("porthole_status names its SDK and project root sources", () => {
+  // GRA-119 AC5, never actually wired up until this ticket: `porthole_status`
+  // must call the real `resolveSdkDir()`/`resolveProjectRoot()` from adb.ts
+  // and report their `.source`, not reimplement the resolution. Asserting by
+  // value (not just "the field exists") is what makes deleting the
+  // provenance from the payload — or hand-rolling a second implementation
+  // that happens to agree by accident in this one case — turn this red.
+
+  it("reports PORTHOLE_SDK_DIR as the source when it is set", async () => {
+    const original = process.env.PORTHOLE_SDK_DIR;
+    process.env.PORTHOLE_SDK_DIR = "C:\\fake\\porthole\\sdk";
+    try {
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          sdkDir: "C:\\fake\\porthole\\sdk",
+          sdkDirSource: "PORTHOLE_SDK_DIR",
+        });
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env.PORTHOLE_SDK_DIR;
+      else process.env.PORTHOLE_SDK_DIR = original;
+    }
+  });
+
+  it("reports whatever resolveSdkDir() resolves to when PORTHOLE_SDK_DIR is unset", async () => {
+    const original = process.env.PORTHOLE_SDK_DIR;
+    delete process.env.PORTHOLE_SDK_DIR;
+    try {
+      // Not a second, hand-rolled expectation of what the source "should" be —
+      // the whole point of AC5 is that porthole_status reports adb.ts's own
+      // answer, so the test's expectation is that same answer, called
+      // directly.
+      const expected = resolveSdkDir();
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          sdkDir: expected.directory,
+          sdkDirSource: expected.source,
+        });
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env.PORTHOLE_SDK_DIR;
+      else process.env.PORTHOLE_SDK_DIR = original;
+    }
+  });
+
+  it("also reports the project root and its source", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", {});
+      expect(result.isError).toBeFalsy();
+      const payload = result.json as Record<string, unknown>;
+      expect(typeof payload.projectRoot).toBe("string");
+      expect(["PORTHOLE_PROJECT_ROOT", "cwd"]).toContain(payload.projectRootSource);
     } finally {
       await rig.close();
     }

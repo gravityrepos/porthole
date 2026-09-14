@@ -153,13 +153,15 @@ function isDirectory(candidate: string): boolean {
 }
 
 /**
- * GRA-119, AC5: `porthole_status` (in `index.ts`, owned by GRA-90 — not
- * touched here) should name which of these two it used and where the value
- * came from. Everything needed to answer that is exported: call
- * `resolveSdkDir()` and `resolveProjectRoot()` and report their `.source`
- * fields (`"PORTHOLE_SDK_DIR"` / `"local.properties"` / `"ANDROID_HOME"` /
+ * GRA-119, AC5: `porthole_status` (in `index.ts`) names which of these two it
+ * used and where the value came from, as of GRA-152 — that ticket exists
+ * because this criterion fell through the gap between GRA-119's `Owns`
+ * (which excluded `index.ts`) and GRA-90's rewrite of `index.ts` afterwards.
+ * `resolveSdkDir()` and `resolveProjectRoot()`'s `.source` fields
+ * (`"PORTHOLE_SDK_DIR"` / `"local.properties"` / `"ANDROID_HOME"` /
  * `"ANDROID_SDK_ROOT"` / `"PATH"` for the SDK; `"PORTHOLE_PROJECT_ROOT"` /
- * `"cwd"` for the project root) alongside the resolved `.directory`.
+ * `"cwd"` for the project root) are what `porthole_status` reports alongside
+ * the resolved `.directory`.
  */
 export type SdkDirSource = "PORTHOLE_SDK_DIR" | "local.properties" | "ANDROID_HOME" | "ANDROID_SDK_ROOT" | "PATH";
 
