@@ -31,15 +31,29 @@ import type { Hello } from "./types";
  * it renders App. This file is the test that call site needed: it renders
  * `<App />` for real and checks the banner is actually in the tree.
  *
- * Everything App composes other than the banner and Header is stubbed out.
- * TimelinePanel owns a real `<canvas>` 2D context and a `ResizeObserver`,
- * neither of which happy-dom implements; InsightsPanel/WindowPanel/LogPane/
- * SelectionPanel already have their own logic tests elsewhere (laneData,
- * InsightsPanel.test.tsx, TimelineStore.test.ts) and add nothing to this
- * file's job, which is only the wiring GRA-167 exists to defend. Header is
- * left real -- it is cheap to render and Header.render.test.tsx exercises
- * its own pill separately -- so this file also incidentally proves Header
- * mounts inside App without throwing.
+ * Everything App composes other than the banner and Header is stubbed out:
+ * TimelinePanel, LogPane, SelectionPanel, WindowPanel and InsightsPanel are
+ * all replaced with `() => null` above. TimelinePanel owns a real `<canvas>`
+ * 2D context and a `ResizeObserver`, neither of which happy-dom implements;
+ * the other four are stubbed for the same reason it would be pointless not
+ * to once one of them is.
+ *
+ * State the boundary plainly, since it is easy to misread this file as
+ * covering App's whole tree: stubbing these five means **this file asserts
+ * nothing about whether any of them actually renders inside App, or about
+ * their own internals**. That each has its own logic tests elsewhere
+ * (laneData, InsightsPanel.test.tsx, TimelineStore.test.ts) covers what
+ * those files individually compute, not whether App's JSX still mounts
+ * them -- measured, not assumed: deleting the `<InsightsPanel .../>` element
+ * from App's JSX leaves this suite at 133 green and `tsc` clean, the same
+ * shape of gap GRA-167 exists to close for the banner and the pill. Closing
+ * it for every panel App composes was out of this ticket's scope (GRA-167's
+ * AC2/AC3 name the banner and the pill specifically); if a panel silently
+ * stops rendering, nothing here will catch it. Header is the one exception,
+ * left real because it is cheap to render and Header.render.test.tsx
+ * exercises its own pill separately -- so this file does incidentally prove
+ * Header mounts inside App without throwing, which the five stubbed panels
+ * get no equivalent of.
  */
 vi.mock("./components/TimelinePanel", () => ({ TimelinePanel: () => null }));
 vi.mock("./components/LogPane", () => ({ LogPane: () => null }));
