@@ -28,6 +28,60 @@ const LABEL: Record<Finding["severity"], string> = {
   note: "NOTE   ",
 };
 
+// Raw ANSI SGR codes — no dependency, for four escape sequences. Reset is a
+// full SGR reset (`\x1b[0m`) rather than a scoped "un-bold"/"un-dim" code so
+// that wrapping never depends on which attribute was opened.
+const ANSI_RESET = "\x1b[0m";
+const ANSI_RED = "\x1b[31m";
+const ANSI_YELLOW = "\x1b[33m";
+const ANSI_DIM = "\x1b[2m";
+
+const SEVERITY_COLOR: Record<Finding["severity"], string> = {
+  error: ANSI_RED,
+  warning: ANSI_YELLOW,
+  note: ANSI_DIM,
+};
+
+/**
+ * Whether the severity token in a rendered report should carry colour.
+ *
+ * Colour belongs on the TTY path a human reads — never on a pipe, CI, or the
+ * MCP tool result text an agent reads, where escape bytes are just noise a
+ * model has to see past. So this is a question about one output stream, not
+ * a global: `porthole capture` writes its summary to stderr while `porthole
+ * report` writes to stdout, and the two can disagree about whether they are
+ * a terminal (`cmd | less` redirects stdout but leaves stderr a TTY).
+ * Callers pass the stream they are about to write to.
+ *
+ * NO_COLOR (https://no-color.org) is honoured unconditionally when set to
+ * anything, including an empty string — the convention is "the variable is
+ * present", not "the variable is truthy", so this checks `undefined` rather
+ * than falsiness.
+ */
+export function shouldColor(
+  stream: { isTTY?: boolean } = process.stdout,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return Boolean(stream.isTTY) && env.NO_COLOR === undefined;
+}
+
+function colorSeverity(severity: Finding["severity"], color: boolean): string {
+  const label = LABEL[severity];
+  return color ? `${SEVERITY_COLOR[severity]}${label}${ANSI_RESET}` : label;
+}
+
+export interface RenderReportOptions {
+  /**
+   * Colour the severity token. Defaults to false: plain text is the safe
+   * default for every caller that does not explicitly opt in. That default —
+   * not a TTY check inside this function — is what keeps the MCP `findings`
+   * tool's text plain (it does not call this with `color: true`, and never
+   * will; it does not even call this function) and keeps every existing
+   * non-TTY test passing unchanged, by construction rather than by convention.
+   */
+  color?: boolean;
+}
+
 /**
  * One of the footer counts, saying how many of them never finished.
  *
@@ -44,7 +98,8 @@ function counted(trace: Trace, total: string, open: string, noun: string): strin
   return `${trace.metrics[total]} ${noun}${suffix}`;
 }
 
-export function renderReport(trace: Trace): string {
+export function renderReport(trace: Trace, options: RenderReportOptions = {}): string {
+  const color = options.color ?? false;
   const lines: string[] = [];
   const device = trace.device as Record<string, unknown>;
   const hz = Number(device.refreshHz) || 60;
@@ -69,7 +124,7 @@ export function renderReport(trace: Trace): string {
   // marked run, where it drops an ERROR below two WARNINGs and defeats the one
   // job of a prioritised list. The mark rides along on the line instead.
   for (const finding of trace.findings) {
-    lines.push(`  ${LABEL[finding.severity]}  ${finding.title}`);
+    lines.push(`  ${colorSeverity(finding.severity, color)}  ${finding.title}`);
     if (finding.during) lines.push(`           during "${finding.during}"`);
     if (finding.detail) lines.push(`           ${finding.detail}`);
   }
