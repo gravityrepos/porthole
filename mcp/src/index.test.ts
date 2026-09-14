@@ -958,6 +958,33 @@ describe("GRA-170: an ordinary reconnect's startedAt, not a fixture accident, de
 
       expect(rig.device.hello?.startedAt).toBe(pinnedStartedAt);
       expect(rig.timeline.buffer()).toHaveLength(before);
+
+      // The other half of the same claim, in the same test: a comparison
+      // that has simply stopped clearing anything (e.g. `this.startedAt`
+      // never gets assigned) would pass everything above vacuously — the
+      // ring "carries forward" whether or not startedAt equality was ever
+      // actually checked. Reconnecting once more with a genuinely different
+      // startedAt, and requiring the ring to clear *this* time, rules that
+      // out: only a comparison that treats "equal" and "different" as
+      // distinct cases passes both halves.
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      rig.device.stop();
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: (pinnedStartedAt ?? 0) + 1,
+        collectors: [],
+      }));
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+
+      expect(rig.device.hello?.startedAt).toBe((pinnedStartedAt ?? 0) + 1);
+      expect(rig.timeline.buffer()).toHaveLength(0);
     } finally {
       await rig.close();
     }
