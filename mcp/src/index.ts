@@ -707,6 +707,17 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async ({ at, bootMs, spreadMs }): Promise<ToolResult> => {
+      // GRA-166 item 3: computed once, up front, so every branch below
+      // shares one answer instead of some branches computing it and others
+      // omitting the key outright. That omission was the actual bug: a
+      // consumer reading `json.connected` got `false`, `true` or `undefined`
+      // depending on which branch answered, and `undefined` is falsy — a
+      // caller doing the obvious thing silently read "not connected" from a
+      // response that never made that claim. `connected` mirrors findings'
+      // loose sense exactly (handshaking or connected, not just connected) —
+      // see GRA-162's isAttached() and the note on findings' own `connected`
+      // above for why this is not the inline `===` pair it used to be.
+      const connected = isAttached(device.state);
       const events = timeline.buffer();
       if (events.length === 0) {
         // GRA-154, absorbed into GRA-157 as AC7: an empty ring is not the
@@ -716,19 +727,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // young. Same distinction `findings` and `porthole_status` make,
         // through the same method, so all three tell the same story about
         // an empty-but-attached device instead of each guessing separately.
-        //
-        // `connected` mirrors findings' loose sense exactly (handshaking or
-        // connected, not just connected): a QA pass on this ticket caught
-        // this payload hardcoding connected: false/true per branch instead
-        // of computing it, which meant a handshaking device — pending text
-        // "Connected, waiting on the app's first check-in", same as
-        // findings' — reported connected: false while findings reported
-        // true for the identical state, under the identical prose. Exactly
-        // the self-contradicting shape this whole ticket exists to remove,
-        // reintroduced in the one site that arrived from GRA-154.
-        // GRA-162: isAttached() instead of the inline `===` pair — same
-        // note as findings' `connected` above applies here.
-        const connected = isAttached(device.state);
         const pending = device.pendingMessage();
         if (pending !== null) {
           return ok(pending, { moment: null, connected });
@@ -748,7 +746,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           return ok(
             "No clock sample in the buffer, so a boot-clock timestamp cannot be placed. " +
               "The app must have been running with Porthole attached for that to exist.",
-            { moment: null, bootMs },
+            { moment: null, bootMs, connected },
           );
         }
         moment_at = converted.at;
@@ -758,7 +756,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       if (moment_at === undefined) {
-        return ok("Give either `at` or `bootMs`.", { moment: null });
+        return ok("Give either `at` or `bootMs`.", { moment: null, connected });
       }
 
       // Outside the buffer is a different answer from "nothing happened", and
@@ -769,12 +767,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         return ok(
           `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +
             "Not that nothing was happening — it is no longer held.",
-          { moment: null, asked: moment_at, buffered: { from: oldest, to: newest }, clock },
+          { moment: null, asked: moment_at, buffered: { from: oldest, to: newest }, clock, connected },
         );
       }
 
       const moment = { ...momentOf(events, moment_at, spreadMs ?? 2_000), clock };
-      return ok(describeMoment(moment), moment);
+      return ok(describeMoment(moment), { ...moment, connected });
     },
   );
 

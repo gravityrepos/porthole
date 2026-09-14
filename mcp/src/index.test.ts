@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
-import { resolveSdkDir } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -136,16 +136,62 @@ describe("porthole_status names its SDK and project root sources", () => {
     }
   });
 
-  it("also reports the project root and its source", async () => {
-    const rig = await buildRig();
+  // GRA-166 item 1: the two tests below pin `projectRoot`/`projectRootSource`
+  // to `resolveProjectRoot()`'s own answer, by value -- the same pattern the
+  // sdkDir pair above uses. The test they replace only checked
+  // `["PORTHOLE_PROJECT_ROOT", "cwd"]).toContain(payload.projectRootSource)`,
+  // a membership check against the type's own two literals rather than an
+  // assertion against a real value. Mutation M4 (hardcoding
+  // `projectRootSource` to a constant) survived that check for as long as
+  // the hardcoded string was one of the two the union already allows -- which
+  // any hardcoded value naming this field would be, so the check could never
+  // have failed. Pinning by value, as the sdkDir pair already did, is what
+  // makes a hardcoded return actually distinguishable from a computed one.
+
+  it("reports PORTHOLE_PROJECT_ROOT as the source when it is set", async () => {
+    const original = process.env.PORTHOLE_PROJECT_ROOT;
+    process.env.PORTHOLE_PROJECT_ROOT = "C:\\fake\\porthole\\project";
     try {
-      const result = await rig.client.callTool("porthole_status", {});
-      expect(result.isError).toBeFalsy();
-      const payload = result.json as Record<string, unknown>;
-      expect(typeof payload.projectRoot).toBe("string");
-      expect(["PORTHOLE_PROJECT_ROOT", "cwd"]).toContain(payload.projectRootSource);
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          projectRoot: "C:\\fake\\porthole\\project",
+          projectRootSource: "PORTHOLE_PROJECT_ROOT",
+        });
+      } finally {
+        await rig.close();
+      }
     } finally {
-      await rig.close();
+      if (original === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+      else process.env.PORTHOLE_PROJECT_ROOT = original;
+    }
+  });
+
+  it("reports whatever resolveProjectRoot() resolves to when PORTHOLE_PROJECT_ROOT is unset", async () => {
+    const original = process.env.PORTHOLE_PROJECT_ROOT;
+    delete process.env.PORTHOLE_PROJECT_ROOT;
+    try {
+      // Not a second, hand-rolled expectation of what the source "should"
+      // be -- the same reasoning as resolveSdkDir()'s pair above: the test's
+      // expectation is adb.ts's own answer, called directly, not a re-typed
+      // guess that could quietly drift from it.
+      const expected = resolveProjectRoot();
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          projectRoot: expected.directory,
+          projectRootSource: expected.source,
+        });
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+      else process.env.PORTHOLE_PROJECT_ROOT = original;
     }
   });
 });
@@ -501,6 +547,42 @@ describe("porthole_status, findings and what_was_happening agree during the hand
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false });
       expect(result.text).toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("GRA-166 item 3: every branch's payload carries `connected`, not just the empty-ring ones", async () => {
+    // Before this fix, `connected` was present only on the two empty-ring
+    // branches above (device.pendingMessage() and "nothing buffered yet").
+    // The four branches below -- reachable once the ring is non-empty -- had
+    // no `connected` key at all, so `json.connected` read as `undefined`
+    // there, which is falsy: a caller doing the obvious thing silently read
+    // "not connected" from a response that never made that claim.
+    // toHaveProperty fails on a genuinely missing key, not just a falsy one,
+    // so this catches the omission itself rather than merely re-asserting a
+    // value.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+
+      const neitherArg = await rig.client.callTool("what_was_happening", {});
+      expect(neitherArg.isError).toBeFalsy();
+      expect(neitherArg.json).toHaveProperty("connected", true);
+
+      // No "clocks" event was ever pushed, so a bootMs lookup cannot convert.
+      const noClockSample = await rig.client.callTool("what_was_happening", { bootMs: 5_000 });
+      expect(noClockSample.isError).toBeFalsy();
+      expect(noClockSample.json).toHaveProperty("connected", true);
+
+      const outsideBuffer = await rig.client.callTool("what_was_happening", { at: 999_999 });
+      expect(outsideBuffer.isError).toBeFalsy();
+      expect(outsideBuffer.json).toHaveProperty("connected", true);
+
+      // The success branch: a moment actually found and described.
+      const found = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      expect(found.isError).toBeFalsy();
+      expect(found.json).toHaveProperty("connected", true);
     } finally {
       await rig.close();
     }
