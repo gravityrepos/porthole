@@ -680,9 +680,28 @@ describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
       ),
       "utf8",
     );
-    const match = kotlin.match(/internal const val PROTOCOL_VERSION\s*=\s*(\d+)/);
-    expect(match, "Protocol.kt's PROTOCOL_VERSION declaration was not found in the expected shape").not.toBeNull();
-    const kotlinVersion = Number(match![1]);
+    // GRA-166 item 7: this used to be a bare `.match()`, which returns only
+    // the *first* occurrence. That has a silent-pass path: a doc comment
+    // quoting the declaration with a stale number (exactly the kind of
+    // comment this file's own module doc above has, and the kind someone
+    // would reasonably add while explaining the constant) sits earlier in
+    // the file than `internal const val PROTOCOL_VERSION = …` and shadows
+    // it, so a real bump on the Kotlin side reads as the comment's stale
+    // number and this test keeps passing — green for the exact drift it
+    // exists to catch. `matchAll` plus an assertion of exactly one match
+    // turns that into a loud failure instead: two occurrences means the
+    // parser cannot tell which one is the real constant, and that is worth
+    // stopping for rather than silently picking one.
+    const matches = [...kotlin.matchAll(/internal const val PROTOCOL_VERSION\s*=\s*(\d+)/g)];
+    expect(
+      matches.length,
+      matches.length === 0
+        ? "Protocol.kt's PROTOCOL_VERSION declaration was not found in the expected shape"
+        : `found ${matches.length} things that look like 'internal const val PROTOCOL_VERSION = N' in ` +
+            "Protocol.kt (a doc comment quoting the declaration, most likely) -- this parser cannot tell " +
+            "which one is the real constant, so it refuses to guess rather than silently taking the first.",
+    ).toBe(1);
+    const kotlinVersion = Number(matches[0][1]);
     expect(
       kotlinVersion,
       `device.ts's PROTOCOL_VERSION (${PROTOCOL_VERSION}) must equal Protocol.kt's (${kotlinVersion}) -- ` +
