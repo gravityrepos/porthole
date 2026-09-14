@@ -78,6 +78,28 @@ porthole mcp                                      the MCP server (stdio)
 `porthole-mcp` is that last line as its own entry point, for MCP clients that want a
 bare command rather than a subcommand. The two are the same server.
 
+A bad `--port`/`--ui-port` value or an unrecognized option exits `2` rather than
+starting something that listens on the wrong thing and says nothing. Quoted
+from the built CLI itself:
+
+```
+$ porthole ui --port abc
+--port "abc" is not a number
+
+$ porthole ui --port 99999
+--port 99999 is out of range (must be 1024-65535)
+
+$ porthole ui --port 4.5
+--port 4.5 must be a whole number
+
+$ porthole ui --port
+--port needs a port number
+
+$ porthole ui --bogus-flag
+unknown option: --bogus-flag
+<usage follows>
+```
+
 ## Environment
 
 | variable | default | what it sets |
@@ -86,6 +108,7 @@ bare command rather than a subcommand. The two are the same server.
 | `PORTHOLE_PORT` | `8677` | device port the porthole listens on |
 | `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
 | `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for system traces |
+| `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |
 
 The MCP server and the timeline are independent. Run either, or both at once — they
 each open their own connection to the device.
