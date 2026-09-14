@@ -432,9 +432,28 @@ describe("ConnectionState reads (GRA-162)", () => {
     // two spellings of a new *comparison*, between the two of them. The
     // other five remain open, and nothing here is complete alone.
     const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
+
+    // Positive control (GRA-166 QA follow-up): without this, a mutation that
+    // makes productionSourceFiles() return [] -- or one that hands this loop
+    // fully-blanked text -- leaves `offenders` empty and the assertion below
+    // passes for exactly the wrong reason: not "I looked and found nothing",
+    // but "I looked at nothing". The two checks below can each only fail
+    // that way, so a future edit that guts what this test actually scans
+    // dies here, by name, before ever reaching the real assertion.
+    const files = productionSourceFiles();
+    expect(
+      files.length,
+      "productionSourceFiles() returned no files — this guard would then scan nothing and still pass",
+    ).toBeGreaterThan(0);
+    expect(files, "index.ts must be among the scanned files").toContain("index.ts");
+
     const offenders: string[] = [];
-    for (const file of productionSourceFiles()) {
+    for (const file of files) {
       const text = readFileSync(new URL(file, import.meta.url), "utf8");
+      expect(
+        text.trim().length,
+        `${file} read as empty or all-whitespace text — this guard would then scan nothing and still pass`,
+      ).toBeGreaterThan(0);
       const lines = stripComments(text).split("\n");
       lines.forEach((line, index) => {
         if (pattern.test(line)) offenders.push(`${file}:${index + 1}`);
@@ -501,9 +520,25 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     // not ask whether the switch is exhaustive (only tsc can answer that),
     // it asks whether the switch is *wired* to fail loudly if it stops
     // being exhaustive, the same way the real device.ts helpers are.
+    // Positive control (GRA-166 QA follow-up) -- same shape and same reason
+    // as the guard above: an empty file list or fully-blanked source both
+    // leave `offenders` empty for the wrong reason. Checked separately from
+    // the guard above because each `describe` owns its own file loop.
+    const files = productionSourceFiles();
+    expect(
+      files.length,
+      "productionSourceFiles() returned no files — this guard would then scan nothing and still pass",
+    ).toBeGreaterThan(0);
+    expect(files, "index.ts must be among the scanned files").toContain("index.ts");
+
     const offenders: string[] = [];
-    for (const file of productionSourceFiles()) {
-      const text = stripComments(readFileSync(new URL(file, import.meta.url), "utf8"));
+    for (const file of files) {
+      const raw = readFileSync(new URL(file, import.meta.url), "utf8");
+      expect(
+        raw.trim().length,
+        `${file} read as empty or all-whitespace text — this guard would then scan nothing and still pass`,
+      ).toBeGreaterThan(0);
+      const text = stripComments(raw);
       for (const { line, body } of switchesOnConnectionState(text)) {
         const neverGuarded = /default\s*:[\s\S]*?:\s*never\b/.test(body);
         if (!neverGuarded) offenders.push(`${file}:${line}`);
