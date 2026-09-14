@@ -261,11 +261,38 @@ function askedWindow(params: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * `startedAt` a first-ever hello reports by default, in the same units the
+ * real runtime uses (`SystemClock.uptimeMillis()`): milliseconds since boot,
+ * not since epoch, so a modest five-digit number is realistic here, not a
+ * sentinel.
+ *
+ * GRA-170: this used to be a bare `0`, returned identically by every call to
+ * the same handler. Ring-clearing on a new session (`timeline.ts`) is decided
+ * by comparing the incoming hello's `startedAt` against the previous one, so
+ * a rig "reconnect" that never overrode `hello` could not help but present
+ * the *same* startedAt both times — the comparison always took its "same
+ * session, carry forward" branch, and no test that merely reconnected without
+ * special setup could ever land on the other one. See
+ * `buildRig`/`defaultHandlers` below for the fix: the default now advances on
+ * every call, so an *unmodified* reconnect clears the ring, and carrying the
+ * ring forward (the same process reconnecting after a transient drop) is the
+ * deliberate case — a test wanting that must hold `startedAt` fixed across
+ * calls itself, the way GRA-163's disconnect/close tests already do.
+ */
+export const DEFAULT_STARTED_AT_MS = 47_213;
+
+/**
  * Handlers matching the shape `device.ts`/`index.ts` expect for every method
  * the MCP tools call, from `protocol/Protocol.kt`. Empty and quiet by
  * default; a test overrides only the method it cares about.
  */
 function defaultHandlers(): FakeDeviceHandlers {
+  // Counts calls to *this* hello handler specifically. A test that replaces
+  // `hello` via `rig.fakeDevice.on("hello", ...)` gets its own closure and
+  // this counter never runs for it; a test that leaves the default alone
+  // sees startedAt advance by a full minute on every call, i.e. every
+  // reconnect through the unmodified default reads as a new process.
+  let helloCalls = 0;
   return {
     hello: (): Hello => ({
       protocol: 1,
@@ -274,7 +301,7 @@ function defaultHandlers(): FakeDeviceHandlers {
       versionName: "1.0.0-test",
       device: "Test Device",
       sdkInt: 34,
-      startedAt: 0,
+      startedAt: DEFAULT_STARTED_AT_MS + helloCalls++ * 60_000,
       collectors: [
         "recompositions",
         "semantics_tree",
