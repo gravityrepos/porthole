@@ -21,5 +21,11 @@
   // Tests run from source through vitest, so compiling them only puts
   // them in dist — and `files` in package.json publishes dist wholesale,
   // which was shipping report.test.js and trace.test.js to npm.
-  "exclude": ["src/**/*.test.ts"]
+  // `src/testing/**` is the same problem in a different shape: it is test
+  // infrastructure (a fake device, an in-memory MCP client) that no test
+  // filename regex catches because it isn't named `*.test.ts`. Left in,
+  // GRA-90 added `dist/testing/harness.js` to the published tarball; vitest
+  // still finds it fine because vitest transforms `src/**/*.ts` directly and
+  // never looks at this file's compiled output.
+  "exclude": ["src/**/*.test.ts", "src/testing/**"]
 }
