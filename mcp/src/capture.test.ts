@@ -171,6 +171,20 @@ describe("parseCapture wiring", () => {
     expect(stderrText()).toContain("--port needs a port number");
   });
 
+  /**
+   * QA non-blocking #1 on GRA-124: cli.test.ts already had this case (parse()
+   * calling parsePort with an out-of-range value), but capture.ts's own
+   * argv loop never did — the missing-value case above was covered on both
+   * sides, the out-of-range case only on one. Mutating the range check in
+   * parsePort turned cli.test.ts red without touching this file, which is
+   * exactly the asymmetry a shared validator is supposed to make impossible.
+   */
+  it("exits 2 when --port is out of range", () => {
+    expect(() => parseCapture(["--port", "70000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--port 70000 is out of range");
+  });
+
   it("exits 2 when --out has no value, before any capture could start", () => {
     expect(() => parseCapture(["--out"])).toThrow("process.exit");
     expect(exit).toHaveBeenCalledWith(2);

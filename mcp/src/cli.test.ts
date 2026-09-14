@@ -1,8 +1,16 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -126,60 +134,163 @@ describe("parse() wiring", () => {
  * nothing here exercises the real top-level sequencing.
  *
  * So this runs the actual compiled CLI as a subprocess — the same thing a
- * user's shell does — with a malformed --port and a `-- <command>` that
- * writes a sentinel file. `capture()` only runs that command after
- * successfully connecting to a device, which only happens after `parseCapture`
- * has already accepted the arguments. If the sentinel file exists afterward,
- * either argument validation didn't run first, or it didn't refuse — either
- * way, the property this test exists to pin is gone. This is the exact
- * technique GRA-93's QA used by hand; here it runs on every `npm test`.
+ * user's shell does — with a malformed argument and a `-- <command>` that
+ * writes a sentinel file.
+ *
+ * GRA-124's own QA found the first version of this test insufficient: it only
+ * checked that the `-- <command>` never ran, which is strictly weaker than
+ * "never reaches the device" (`capture()` runs the `-- <command>` well
+ * downstream of `runAdb`, so hoisting `runAdb` above `parseCapture` left the
+ * command-sentinel check green even though adb had already been contacted).
+ * The fix is a second sentinel that fires on device contact itself: a fake
+ * `adb` is put where `findAdb()` (adb.ts) will find it ahead of any real one,
+ * and the refusal tests below assert that sentinel is absent too.
  */
 describe("capture command: refused before device contact", () => {
   const mcpRoot = path.resolve(fileURLToPath(import.meta.url), "..", "..");
   const distCli = path.join(mcpRoot, "dist", "cli.js");
   const tscBin = path.join(mcpRoot, "node_modules", "typescript", "bin", "tsc");
 
+  // findAdb() prefers local.properties, then ANDROID_HOME/ANDROID_SDK_ROOT,
+  // and only falls back to a bare "adb"/"adb.exe" resolved off PATH once
+  // neither says anything — so pointing ANDROID_HOME at a directory shaped
+  // like an SDK (a platform-tools/ subfolder holding the binary) wins
+  // regardless of what a real Android SDK is doing on this machine, and
+  // regardless of whether one is installed at all (CI has none).
+  const adbSdkRoot = mkdtempSync(path.join(tmpdir(), "porthole-adb-sdk-"));
+  const adbPlatformTools = path.join(adbSdkRoot, "platform-tools");
+  const adbShimBinary = path.join(adbPlatformTools, process.platform === "win32" ? "adb.exe" : "adb");
+  const adbShimInit = path.join(adbSdkRoot, "adb-shim-init.cjs");
+
   beforeAll(() => {
     // A real build, not the vitest-transformed source: dispatch order lives
     // in top-level script code that only runs the way a user's shell would
     // run it once it is compiled and invoked as `node dist/cli.js`.
     execFileSync(process.execPath, [tscBin, "-p", mcpRoot], { stdio: "pipe" });
+
+    // The fake adb has to be something the OS can actually execute directly:
+    // a hand-written .bat/.cmd will not do, because CreateProcess (what
+    // spawnSync uses without a shell) needs a real PE/ELF/Mach-O image for a
+    // file named *.exe — only a shell's own file-association logic knows
+    // what to do with a script, and nothing here asks for a shell. node.exe
+    // itself is a real binary already sitting on disk, so copying it under
+    // the exact name findAdb() asks for and using NODE_OPTIONS to preload a
+    // tiny script gets a script to run under adb's name for free: `--require`
+    // preloads execute before Node treats the real adb argv ("forward",
+    // "tcp:<port>", "tcp:<port>") as a script path it would otherwise fail to
+    // find, so process.exit() in the preload short-circuits before that.
+    mkdirSync(adbPlatformTools, { recursive: true });
+    copyFileSync(process.execPath, adbShimBinary);
+    if (process.platform !== "win32") chmodSync(adbShimBinary, 0o755);
+    // NODE_OPTIONS is inherited by every node process in the tree below, not
+    // just the fake adb — including the outer `node dist/cli.js` invocation
+    // itself, and the user's `-- <command>` when that happens to be a node
+    // invocation too (both cases below), since neither runAdb's spawnSync nor
+    // capture.ts's run() overrides env. Without a guard, the preload would
+    // fire on all of them and exit before they ever ran their real code.
+    // runAdb always calls the binary with "forward" (or "-s" with a serial)
+    // as its very first argument; Node resolves that positional to an
+    // absolute path before a preload even runs, which is why this compares
+    // basenames, not the raw value.
+    writeFileSync(
+      adbShimInit,
+      'const path = require("path");\n' +
+        "const arg0 = process.argv[1] ? path.basename(process.argv[1]) : undefined;\n" +
+        'if (arg0 !== "forward" && arg0 !== "-s") return;\n' +
+        'const fs = require("fs");\n' +
+        "if (process.env.PORTHOLE_ADB_SENTINEL) {\n" +
+        '  fs.writeFileSync(process.env.PORTHOLE_ADB_SENTINEL, "adb ran");\n' +
+        "}\n" +
+        "process.exit(0);\n",
+    );
   }, 30_000);
+
+  afterAll(() => {
+    // adbShimBinary is a full copy of node.exe (tens of MB); leaving it in
+    // the OS temp directory on every run would be a slow, silent leak.
+    rmSync(adbSdkRoot, { recursive: true, force: true });
+  });
 
   function sentinelPath(): string {
     return path.join(tmpdir(), `porthole-ordering-sentinel-${process.pid}-${Date.now()}.txt`);
   }
 
-  it("never runs the -- command when --port is malformed", () => {
-    const sentinel = sentinelPath();
-    const result = spawnSync(process.execPath, [
-      distCli,
-      "capture",
-      "--port",
-      "not-a-port",
-      "--",
-      process.execPath,
-      "-e",
-      `require("fs").writeFileSync(${JSON.stringify(sentinel)}, "ran")`,
-    ]);
+  function adbSentinelPath(): string {
+    return path.join(
+      tmpdir(),
+      `porthole-adb-sentinel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
+    );
+  }
+
+  /**
+   * Spawns the compiled CLI with the fake adb from `beforeAll` standing in
+   * for the real one. `adbSentinel` is the file that fake adb writes to if
+   * — and only if — it is actually invoked, which is the signal a test needs
+   * to tell "refused before touching the device" from "refused, but only
+   * after touching the device" (the latter is what survived as GRA-124's QA
+   * mutation 4).
+   */
+  function spawnCliWithFakeAdb(args: string[], adbSentinel: string) {
+    return spawnSync(process.execPath, [distCli, ...args], {
+      env: {
+        ...process.env,
+        ANDROID_HOME: adbSdkRoot,
+        ANDROID_SDK_ROOT: adbSdkRoot,
+        // NODE_OPTIONS is parsed with shell-like quoting rules: a backslash
+        // inside a quoted value is an escape character, which silently
+        // eats every path separator in a Windows absolute path ("C:\Users\..."
+        // becomes "C:Users..." and the require fails). Forward slashes resolve
+        // identically on Windows and sidestep that without needing to think
+        // about escaping at all.
+        NODE_OPTIONS: `--require "${adbShimInit.replace(/\\/g, "/")}"`,
+        PORTHOLE_ADB_SENTINEL: adbSentinel,
+      },
+    });
+  }
+
+  it("never runs the -- command or contacts adb when --port is malformed", () => {
+    const commandSentinel = sentinelPath();
+    const adbSentinel = adbSentinelPath();
+    const result = spawnCliWithFakeAdb(
+      [
+        "capture",
+        "--port",
+        "not-a-port",
+        "--",
+        process.execPath,
+        "-e",
+        `require("fs").writeFileSync(${JSON.stringify(commandSentinel)}, "ran")`,
+      ],
+      adbSentinel,
+    );
     expect(result.status).toBe(2);
-    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(commandSentinel)).toBe(false);
+    // The property this test exists to pin: refused before the *device* is
+    // touched, not merely before the user's `-- <command>` runs. Hoisting
+    // runAdb above parseCapture in cli.ts's dispatch leaves the command
+    // sentinel above absent too (capture() is never reached), but adb gets
+    // contacted first — this assertion is the one that goes red for that.
+    expect(existsSync(adbSentinel)).toBe(false);
   });
 
-  it("never runs the -- command when --fail-on is a typo", () => {
-    const sentinel = sentinelPath();
-    const result = spawnSync(process.execPath, [
-      distCli,
-      "capture",
-      "--fail-on",
-      "regresion",
-      "--",
-      process.execPath,
-      "-e",
-      `require("fs").writeFileSync(${JSON.stringify(sentinel)}, "ran")`,
-    ]);
+  it("never runs the -- command or contacts adb when --fail-on is a typo", () => {
+    const commandSentinel = sentinelPath();
+    const adbSentinel = adbSentinelPath();
+    const result = spawnCliWithFakeAdb(
+      [
+        "capture",
+        "--fail-on",
+        "regresion",
+        "--",
+        process.execPath,
+        "-e",
+        `require("fs").writeFileSync(${JSON.stringify(commandSentinel)}, "ran")`,
+      ],
+      adbSentinel,
+    );
     expect(result.status).toBe(2);
-    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(commandSentinel)).toBe(false);
+    expect(existsSync(adbSentinel)).toBe(false);
   });
 
   it("sanity check: the harness itself does run the -- command once arguments validate", async () => {
@@ -188,7 +299,9 @@ describe("capture command: refused before device contact", () => {
     // above pass vacuously. device.ts sets state "connected" on the raw TCP
     // connect event, before the "hello" RPC round-trip even starts, so a
     // bare listener that never speaks the protocol is enough to get capture()
-    // past awaitConnection and into running the -- command.
+    // past awaitConnection and into running the -- command. --no-forward
+    // skips adb entirely here, on purpose: this test is only about the
+    // command sentinel, and the adb shim gets its own positive control next.
     const server = net.createServer((socket) => socket.on("error", () => {}));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const port = (server.address() as net.AddressInfo).port;
@@ -213,6 +326,46 @@ describe("capture command: refused before device contact", () => {
     } finally {
       server.close();
       if (existsSync(sentinel)) rmSync(sentinel);
+      if (existsSync(out)) rmSync(out);
+    }
+  });
+
+  it("positive control: a valid capture argv does reach adb, so the fake-adb shim is not a dead end", async () => {
+    // Without this, the two "adb sentinel absent" assertions above could pass
+    // vacuously — e.g. if the shim were never actually reachable through
+    // ANDROID_HOME on this platform — and nobody would notice, because an
+    // assertion that a file was never created looks identical whether the
+    // mechanism is sound or simply never fires. --no-forward is deliberately
+    // NOT passed: parseCapture leaves options.forward at its default of
+    // true, so a successful parse reaches cli.ts's real runAdb call.
+    const server = net.createServer((socket) => socket.on("error", () => {}));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as net.AddressInfo).port;
+    const commandSentinel = sentinelPath();
+    const adbSentinel = adbSentinelPath();
+    const out = path.join(tmpdir(), `porthole-adb-positive-trace-${process.pid}-${Date.now()}.json`);
+    try {
+      const result = spawnCliWithFakeAdb(
+        [
+          "capture",
+          "--port",
+          String(port),
+          "--out",
+          out,
+          "--",
+          process.execPath,
+          "-e",
+          `require("fs").writeFileSync(${JSON.stringify(commandSentinel)}, "ran")`,
+        ],
+        adbSentinel,
+      );
+      expect(existsSync(adbSentinel)).toBe(true);
+      expect(existsSync(commandSentinel)).toBe(true);
+      expect(result.status).not.toBe(2);
+    } finally {
+      server.close();
+      if (existsSync(adbSentinel)) rmSync(adbSentinel);
+      if (existsSync(commandSentinel)) rmSync(commandSentinel);
       if (existsSync(out)) rmSync(out);
     }
   });
