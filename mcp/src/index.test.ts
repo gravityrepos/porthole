@@ -46,6 +46,16 @@ describe("the harness", () => {
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false, findings: [] });
       expect(result.text).toContain("Not connected to the app on");
+
+      // porthole_status's disconnected arm, pinned the same way the
+      // connected and handshaking-pending arms are pinned in the
+      // "handshake race" describe block below: summary and payload
+      // asserted together, against the real registered tool, so the arm
+      // cannot be changed in one without the other going red too.
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      expect(status.json).toMatchObject({ state: "disconnected" });
+      expect(status.text).toContain("Not connected to the app on");
     } finally {
       await rig.close();
     }
