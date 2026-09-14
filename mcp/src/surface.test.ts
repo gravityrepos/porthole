@@ -481,6 +481,21 @@ describe("ConnectionState reads (GRA-162)", () => {
       expect(scanned.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
         0,
       );
+      // GRA-168 item 2: the check above only catches stripComments() handing
+      // back nothing at all. It does not catch truncation -- a mutation that
+      // feeds stripComments() only part of the file (real code surviving,
+      // just less of it) leaves the check above satisfied and this whole
+      // guard scanning a fraction of the file it claims to. stripComments()'s
+      // own doc comment already claims it "blanks ... without disturbing
+      // line numbers"; this asserts that claim instead of trusting it.
+      // Measured on a clean tree: this passes across all files scanned here.
+      // A mutation truncating to the first 2000 characters (real code
+      // surviving, just less of it) dies here, by name, rather than passing
+      // silently the way the check above does for this specific mutation.
+      expect(
+        scanned.split("\n").length,
+        `${file}: stripComments() changed the line count — it must not`,
+      ).toBe(text.replace(/\r\n/g, "\n").split("\n").length);
       const lines = scanned.split("\n");
       lines.forEach((line, index) => {
         if (pattern.test(line)) offenders.push(`${file}:${index + 1}`);
@@ -570,6 +585,15 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
       expect(text.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
         0,
       );
+      // GRA-168 item 2: same line-count invariant as the guard above, kept
+      // on this loop separately since each describe block owns its own file
+      // loop and a truncation here would silently shrink the text this
+      // guard's switch-brace-matcher sees, the same way it would for the
+      // ===/!== pattern above.
+      expect(
+        text.split("\n").length,
+        `${file}: stripComments() changed the line count — it must not`,
+      ).toBe(raw.replace(/\r\n/g, "\n").split("\n").length);
       for (const { line, body } of switchesOnConnectionState(text)) {
         const neverGuarded = /default\s*:[\s\S]*?:\s*never\b/.test(body);
         if (!neverGuarded) offenders.push(`${file}:${line}`);
