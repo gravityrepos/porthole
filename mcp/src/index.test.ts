@@ -30,11 +30,37 @@ describe("the harness", () => {
   });
 
   it("reports not connected when the device never says hello", async () => {
+    // `connectDevice: false` means `device.state` never leaves "disconnected"
+    // (device.start() is never even called) — this only proves anything about
+    // connectivity because `findings` now branches on `device.state`, not on
+    // whether the ring happens to be empty. Flip this option to `true` and
+    // the device connects and says hello with nothing pushed to the ring,
+    // which makes `connected: false` wrong and this assertion fail.
     const rig = await buildRig({ connectDevice: false });
     try {
       const result = await rig.client.callTool("findings", {});
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false, findings: [] });
+      expect(result.text).toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports connected when the device said hello but the ring is still empty", async () => {
+    // The bug this guards against: `findings` used to decide "connected" by
+    // asking whether the ring had anything in it, so the very first call
+    // after every install — device attached, hello received, nothing
+    // collected yet — printed the full "Not connected" troubleshooting wall.
+    const rig = await buildRig(); // connectDevice defaults to true and waits for hello.
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.timeline.buffer()).toHaveLength(0);
+
+      const result = await rig.client.callTool("findings", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.json).toMatchObject({ connected: true, findings: [] });
+      expect(result.text).not.toContain("Not connected to the app on");
     } finally {
       await rig.close();
     }

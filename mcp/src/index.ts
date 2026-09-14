@@ -245,8 +245,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to }): Promise<ToolResult> => {
       const span = resolveWindow({ sinceMs, from, to });
+      const connected = device.state === "connected";
       if (!span) {
-        return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+        // resolveWindow returns null whenever the ring is empty, which is not
+        // the same thing as the device being unreachable — hello can have
+        // landed seconds ago with nothing collected yet. Printing the full
+        // troubleshooting wall in that case sends the first call after every
+        // install chasing a socket that was never the problem.
+        if (!connected) {
+          return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+        }
+        const summary = device.hello
+          ? `Connected to ${device.hello.packageName}, nothing buffered yet. Ask again in a moment.`
+          : "Connected, waiting on the app's first check-in. Ask again in a moment.";
+        return ok(summary, { window: null, findings: [], connected: true });
       }
 
       const buffered = timeline.buffer();
@@ -281,6 +293,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         eventsExamined: events.length,
         metrics: trace.metrics,
         findings,
+        connected,
       };
 
       const shortfall = clipped.start + clipped.end;
