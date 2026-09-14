@@ -220,11 +220,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         projectRoot: projectRoot.directory,
         projectRootSource: projectRoot.source,
       };
+      // The socket connecting and hello resolving are two different events,
+      // roughly 2s apart on real hardware (DeviceClient sets state="connected"
+      // on socket connect, then requests hello without awaiting it). The old
+      // `device.state === "connected" && device.hello` ternary collapsed that
+      // gap into "not connected", which made this tool's own summary disagree
+      // with its own `state: "connected"` payload field, and disagree with
+      // `findings` (which already had this third answer). Name the gap
+      // instead of hiding it in either direction, and never fall back to
+      // notConnectedMessage() while a socket is actually connected.
       const summary =
-        device.state === "connected" && device.hello
-          ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
-            `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
-          : device.notConnectedMessage();
+        device.state !== "connected"
+          ? device.notConnectedMessage()
+          : device.hello
+            ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
+              `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
+            : "Connected, waiting on the app's first check-in. Ask again in a moment.";
       return ok(summary, payload);
     },
   );

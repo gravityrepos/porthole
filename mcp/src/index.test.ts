@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { buildRig, type Rig } from "./testing/harness.js";
+import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
 import { resolveSdkDir } from "./adb.js";
 
 /**
@@ -353,6 +353,98 @@ describe("findings", () => {
       const payload = result.json as { findings: Array<{ id: string; confidence: string }> };
       expect(payload.findings.some((f) => f.id === "db-on-main-thread")).toBe(true);
       expect(payload.findings.every((f) => f.confidence)).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("porthole_status and findings agree during the handshake race (AC7/AC9)", () => {
+  // DeviceClient sets state = "connected" the instant the socket connects,
+  // then issues `request("hello")` without awaiting it (device.ts,
+  // socket.on("connect")) — so there is a window, roughly 2s wide on real
+  // hardware (see GRA-152's device-verify comment), where
+  // `device.state === "connected"` and `device.hello` is still null.
+  // `connectDevice: false` skips buildRig's own wait-for-hello, and a hello
+  // handler that never resolves holds that window open indefinitely instead
+  // of racing a real, narrow gap in a unit test.
+  async function buildRaceRig(): Promise<Rig> {
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
+    rig.device.start();
+    await waitUntil(() => rig.device.state === "connected");
+    return rig;
+  }
+
+  it("neither tool emits the troubleshooting wall while the socket is connected and hello is pending", async () => {
+    const rig = await buildRaceRig();
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.device.hello).toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+
+      for (const result of [status, findings]) {
+        expect(result.isError).toBeFalsy();
+        expect(result.text).not.toContain("Not connected to the app on");
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("porthole_status's summary agrees with its own payload.state in the race window", async () => {
+    // The bug this guards against: the summary required
+    // `device.state === "connected" && device.hello`, so it took the
+    // not-connected branch and printed the wall while payload.state said
+    // "connected" right below it — one call, two answers.
+    const rig = await buildRaceRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const payload = status.json as { state: string; app: unknown };
+      expect(payload.state).toBe("connected");
+      expect(payload.app).toBeNull();
+      expect(status.text).toContain("Connected, waiting on the app's first check-in");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings' summary and connected field agree with each other in the race window (kills M5 and M5c)", async () => {
+    const rig = await buildRaceRig();
+    try {
+      const findings = await rig.client.callTool("findings", {});
+      // M5: `const connected = device.hello !== null` reads the wrong field.
+      // hello is null here, so that mutant reports connected: false even
+      // though device.state === "connected" — this assertion catches it.
+      expect(findings.json).toMatchObject({ connected: true });
+      // M5c: putting device.notConnectedMessage() back into the
+      // hello-pending arm reprints the wall here even though the payload
+      // says connected — this assertion catches it.
+      expect(findings.text).toContain("Connected, waiting on the app's first check-in");
+      expect(findings.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("porthole_status and findings tell the same connection story in the race window", async () => {
+    const rig = await buildRaceRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const statusPayload = status.json as { state: string };
+      const findingsPayload = findings.json as { connected: boolean };
+
+      expect(statusPayload.state).toBe("connected");
+      expect(findingsPayload.connected).toBe(true);
+      // Not just "both non-wall" — both describe the same handshake-pending
+      // story, so an agent reading either tool gets a consistent answer.
+      expect(status.text).toContain("Connected, waiting on the app's first check-in");
+      expect(findings.text).toContain("Connected, waiting on the app's first check-in");
     } finally {
       await rig.close();
     }
