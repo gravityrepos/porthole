@@ -1071,3 +1071,179 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
     }
   });
 });
+
+// -----------------------------------------------------------------------------
+// GRA-169: a blank line in interpolated device data must not break ok()'s
+// summary/payload split
+// -----------------------------------------------------------------------------
+//
+// `ok()` joins the human-readable summary and the JSON payload with a blank
+// line, and every consumer of that convention — an agent reading the tool's
+// own text, and this suite's own `parsePayload()` in testing/harness.ts —
+// finds the payload by looking for the FIRST blank line and parsing
+// everything after it. hello.device and hello.packageName arrive over the
+// wire from the device with nothing on either side guaranteeing they are
+// single-line, so a blank line inside either one used to re-split every
+// tool's answer at the wrong place: `parsePayload()` slices from the middle
+// of the summary's own prose, `JSON.parse` throws on it, and the tool's
+// payload is gone, not merely mislabelled.
+//
+// Two different fields, not one — a single working case would prove the
+// mechanism was fixed at its one measured trigger, not that interpolated
+// data is safe in general. hello.device reaches all three tools through the
+// shared `exitedProcessNotice()` sentence; hello.packageName reaches them
+// independently through each tool's own "just connected, nothing buffered
+// yet" branch. Two call sites, not one, for the same reason.
+describe("GRA-169: a blank line in interpolated device data must not break ok()'s summary/payload split", () => {
+  const DIRTY_DEVICE = "Pixel\n\n7a (rooted)";
+  const DIRTY_PACKAGE = "com.example\n\nshop";
+
+  function helloOf(overrides: Partial<Record<string, unknown>>) {
+    return {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: 0,
+      collectors: [],
+      ...overrides,
+    };
+  }
+
+  /**
+   * A rig whose `lastExited` names a process with `hello`, then left
+   * disconnected — the scenario that makes every tool's shared
+   * `exitedProcessNotice()` prepend `"${packageName} on ${device} exited at
+   * ..."` to its summary. This is the one sentence, reachable identically
+   * from all three tools, that puts hello.device into prose (mirrors the
+   * "a stale ring..." (GRA-163) describe block above, which is where this
+   * fixture pattern comes from).
+   */
+  async function buildExitedRig(hello: Record<string, unknown>): Promise<Rig> {
+    const rig = await buildRig({ handlers: { hello: () => hello } });
+    await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+    rig.fakeDevice.disconnectAll();
+    await waitUntil(() => rig.device.state === "disconnected");
+    return rig;
+  }
+
+  describe("hello.device contains a blank line (via the shared exited-process notice)", () => {
+    const hello = helloOf({ device: DIRTY_DEVICE });
+
+    // A case per tool, not a shared loop over the three — an assertion
+    // inside a loop is eager and stops at the first failure, which would
+    // prove only that the first tool in the list is defended (see this
+    // project's "one edit reddened N tests" lesson). Three independent
+    // `it()`s means a regression in any one tool is visible on its own.
+    it("porthole_status's payload is still parseable", async () => {
+      const rig = await buildExitedRig(hello);
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.text).toContain("Pixel");
+        expect(result.text).toContain("(rooted)");
+        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        // The payload itself was never at risk — JSON.stringify escapes the
+        // newline as `\n`, not a raw line break — so the structured field
+        // must still carry the value verbatim, blank line and all.
+        expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
+          DIRTY_DEVICE,
+        );
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("findings's payload is still parseable", async () => {
+      const rig = await buildExitedRig(hello);
+      try {
+        const result = await rig.client.callTool("findings", {});
+        expect(result.text).toContain("Pixel");
+        expect(result.text).toContain("(rooted)");
+        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
+          DIRTY_DEVICE,
+        );
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("what_was_happening's payload is still parseable", async () => {
+      const rig = await buildExitedRig(hello);
+      try {
+        const result = await rig.client.callTool("what_was_happening", { at: 1_000 });
+        expect(result.text).toContain("Pixel");
+        expect(result.text).toContain("(rooted)");
+        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
+          DIRTY_DEVICE,
+        );
+      } finally {
+        await rig.close();
+      }
+    });
+  });
+
+  describe("hello.packageName contains a blank line (via each tool's own \"just connected\" branch)", () => {
+    const hello = helloOf({ packageName: DIRTY_PACKAGE });
+
+    it("porthole_status's payload is still parseable on the ordinary connected summary", async () => {
+      const rig = await buildRig({ handlers: { hello: () => hello } });
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.text).toContain("com.example");
+        expect(result.text).toContain("shop");
+        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
+        expect((result.json as { app: { packageName: string } }).app.packageName).toBe(DIRTY_PACKAGE);
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("findings's payload is still parseable with an empty, just-connected ring", async () => {
+      const rig = await buildRig({ handlers: { hello: () => hello } });
+      try {
+        const result = await rig.client.callTool("findings", {});
+        expect(result.text).toContain("com.example");
+        expect(result.text).toContain("shop");
+        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("what_was_happening's payload is still parseable with an empty, just-connected ring", async () => {
+      const rig = await buildRig({ handlers: { hello: () => hello } });
+      try {
+        const result = await rig.client.callTool("what_was_happening", {});
+        expect(result.text).toContain("com.example");
+        expect(result.text).toContain("shop");
+        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
+      } finally {
+        await rig.close();
+      }
+    });
+  });
+
+  // The invariant `ok()` now enforces directly, exercised without any device
+  // at all: no summary this server ever builds may reach a caller with a
+  // blank line still in it. This is the "assert the invariant inside ok()"
+  // half of the fix (see index.ts) proven from the test side, independent of
+  // which call site a future tool might add.
+  it("porthole_status's summary contains no blank line even when its own prose would have had one", async () => {
+    const hello = helloOf({ device: "Two\n\n\n\nblank lines" });
+    const rig = await buildExitedRig(hello);
+    try {
+      const result = await rig.client.callTool("porthole_status", {});
+      // The ONE blank line allowed is ok()'s own delimiter, and only that
+      // one — split on the first occurrence and there must be no second.
+      const first = result.text.indexOf("\n\n");
+      expect(first).toBeGreaterThanOrEqual(0);
+      expect(result.text.indexOf("\n\n", first + 1)).toBe(-1);
+    } finally {
+      await rig.close();
+    }
+  });
+});
