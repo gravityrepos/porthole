@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
+import { buildRig, buildRingInState, waitUntil, type Rig } from "./testing/harness.js";
+import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 
 /**
@@ -649,6 +650,284 @@ describe("porthole_status, findings and what_was_happening agree during the hand
       const status = await rig.client.callTool("porthole_status", {});
       expect(status.json).toMatchObject({ state: "connected" });
       expect(status.text).toContain("Connected to com.example.shop");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("a stale ring says whose process it belongs to, not the running one's (GRA-163)", () => {
+  // The GRA-157 block above never pushes anything to the ring before
+  // calling a tool — buildRaceRig() starts empty and stays empty — which is
+  // exactly the one input where this ticket's defect cannot appear. Nine
+  // commits, three QA rounds and five mutations were defended against that
+  // one input. buildRingInState() (testing/harness.ts) is the fixture that
+  // was missing: a non-empty ring in each of DeviceClient's four states.
+
+  // AC4: "the test rig can build a non-empty ring in every connection
+  // state" — the criterion the ticket itself names as the one that matters
+  // most, since the other three are fixable in an afternoon and will
+  // regress the moment the fixture shape narrows again.
+  it("AC4: the rig builds a non-empty ring in every connection state", async () => {
+    const states: ConnectionState[] = ["connected", "handshaking", "connecting", "disconnected"];
+    for (const state of states) {
+      const rig = await buildRingInState(state);
+      try {
+        expect(rig.device.state).toBe(state);
+        expect(rig.timeline.buffer().length).toBeGreaterThan(0);
+      } finally {
+        await rig.close();
+      }
+    }
+  });
+
+  // AC1: "With a non-empty ring and the device disconnected, all three
+  // tools agree on the connection state and none reports on the dead
+  // process as if it were live."
+  it("AC1: with a non-empty ring and the device disconnected, all three tools agree and none reports the dead process as live", async () => {
+    const rig = await buildRingInState("disconnected");
+    try {
+      expect(rig.device.lastExited?.hello.packageName).toBe("com.example.shop");
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+
+      expect(status.json).toMatchObject({ state: "disconnected" });
+      expect((status.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject(
+        { packageName: "com.example.shop" },
+      );
+      expect(status.text).toContain("com.example.shop");
+      expect(status.text).toContain("exited at");
+
+      expect(findings.json).toMatchObject({ connected: false });
+      expect(
+        (findings.json as { exitedProcess: { packageName: string } }).exitedProcess,
+      ).toMatchObject({ packageName: "com.example.shop" });
+      expect(findings.text).toContain("com.example.shop");
+      expect(findings.text).toContain("not from what is running now");
+
+      expect(wwh.json).toMatchObject({ connected: false });
+      expect((wwh.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject({
+        packageName: "com.example.shop",
+      });
+      // QA round 2: this test asserted wwh.json but never wwh.text, so the
+      // mutation QA was sent back to prove (dropping exitedProcessNotice()
+      // from what_was_happening's non-empty-ring call site) went undetected
+      // here -- the one branch that mutation targets is the one branch
+      // whose prose nothing checked.
+      expect(wwh.text).toContain("com.example.shop");
+      expect(wwh.text).toContain("not from what is running now");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // AC2 + AC5: "With a non-empty ring and the device handshaking, no tool
+  // reports connected: true about the previous session's data." This is
+  // also the mutation-reachability test (AC5): the scenario only comes out
+  // right if findings/what_was_happening actually consult
+  // device.pendingMessage() on the non-empty branch — the pre-fix code
+  // used isAttached(device.state) alone there, which reads "handshaking" as
+  // attached and would report connected: true about the OLD process's
+  // events. That is the measured bug: 34 of 613 hardware samples.
+  it("AC2/AC5: with a non-empty ring and the device handshaking again, no tool reports connected: true about the previous session's data", async () => {
+    const rig = await buildRingInState("handshaking");
+    try {
+      expect(rig.device.state).toBe("handshaking");
+      expect(rig.device.hello).toBeNull();
+      expect(rig.device.lastExited?.hello.packageName).toBe("com.example.shop");
+
+      const findings = await rig.client.callTool("findings", {});
+      expect(findings.json).toMatchObject({ connected: false });
+      expect(
+        (findings.json as { exitedProcess: { packageName: string } }).exitedProcess,
+      ).toMatchObject({ packageName: "com.example.shop" });
+
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      expect(wwh.json).toMatchObject({ connected: false });
+      expect((wwh.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject({
+        packageName: "com.example.shop",
+      });
+
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.json).toMatchObject({ state: "handshaking" });
+      expect(status.text).toContain("com.example.shop");
+      expect(status.text).toContain("exited at");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // AC3: "The session boundary is symmetric: whatever happens to the ring
+  // on hello has a counterpart on close." Confirmed end-to-end here (a real
+  // socket close through DeviceClient); timeline.test.ts pins the ring's
+  // own clear-vs-keep behaviour directly against TimelineServer.
+  it("AC3: on socket close the ring is kept, not cleared, and device.lastExited records who it belonged to", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      const before = rig.timeline.buffer().length;
+      expect(before).toBeGreaterThan(0);
+      expect(rig.device.lastExited).toBeNull();
+
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+
+      expect(rig.timeline.buffer().length).toBe(before);
+      expect(rig.device.lastExited?.hello.packageName).toBe("com.example.shop");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("the ordinary case is unaffected: connected: true still means the ring is confirmed live, not a previous session's leftovers", async () => {
+    const rig = await buildRingInState("connected");
+    try {
+      const findings = await rig.client.callTool("findings", {});
+      expect(findings.json).toMatchObject({ connected: true, exitedProcess: null });
+      expect(findings.text).not.toContain("exited at");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // QA round 1 (verdict at bfd6ca7): the thirteenth state, missed by the
+  // twelve above because none of them combine an empty ring with a
+  // `lastExited`. It arises from a real sequence: a process runs and dies
+  // (lastExited set, ring holds its leftovers), then a genuinely new
+  // process connects -- its own `hello` clears the ring (timeline.ts) --
+  // and dies before emitting anything at all. The ring is empty again, but
+  // `lastExited` now names the second process. Before this fix,
+  // `porthole_status` reported `exitedProcess` unconditionally while
+  // `findings`/`what_was_happening`'s empty-ring branches reported nothing
+  // -- cross-tool disagreement -- and `pendingMessage()`'s own prose said
+  // "whatever is still buffered is from X" while the payload right next to
+  // it said `bufferedEvents: 0` / `findings: []` -- prose contradicting its
+  // own payload in a single answer, which is the hardware form of the
+  // original bug and wider than what was filed.
+  it("the empty-ring-plus-lastExited state: all three tools agree the process exited and nothing is buffered", async () => {
+    const rig = await buildRig();
+    try {
+      // Session A: connects, produces one event, then exits.
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      expect(rig.timeline.buffer().length).toBeGreaterThan(0);
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      expect(rig.device.lastExited?.hello.startedAt).toBe(0);
+
+      // Session B: a genuinely new process (different startedAt), which
+      // clears the ring on its own hello, then exits before emitting
+      // anything. stop()/start() is buildRingInState's own trick for a
+      // deterministic reconnect rather than waiting on the real backoff
+      // timer.
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: 999,
+        collectors: [],
+      }));
+      rig.device.stop();
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+      expect(rig.timeline.buffer()).toHaveLength(0); // the new hello cleared it
+
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      expect(rig.timeline.buffer()).toHaveLength(0);
+      expect(rig.device.lastExited?.hello.startedAt).toBe(999);
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+
+      for (const [name, result] of [
+        ["porthole_status", status],
+        ["findings", findings],
+        ["what_was_happening", wwh],
+      ] as const) {
+        expect(result.text, `${name} should name the exited process`).toContain("com.example.shop");
+        expect(result.text, `${name} must say nothing is buffered`).toContain(
+          "nothing is currently buffered from it",
+        );
+        expect(
+          result.text,
+          `${name} must not claim data is present when the ring is empty`,
+        ).not.toContain("what follows is from it");
+        expect(
+          (result.json as { exitedProcess: { packageName: string } | null }).exitedProcess,
+          `${name}'s payload must carry exitedProcess too, not just its prose`,
+        ).toMatchObject({ packageName: "com.example.shop", device: "Test Device" });
+      }
+
+      expect(status.json).toMatchObject({ bufferedEvents: 0 });
+      expect(findings.json).toMatchObject({ connected: false, findings: [] });
+      expect(wwh.json).toMatchObject({ connected: false });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // QA round 2: exitedProcessNotice()'s QA-round-1 rewrite silently dropped
+  // a sentence the original fix had -- "Nothing has confirmed itself as the
+  // running process yet" -- for the one case that has real buffered data
+  // but no known predecessor to name: the very first connection, still
+  // handshaking, with the ring already non-empty (GRA-163's own mechanism
+  // for reproducing the defect without hardware: buildRaceRig(), push one
+  // event before the deferred hello resolves). device.lastExited is null
+  // here -- nothing has ever exited in this server's lifetime -- so
+  // exitedProcess is null too, but the data still cannot be confirmed to
+  // belong to whatever is connecting now, and this ticket's entire subject
+  // is tools telling the truth about their state instead of saying
+  // nothing.
+  //
+  // QA round 3: this test originally called only findings and
+  // what_was_happening, so dropping the restored sentence at
+  // porthole_status alone -- a call site this test never exercised -- left
+  // the suite green. The three-tool loop below is the same one the
+  // thirteenth-row test above uses, for the same reason: any tool this
+  // ticket's scope later grows to cover is checked by construction, not
+  // because someone remembered to add a fourth call.
+  it("with no known predecessor and no confirmed live session, all three tools still say the data is not yet confirmed live", async () => {
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
+    try {
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "handshaking");
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      expect(rig.device.lastExited).toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+
+      for (const [name, result] of [
+        ["porthole_status", status],
+        ["findings", findings],
+        ["what_was_happening", wwh],
+      ] as const) {
+        expect(
+          result.text,
+          `${name} should say nothing has confirmed itself as the running process`,
+        ).toContain(
+          "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
+            "confirmed to be live.",
+        );
+        expect(
+          (result.json as { exitedProcess: unknown }).exitedProcess,
+          `${name}'s payload must carry exitedProcess: null too, not just its prose`,
+        ).toBeNull();
+      }
+
+      expect(status.json).toMatchObject({ state: "handshaking" });
+      expect(findings.json).toMatchObject({ connected: false });
+      expect(wwh.json).toMatchObject({ connected: false });
     } finally {
       await rig.close();
     }

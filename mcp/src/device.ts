@@ -61,6 +61,51 @@ export const PROTOCOL_VERSION = 1;
  */
 export type ConnectionState = "disconnected" | "connecting" | "handshaking" | "connected";
 
+/**
+ * GRA-163: the ring survives a close (timeline.ts never clears it there —
+ * only a new `hello` does, because the post-mortem case, "what happened
+ * before it died", is exactly when someone needs those events most), but
+ * that leaves a gap the ring itself cannot answer: whose process produced
+ * what is still buffered, and when did it stop. This is that answer, kept
+ * on `DeviceClient` because it is the thing that watches the socket close —
+ * set in the close handler below, read by every tool that might describe
+ * buffered data without a live session behind it.
+ *
+ * This is the counterpart to what a `hello` already does on the other side
+ * of the session boundary: a `hello` discards the previous session's ring;
+ * a close records the one that just ended, for whoever reads what is left
+ * of it afterward.
+ *
+ * **This is the coordinator's assumption pending the founder's override,
+ * not the founder's decision.**
+ * **Assumed: option 2 — label answers as belonging to the exited process,
+ * rather than clearing the ring or hiding them.**
+ * Retaining `lastExited` (instead of, say, dropping it the moment the
+ * socket closes, which would make a stale ring silently indistinguishable
+ * from an empty one again) is that bet, placed here because this is where
+ * someone unwinding it would start looking — a search of `index.ts` alone
+ * would not show that a decision was made, only its consequences. If the
+ * founder rules the other way, the fix is to stop setting this field (or to
+ * clear it, and the ring, on close) rather than to hunt through every
+ * caller. Five tests currently pin this bet and would need to change with
+ * it: `index.test.ts`'s "AC1: with a non-empty ring and the device
+ * disconnected, all three tools agree and none reports the dead process as
+ * live", "AC2/AC5: with a non-empty ring and the device handshaking again,
+ * no tool reports connected: true about the previous session's data", "AC3:
+ * on socket close the ring is kept, not cleared, and device.lastExited
+ * records who it belonged to", and "the ordinary case is unaffected:
+ * connected: true still means the ring is confirmed live, not a previous
+ * session's leftovers"; and `timeline.test.ts`'s "the ring is not cleared
+ * by a close — only by a new hello — so it still holds what an exited
+ * process produced".
+ */
+export interface ExitedSession {
+  /** The process that produced whatever the ring may still hold. */
+  hello: Hello;
+  /** Wall-clock time (`Date.now()`) the socket actually closed. */
+  disconnectedAt: number;
+}
+
 /** The one sentence every tool uses for "the socket is up, hello has not landed yet" — GRA-157 AC3. */
 export const HANDSHAKE_PENDING_MESSAGE =
   "Connected, waiting on the app's first check-in. Ask again in a moment.";
@@ -91,6 +136,18 @@ export class DeviceClient extends EventEmitter {
   state: ConnectionState = "disconnected";
   hello: Hello | null = null;
   lastError: string | null = null;
+  /**
+   * GRA-163: null until a session that actually got a `hello` has closed;
+   * from then on, the most recent one — overwritten on every subsequent
+   * close that had a `hello`, so it always names the last confirmed process,
+   * never a stale one from further back. See the close handler in
+   * `connect()` for where it is set, and index.ts's `exitedProcessField()`/
+   * `exitedProcessNotice()` for where it turns into what every tool
+   * actually reports (moved there after QA round 1: this field says whose
+   * process it is, but only the caller knows whether the ring it is about
+   * to describe is empty — see `pendingMessage()`'s own comment below).
+   */
+  lastExited: ExitedSession | null = null;
   /**
    * GRA-96: null when the app's `hello.protocol` matches `PROTOCOL_VERSION`,
    * otherwise the sentence `porthole_status` reports verbatim — set once,
@@ -198,6 +255,13 @@ export class DeviceClient extends EventEmitter {
 
     socket.on("close", () => {
       this.socket = null;
+      // GRA-163: captured before `hello` is cleared below, and only when
+      // there was one — a socket that closes mid-handshake (this.hello
+      // still null) never had a confirmed session to record, and recording
+      // one here would overwrite the real last-exited process with nothing.
+      if (this.hello) {
+        this.lastExited = { hello: this.hello, disconnectedAt: Date.now() };
+      }
       this.hello = null;
       // GRA-96: cleared with `hello`, for the same reason — a mismatch is a
       // fact about the `hello` that produced it, and once that `hello` is
@@ -346,6 +410,31 @@ export class DeviceClient extends EventEmitter {
    * `isConnected()` and `isHandshaking()` below give those call sites the
    * same guarantee this switch has always had, instead of leaving them to
    * reinvent it inconsistently or not at all.)
+   */
+  /**
+   * GRA-163 QA round 1: this used to append an "exited process" sentence of
+   * its own (`withExitedSessionNote()`, now removed) whenever `lastExited`
+   * was set. That sentence unconditionally said "whatever is still buffered
+   * is from X" — true on the branch that has a non-empty ring, false on the
+   * branch that does not (the empty-ring-plus-`lastExited` case: a process
+   * reconnects, clears the ring on its own `hello`, then dies before
+   * emitting anything), because this method has no way to know which one it
+   * is being asked from — `pendingMessage()` only ever sees `this.state`
+   * and `this.lastExited`, never `timeline.buffer().length`. Two more
+   * faults rode along with that one: `porthole_status` calls
+   * `exitedProcessField()` unconditionally while `findings`/
+   * `what_was_happening` only called it from their non-empty-ring branch,
+   * so the same state produced a payload with `exitedProcess` on one tool
+   * and without it on another — and the prose was folded into this string
+   * while the structured field lived in index.ts, so the two could disagree
+   * even about a single tool's own single answer.
+   *
+   * The fix moves all of it to index.ts's `exitedProcessNotice()`, called
+   * from every branch of every tool that might describe ring content,
+   * because index.ts is the one place that actually knows whether the ring
+   * it is about to describe is empty. This method goes back to answering
+   * exactly what its name says: how to reconnect, or that the handshake is
+   * still pending. Nothing else.
    */
   pendingMessage(): string | null {
     switch (this.state) {
