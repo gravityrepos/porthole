@@ -340,14 +340,61 @@ function productionSourceFiles(): string[] {
  * `toolSource()` above makes the same kind of trade: loose about things
  * this codebase does not actually do, strict about the one thing that
  * matters here.
+ *
+ * Normalises CRLF to LF first (GRA-166 item 6). Without this, a line ending
+ * in "\r\n" defeats the "//" stripping below: `.` in `/\/\/.*$/` does not
+ * match "\r" (it is a line terminator to the regex engine even without the
+ * `s` flag), and `$` without the `m` flag demands the true end of the
+ * string — so on a line carrying a trailing "\r" the pattern never reaches
+ * it and the replace silently no-ops, leaving the raw comment text in
+ * place. That is exactly how a prose comment like `// ... state ===
+ * "connected" ...` in `index.ts` starts matching the offender pattern below
+ * on a CRLF-ending file even though the only line-ending byte changed and
+ * no comparison was added: a false positive on a clean tree, which is worse
+ * than a missed real one — see the describe block below for why. `.gitattributes`
+ * pins `* text=auto eol=lf` (an `eol` directive overrides `core.autocrlf`
+ * unconditionally), so a plain `git clone` cannot actually produce this —
+ * the real routes are an editor saving CRLF, a patch or archive applied
+ * outside git, or an edit to `.gitattributes` itself. Narrower than it
+ * looks, but still a route, and still a false positive rather than a missed
+ * real one when it happens. Collapsing "\r\n" to "\n" up front costs
+ * nothing (it cannot change how many lines the file has, only how each
+ * line's own terminator is spelled) and makes every reader of this function
+ * — comment-blanking included — see the same normalised text regardless of
+ * which line ending the checkout happened to produce.
  */
 function stripComments(text: string): string {
-  const noBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "));
+  const normalized = text.replace(/\r\n/g, "\n");
+  const noBlockComments = normalized.replace(/\/\*[\s\S]*?\*\//g, (block) =>
+    block.replace(/[^\n]/g, " "),
+  );
   return noBlockComments
     .split("\n")
     .map((line) => line.replace(/\/\/.*$/, ""))
     .join("\n");
 }
+
+describe("stripComments (GRA-166 item 6)", () => {
+  it("blanks a // comment whose line ends in \\r\\n, not just \\n", () => {
+    // Direct unit test on the normalisation step itself. The two describe
+    // blocks below that consume stripComments() only ever read real files
+    // off this checkout, and .gitattributes pins every checkout to LF (see
+    // the doc comment above stripComments()) — so nothing else in this file
+    // exercises the CRLF branch, ever. Without this test, deleting
+    // `text.replace(/\r\n/g, "\n")` from stripComments() leaves the whole
+    // suite green: the fix would have shipped with zero coverage of the
+    // exact line it added. Feeding stripComments() a CRLF string directly,
+    // rather than writing a temp file or mutating index.ts, is what makes
+    // this test independent of the working tree's own line endings.
+    const crlf = 'const ok = 1;\r\n// state === "connected", left here on purpose\r\nconst after = 2;\r\n';
+    const stripped = stripComments(crlf);
+    expect(stripped).not.toContain('state === "connected"');
+    // And the blanking is real, not a side effect of the whole line
+    // vanishing — the code before and after the comment must survive.
+    expect(stripped).toContain("const ok = 1;");
+    expect(stripped).toContain("const after = 2;");
+  });
+});
 
 describe("ConnectionState reads (GRA-162)", () => {
   it("never compares .state to a literal directly outside device.ts — isAttached()/isConnected()/isHandshaking() exist for exactly this", () => {
@@ -385,10 +432,36 @@ describe("ConnectionState reads (GRA-162)", () => {
     // two spellings of a new *comparison*, between the two of them. The
     // other five remain open, and nothing here is complete alone.
     const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
+
+    // Positive control (GRA-166 QA follow-up): without this, a mutation that
+    // makes productionSourceFiles() return [] -- or one that empties what
+    // stripComments() hands back -- leaves `offenders` empty and the
+    // assertion below passes for exactly the wrong reason: not "I looked
+    // and found nothing", but "I looked at nothing". The checks below can
+    // each only fail that way, so a future edit that guts what this test
+    // actually scans dies here, by name, before ever reaching the real
+    // assertion. The non-empty check on the scanned text has to run on
+    // stripComments()'s *output*, not the raw file read: a control on the
+    // raw read only proves the file on disk has content, not that anything
+    // survived stripComments() into what the pattern below actually sees —
+    // an earlier version of this control checked the raw read and passed
+    // while scanning entirely blank text, which is the exact failure this
+    // control exists to catch.
+    const files = productionSourceFiles();
+    expect(
+      files.length,
+      "productionSourceFiles() returned no files — this guard would then scan nothing and still pass",
+    ).toBeGreaterThan(0);
+    expect(files, "index.ts must be among the scanned files").toContain("index.ts");
+
     const offenders: string[] = [];
-    for (const file of productionSourceFiles()) {
+    for (const file of files) {
       const text = readFileSync(new URL(file, import.meta.url), "utf8");
-      const lines = stripComments(text).split("\n");
+      const scanned = stripComments(text);
+      expect(scanned.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
+        0,
+      );
+      const lines = scanned.split("\n");
       lines.forEach((line, index) => {
         if (pattern.test(line)) offenders.push(`${file}:${index + 1}`);
       });
@@ -454,9 +527,29 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     // not ask whether the switch is exhaustive (only tsc can answer that),
     // it asks whether the switch is *wired* to fail loudly if it stops
     // being exhaustive, the same way the real device.ts helpers are.
+    // Positive control (GRA-166 QA follow-up) -- same shape and same reason
+    // as the guard above: an empty file list or an empty result out of
+    // stripComments() both leave `offenders` empty for the wrong reason.
+    // Checked on stripComments()'s *output*, not the raw read, for the same
+    // reason as the guard above: a check on the raw read cannot tell "the
+    // file has content" from "the content survived stripComments()", which
+    // is the only text this loop actually feeds to
+    // switchesOnConnectionState(). Checked separately from the guard above
+    // because each `describe` owns its own file loop.
+    const files = productionSourceFiles();
+    expect(
+      files.length,
+      "productionSourceFiles() returned no files — this guard would then scan nothing and still pass",
+    ).toBeGreaterThan(0);
+    expect(files, "index.ts must be among the scanned files").toContain("index.ts");
+
     const offenders: string[] = [];
-    for (const file of productionSourceFiles()) {
-      const text = stripComments(readFileSync(new URL(file, import.meta.url), "utf8"));
+    for (const file of files) {
+      const raw = readFileSync(new URL(file, import.meta.url), "utf8");
+      const text = stripComments(raw);
+      expect(text.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
+        0,
+      );
       for (const { line, body } of switchesOnConnectionState(text)) {
         const neverGuarded = /default\s*:[\s\S]*?:\s*never\b/.test(body);
         if (!neverGuarded) offenders.push(`${file}:${line}`);
