@@ -695,13 +695,24 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // young. Same distinction `findings` and `porthole_status` make,
         // through the same method, so all three tell the same story about
         // an empty-but-attached device instead of each guessing separately.
+        //
+        // `connected` mirrors findings' loose sense exactly (handshaking or
+        // connected, not just connected): a QA pass on this ticket caught
+        // this payload hardcoding connected: false/true per branch instead
+        // of computing it, which meant a handshaking device — pending text
+        // "Connected, waiting on the app's first check-in", same as
+        // findings' — reported connected: false while findings reported
+        // true for the identical state, under the identical prose. Exactly
+        // the self-contradicting shape this whole ticket exists to remove,
+        // reintroduced in the one site that arrived from GRA-154.
+        const connected = device.state === "handshaking" || device.state === "connected";
         const pending = device.pendingMessage();
         if (pending !== null) {
-          return ok(pending, { moment: null, connected: false });
+          return ok(pending, { moment: null, connected });
         }
         return ok(
           `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`,
-          { moment: null, connected: true },
+          { moment: null, connected },
         );
       }
 

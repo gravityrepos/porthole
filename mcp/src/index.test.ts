@@ -465,13 +465,42 @@ describe("porthole_status, findings and what_was_happening agree during the hand
     // is empty (connectDevice: false — nothing was ever pushed), and the
     // device is mid-handshake, which is the same case findings' "hello
     // pending" arm covers above.
+    //
+    // QA caught a real regression here: an earlier version of this test
+    // asserted `connected: false` for what_was_happening right next to
+    // findings' `connected: true` for the identical state and identical
+    // prose, under a describe block titled "...agree during the
+    // handshake" — two tests each pinned to their own literal, silently
+    // encoding a disagreement instead of catching one. Asserting the two
+    // tools' `connected` fields equal to EACH OTHER, not each to a
+    // constant, is what makes them unable to drift apart again.
     const rig = await buildRaceRig();
+    try {
+      const result = await rig.client.callTool("what_was_happening", { at: 1000 });
+      const findings = await rig.client.callTool("findings", {});
+      expect(result.isError).toBeFalsy();
+      const resultConnected = (result.json as { connected: boolean }).connected;
+      const findingsConnected = (findings.json as { connected: boolean }).connected;
+      expect(resultConnected).toBe(findingsConnected);
+      expect(resultConnected).toBe(true);
+      expect(result.text).toContain("Connected, waiting on the app's first check-in");
+      expect(result.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("what_was_happening reports connected: false when genuinely disconnected, not merely handshaking", async () => {
+    // The other half of the fix above: `connected` must still be false when
+    // there really is no device, not just always true now that the
+    // handshaking bug is fixed. device.start() is never called here, so
+    // state never leaves "disconnected".
+    const rig = await buildRig({ connectDevice: false });
     try {
       const result = await rig.client.callTool("what_was_happening", { at: 1000 });
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false });
-      expect(result.text).toContain("Connected, waiting on the app's first check-in");
-      expect(result.text).not.toContain("Not connected to the app on");
+      expect(result.text).toContain("Not connected to the app on");
     } finally {
       await rig.close();
     }
