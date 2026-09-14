@@ -5,13 +5,15 @@ package live.gravitylabs.porthole
 import android.app.Application
 import android.content.Context
 import android.net.ConnectivityManager
+import android.os.Handler
 import java.lang.reflect.Method
 import java.util.concurrent.TimeUnit
+import live.gravitylabs.porthole.collect.LogCollector
+import live.gravitylabs.porthole.store.EventRing
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -242,7 +244,9 @@ class ShutdownTest {
         }
     }
 
-    // -- the one leak this Windows host cannot show on its own ---------------
+    // -- the leak no host but a real device could show on its own, made
+    //    checkable everywhere - and safe from the reader thread that could
+    //    otherwise race the stub this test injects -------------------------
 
     @Test
     fun `shutdown destroys a still-running log capture process`() {
@@ -254,26 +258,63 @@ class ShutdownTest {
         // whose stdout pipe blocks the reader thread in a native read that
         // Thread.interrupt() cannot reach; only process.destroy() ends it.
         //
-        // `findstr` with a pattern that can never match reproduces that
-        // shape without a device: it blocks reading its own stdin and writes
-        // nothing to stdout while it waits, so it is a real, still-running
-        // process exactly like an unread logcat pipe. Swapping it into the
-        // real Session's real LogCollector - the same reflection this file
-        // already uses on Session's own fields - and then calling the real
-        // Porthole.shutdown() is what proves the production call chain
-        // (`s.logs.stop()` -> `process?.destroy()`) actually reaches it,
-        // rather than testing LogCollector in isolation.
-        val stub = runCatching {
-            ProcessBuilder("findstr", "zzz_this_pattern_never_matches_zzz").start()
-        }.getOrNull()
-        assumeTrue("findstr is not available on this host", stub != null)
-        val process = stub!!
+        // GRA-137: this used to run only on Windows, and poked the stub into
+        // the running Session's own LogCollector *after* Porthole.install()
+        // had already called its start(). That is racy on a host that
+        // genuinely has `logcat` on PATH: install()'s LogCollector spawns its
+        // own reader thread, which calls the real spawn() and assigns
+        // `process = started` itself, and that assignment can land after this
+        // test's own `setPrivateField` and overwrite the stub - the test
+        // would then wait on a Process nobody destroys and time out. See
+        // [LogCollectorTest.spawnBlockingStub] for the platform stub itself
+        // and why neither half of it runs through a shell.
+        val process = spawnBlockingStub()
+            ?: error(
+                "could not start the platform blocking-stub process " +
+                    "(${if (isWindows) "findstr" else "cat"} not on PATH) - " +
+                    "this test must run everywhere, not skip",
+            )
 
         try {
             Porthole.install(app, port = 0)
             val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
-            val logs = sessionFields(session)["logs"] ?: error("Session has no `logs` field")
-            setPrivateField(logs, "process", process)
+
+            // Stopping the Session's own LogCollector first - rather than
+            // reaching into its `process` field - retires whatever thread
+            // install() already started (on this host it has already exited
+            // on its own; on a real device it would otherwise leak for the
+            // rest of this JVM's life, and JUnit reuses one JVM across this
+            // class's methods). Swapping in a fresh LogCollector built with
+            // the stub already wired through its `spawn` seam - the same
+            // constructor injection LogCollectorTest uses directly - and
+            // starting it ourselves removes the race outright: the only
+            // thread that will ever touch *this* instance's `process` field
+            // is the one this test starts, and its spawn() is fixed to
+            // always return exactly this Process, so there is no real
+            // spawn() call in flight anywhere that could win a race against
+            // it. Calling the real `Porthole.shutdown()` afterwards is what
+            // proves the production call chain (`s.logs.stop()` ->
+            // `process?.destroy()`) actually reaches it, rather than testing
+            // LogCollector in isolation.
+            val original = sessionFields(session)["logs"] as? LogCollector
+                ?: error("Session has no `logs` field")
+            original.stop()
+
+            val stubbed = LogCollector(EventRing(), spawn = { process })
+            setPrivateField(session, "logs", stubbed)
+            stubbed.start()
+
+            // start() returns as soon as the reader thread is scheduled, not
+            // once it has run - `stream()` still has to reach `process =
+            // started` on that thread before stubbed's own `process` field
+            // holds anything for stop() to destroy. Calling shutdown() before
+            // that assignment lands is the same race this test exists to
+            // rule out, just self-inflicted: stop()'s `process?.destroy()`
+            // would find a still-null field and do nothing, exactly as if
+            // `s.logs.stop()` had never been there at all. Waiting for the
+            // field to actually hold this stub - not merely for the thread
+            // to be alive, which happens earlier still - closes that window.
+            awaitTrue(2_000) { fieldValue(stubbed, "process") != null }
 
             assertTrue("expected the stub process to still be running", process.isAlive)
 
@@ -288,6 +329,92 @@ class ShutdownTest {
             runCatching { process.destroyForcibly() }
         }
     }
+
+    // -- ten install/shutdown cycles must not queue ten Setup.log() calls ---
+
+    @Test
+    fun `shutdown removes the pending setup report callback`() {
+        // Porthole.install() posts `setupTask` to `setupHandler` with a
+        // multi-second delay so the app has time to build its clients before
+        // Setup.log() judges it. Deleting `s.setupHandler.removeCallbacks(
+        // s.setupTask)` from Porthole.shutdown() (QA's mutation on GRA-86)
+        // left every one of the 133 runtime debug tests green, because
+        // nothing checked whether that specific Message was still sitting in
+        // the main looper's queue after shutdown() returned - ten
+        // install/shutdown cycles would queue ten of these, each outliving
+        // the session that posted it.
+        //
+        // Robolectric's looper defaults to PAUSED, so this Runnable never
+        // actually runs during the test regardless of what shutdown() does;
+        // the question is only whether it is still enqueued. MessageQueue's
+        // own linked list of pending Messages is real framework bookkeeping,
+        // the same kind of evidence `activityLifecycleCallbackCount` above
+        // reads by reflection - Handler.hasCallbacks() would ask the same
+        // question, but arrived in a later API than some of this project's
+        // targets have needed to run against, so this walks the queue itself
+        // instead of depending on that method's availability.
+        Porthole.install(app, port = 0)
+        val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
+        val setupHandler = sessionFields(session)["setupHandler"] as? Handler
+            ?: error("Session has no `setupHandler` field")
+        val setupTask = sessionFields(session)["setupTask"] as? Runnable
+            ?: error("Session has no `setupTask` field")
+
+        assertTrue(
+            "expected install() to have scheduled the deferred Setup.log() callback",
+            looperQueueHas(setupHandler, setupTask),
+        )
+
+        Porthole.shutdown()
+
+        assertFalse(
+            "shutdown() should have removed the pending Setup.log() callback via " +
+                "s.setupHandler.removeCallbacks(s.setupTask) - left in place, it fires " +
+                "into a session that has already ended, and ten install/shutdown cycles " +
+                "queue ten of these",
+            looperQueueHas(setupHandler, setupTask),
+        )
+    }
+
+    /**
+     * Whether [handler]'s looper still has a pending Message whose callback
+     * is exactly [runnable], read from MessageQueue's own private linked list
+     * rather than through a Handler method whose availability varies by API
+     * level. A callback `removeCallbacks` failed to remove is still exactly
+     * here.
+     */
+    private fun looperQueueHas(handler: Handler, runnable: Runnable): Boolean {
+        var message = fieldValue(handler.looper.queue, "mMessages")
+        while (message != null) {
+            if (fieldValue(message, "callback") === runnable) return true
+            message = fieldValue(message, "next")
+        }
+        return false
+    }
+
+    private val isWindows: Boolean
+        get() = System.getProperty("os.name")?.lowercase()?.contains("win") == true
+
+    /**
+     * A real, still-running process that blocks without producing output -
+     * see `LogCollectorTest.spawnBlockingStub`, which this mirrors exactly
+     * (duplicated rather than shared: this ticket's `Owns` is these two test
+     * files and no third one to hold a shared helper in). `findstr` blocks on
+     * unmatched stdin on Windows; `cat` with no arguments blocks reading
+     * stdin on POSIX, from the pipe `ProcessBuilder` wires up and never
+     * closes. Neither runs through a shell, which is what makes the `Process`
+     * returned the actual thing blocked in the read rather than a shell that
+     * forked it and exited - see the sibling doc comment for the CI failure
+     * that shape caused elsewhere on this project.
+     */
+    private fun spawnBlockingStub(): java.lang.Process? = runCatching {
+        val command = if (isWindows) {
+            listOf("findstr", "zzz_this_pattern_never_matches_zzz")
+        } else {
+            listOf("cat")
+        }
+        ProcessBuilder(command).start()
+    }.getOrNull()
 
     private fun setPrivateField(target: Any, name: String, value: Any?) {
         var klass: Class<*>? = target.javaClass

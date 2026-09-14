@@ -615,10 +615,16 @@ object Porthole {
     }.getOrDefault(context.packageName)
 
     /**
-     * Drops a marker in the app's files dir naming the port.
+     * Drops a marker in the app's files dir naming the port the runtime actually
+     * bound.
      *
-     * The Gradle plugin reads it back over `adb` so `./gradlew portholeConnect`
-     * works without anyone hardcoding a port in two places.
+     * Nothing reads this back today — `portholeConnect` forwards whatever port
+     * the extension is configured with, not this file's. Kept anyway because it
+     * is the one place that records the port Porthole actually bound rather than
+     * the one it was told to try, which is what a future `portholeConnect` would
+     * need to discover a port over `adb shell run-as <pkg> cat files/porthole.json`
+     * instead of assuming the configured value matches. Tracked as a follow-up
+     * (GRA-141); until that lands, do not describe this as read by anything.
      */
     private fun writeConnectionFile(context: Context, port: Int) {
         runCatching {

@@ -15,7 +15,9 @@ import java.util.Properties
  * Three jobs:
  *  1. put the real runtime on debug build types and the no-op on the rest
  *  2. generate the `porthole_port` resource so the port lives in one place
- *  3. own the `adb forward` and the connection file the MCP server reads
+ *  3. own the `adb forward` and record it to a connection file (see
+ *     [PortholeConnectTask.connectionFile]) — as of now nothing reads that
+ *     file back automatically
  *
  * Apply it to your app module:
  * ```kotlin
@@ -131,15 +133,21 @@ class PortholePlugin : Plugin<Project> {
         if (candidate != null && candidate.isFile) candidate.absolutePath else binary
     }
 
+    // A blank `sdk.dir=` is absent, not a path: `File("")` resolves to the
+    // current working directory, so taking it at its word would look for adb
+    // under the daemon's cwd and then silently fall back to bare "adb" on the
+    // PATH anyway. Same reasoning as `resolveSdkDir` in PortholeTasks.kt,
+    // which mirrors this function.
     private fun sdkDirectory(project: Project): File? {
         val local = File(project.rootDir, "local.properties")
         if (local.isFile) {
             val props = Properties()
             local.inputStream().use(props::load)
-            props.getProperty("sdk.dir")?.let { return File(it) }
+            props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
         }
         return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
             .mapNotNull { System.getenv(it) }
+            .filter { it.isNotBlank() }
             .map(::File)
             .firstOrNull { it.isDirectory }
     }
