@@ -1,7 +1,11 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { buildRig, type Rig } from "./testing/harness.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { buildRig, waitUntil, type Rig } from "./testing/harness.js";
+import { resolveSdkDir } from "./adb.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -30,11 +34,116 @@ describe("the harness", () => {
   });
 
   it("reports not connected when the device never says hello", async () => {
+    // `connectDevice: false` means `device.state` never leaves "disconnected"
+    // (device.start() is never even called) — this only proves anything about
+    // connectivity because `findings` now branches on `device.state`, not on
+    // whether the ring happens to be empty. Flip this option to `true` and
+    // the device connects and says hello with nothing pushed to the ring,
+    // which makes `connected: false` wrong and this assertion fail.
     const rig = await buildRig({ connectDevice: false });
     try {
       const result = await rig.client.callTool("findings", {});
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false, findings: [] });
+      expect(result.text).toContain("Not connected to the app on");
+
+      // porthole_status's disconnected arm, pinned the same way the
+      // connected and handshaking-pending arms are pinned in the
+      // "handshake race" describe block below: summary and payload
+      // asserted together, against the real registered tool, so the arm
+      // cannot be changed in one without the other going red too.
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      expect(status.json).toMatchObject({ state: "disconnected" });
+      expect(status.text).toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports connected when the device said hello but the ring is still empty", async () => {
+    // The bug this guards against: `findings` used to decide "connected" by
+    // asking whether the ring had anything in it, so the very first call
+    // after every install — device attached, hello received, nothing
+    // collected yet — printed the full "Not connected" troubleshooting wall.
+    const rig = await buildRig(); // connectDevice defaults to true and waits for hello.
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.timeline.buffer()).toHaveLength(0);
+
+      const result = await rig.client.callTool("findings", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.json).toMatchObject({ connected: true, findings: [] });
+      expect(result.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("porthole_status names its SDK and project root sources", () => {
+  // GRA-119 AC5, never actually wired up until this ticket: `porthole_status`
+  // must call the real `resolveSdkDir()`/`resolveProjectRoot()` from adb.ts
+  // and report their `.source`, not reimplement the resolution. Asserting by
+  // value (not just "the field exists") is what makes deleting the
+  // provenance from the payload — or hand-rolling a second implementation
+  // that happens to agree by accident in this one case — turn this red.
+
+  it("reports PORTHOLE_SDK_DIR as the source when it is set", async () => {
+    const original = process.env.PORTHOLE_SDK_DIR;
+    process.env.PORTHOLE_SDK_DIR = "C:\\fake\\porthole\\sdk";
+    try {
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          sdkDir: "C:\\fake\\porthole\\sdk",
+          sdkDirSource: "PORTHOLE_SDK_DIR",
+        });
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env.PORTHOLE_SDK_DIR;
+      else process.env.PORTHOLE_SDK_DIR = original;
+    }
+  });
+
+  it("reports whatever resolveSdkDir() resolves to when PORTHOLE_SDK_DIR is unset", async () => {
+    const original = process.env.PORTHOLE_SDK_DIR;
+    delete process.env.PORTHOLE_SDK_DIR;
+    try {
+      // Not a second, hand-rolled expectation of what the source "should" be —
+      // the whole point of AC5 is that porthole_status reports adb.ts's own
+      // answer, so the test's expectation is that same answer, called
+      // directly.
+      const expected = resolveSdkDir();
+      const rig = await buildRig();
+      try {
+        const result = await rig.client.callTool("porthole_status", {});
+        expect(result.isError).toBeFalsy();
+        expect(result.json).toMatchObject({
+          sdkDir: expected.directory,
+          sdkDirSource: expected.source,
+        });
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env.PORTHOLE_SDK_DIR;
+      else process.env.PORTHOLE_SDK_DIR = original;
+    }
+  });
+
+  it("also reports the project root and its source", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", {});
+      expect(result.isError).toBeFalsy();
+      const payload = result.json as Record<string, unknown>;
+      expect(typeof payload.projectRoot).toBe("string");
+      expect(["PORTHOLE_PROJECT_ROOT", "cwd"]).toContain(payload.projectRootSource);
     } finally {
       await rig.close();
     }
@@ -259,6 +368,154 @@ describe("findings", () => {
       expect(payload.findings.every((f) => f.confidence)).toBe(true);
     } finally {
       await rig.close();
+    }
+  });
+});
+
+describe("porthole_status and findings agree during the handshake race (AC7/AC9)", () => {
+  // DeviceClient sets state = "connected" the instant the socket connects,
+  // then issues `request("hello")` without awaiting it (device.ts,
+  // socket.on("connect")) — so there is a window, roughly 2s wide on real
+  // hardware (see GRA-152's device-verify comment), where
+  // `device.state === "connected"` and `device.hello` is still null.
+  // `connectDevice: false` skips buildRig's own wait-for-hello, and a hello
+  // handler that never resolves holds that window open indefinitely instead
+  // of racing a real, narrow gap in a unit test.
+  async function buildRaceRig(): Promise<Rig> {
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
+    rig.device.start();
+    await waitUntil(() => rig.device.state === "connected");
+    return rig;
+  }
+
+  it("neither tool emits the troubleshooting wall while the socket is connected and hello is pending", async () => {
+    const rig = await buildRaceRig();
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.device.hello).toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+
+      for (const result of [status, findings]) {
+        expect(result.isError).toBeFalsy();
+        expect(result.text).not.toContain("Not connected to the app on");
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("porthole_status's summary agrees with its own payload.state in the race window", async () => {
+    // The bug this guards against: the summary required
+    // `device.state === "connected" && device.hello`, so it took the
+    // not-connected branch and printed the wall while payload.state said
+    // "connected" right below it — one call, two answers.
+    const rig = await buildRaceRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const payload = status.json as { state: string; app: unknown };
+      expect(payload.state).toBe("connected");
+      expect(payload.app).toBeNull();
+      expect(status.text).toContain("Connected, waiting on the app's first check-in");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings' summary and connected field agree with each other in the race window (kills M5 and M5c)", async () => {
+    const rig = await buildRaceRig();
+    try {
+      const findings = await rig.client.callTool("findings", {});
+      // M5: `const connected = device.hello !== null` reads the wrong field.
+      // hello is null here, so that mutant reports connected: false even
+      // though device.state === "connected" — this assertion catches it.
+      expect(findings.json).toMatchObject({ connected: true });
+      // M5c: putting device.notConnectedMessage() back into the
+      // hello-pending arm reprints the wall here even though the payload
+      // says connected — this assertion catches it.
+      expect(findings.text).toContain("Connected, waiting on the app's first check-in");
+      expect(findings.text).not.toContain("Not connected to the app on");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("porthole_status and findings tell the same connection story in the race window", async () => {
+    const rig = await buildRaceRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const statusPayload = status.json as { state: string };
+      const findingsPayload = findings.json as { connected: boolean };
+
+      expect(statusPayload.state).toBe("connected");
+      expect(findingsPayload.connected).toBe(true);
+      // Not just "both non-wall" — both describe the same handshake-pending
+      // story, so an agent reading either tool gets a consistent answer.
+      expect(status.text).toContain("Connected, waiting on the app's first check-in");
+      expect(findings.text).toContain("Connected, waiting on the app's first check-in");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("resolveSdkDir's blank sdk.dir from local.properties (M6b)", () => {
+  // adb.test.ts is not in this ticket's Owns (mcp/src/index.ts,
+  // index.test.ts, device.ts, device.test.ts, adb.ts), so this fixture lives
+  // here instead of alongside adb.test.ts's other local.properties tests —
+  // per GRA-152, asking first or placing it wherever Owns allows and saying
+  // so. adb.test.ts:312 already defends a blank PORTHOLE_SDK_DIR; nothing
+  // defended a blank sdk.dir read out of local.properties (adb.ts's
+  // `sdkDirFromLocalProperties`), which QA's mutation
+  // (`if (value && value.trim()) return value.trim()` weakened to
+  // `if (value !== undefined) return value`) proved by surviving the full
+  // suite: a whitespace-only `sdk.dir=   ` would resolve as a real SDK
+  // directory and shadow ANDROID_HOME.
+  it("a whitespace-only sdk.dir in local.properties is treated as absent, not as an SDK directory", () => {
+    const savedEnv = {
+      PORTHOLE_SDK_DIR: process.env.PORTHOLE_SDK_DIR,
+      PORTHOLE_PROJECT_ROOT: process.env.PORTHOLE_PROJECT_ROOT,
+      ANDROID_HOME: process.env.ANDROID_HOME,
+      ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT,
+    };
+    const project = mkdtempSync(path.join(tmpdir(), "porthole-index-sdkdir-"));
+    const realSdk = mkdtempSync(path.join(tmpdir(), "porthole-index-realsdk-"));
+    try {
+      delete process.env.PORTHOLE_SDK_DIR;
+      process.env.PORTHOLE_PROJECT_ROOT = project;
+      // A blank value, not a missing key — this is the case
+      // `value !== undefined` (M6b) gets wrong that `value && value.trim()`
+      // gets right. Plain ASCII spaces after `=` do not reach that check at
+      // all: parseProperties' own leading-whitespace regex (`[ \t\f]`) already
+      // strips them down to an empty string before `sdkDirFromLocalProperties`
+      // ever sees the value, so both the fixed and the mutated code fall
+      // through identically and the fixture would prove nothing. U+00A0
+      // (a non-breaking space, as a real editor can produce without anyone
+      // noticing) is not in that character class, so it survives parsing as
+      // a non-empty, all-whitespace string — exactly the value `.trim()`
+      // exists to catch, and `value !== undefined` does not.
+      const blankSdkDirValue = String.fromCharCode(160, 160, 160); // three non-breaking spaces
+      const localPropertiesContent = "sdk.dir=" + blankSdkDirValue + String.fromCharCode(10);
+      writeFileSync(path.join(project, "local.properties"), localPropertiesContent);
+      process.env.ANDROID_HOME = realSdk;
+      delete process.env.ANDROID_SDK_ROOT;
+
+      const resolved = resolveSdkDir();
+      // The blank sdk.dir must not shadow ANDROID_HOME: it should be treated
+      // as though local.properties said nothing about sdk.dir at all.
+      expect(resolved).toEqual({ directory: realSdk, source: "ANDROID_HOME" });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(realSdk, { recursive: true, force: true });
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   });
 });

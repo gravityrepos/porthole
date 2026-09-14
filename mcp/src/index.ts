@@ -7,7 +7,7 @@ import { z } from "zod";
 import { DeviceClient, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { runAdb } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf } from "./moment.js";
 import {
   CPU_PROBE,
@@ -200,6 +200,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async (): Promise<ToolResult> => {
+      // GRA-119 AC5: name which SDK and which project root this run resolved
+      // to, and where each came from, so "adb resolved to the wrong SDK" is
+      // something this tool can actually diagnose instead of something an
+      // agent has to take on faith. resolveSdkDir()/resolveProjectRoot() in
+      // adb.ts already compute both; this just reports them.
+      const sdkDir = resolveSdkDir();
+      const projectRoot = resolveProjectRoot();
       const payload = {
         state: device.state,
         host: HOST,
@@ -208,12 +215,27 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         timelineUi: timeline.isRunning() ? timeline.url() : null,
         bufferedEvents: timeline.buffer().length,
         lastError: device.lastError,
+        sdkDir: sdkDir.directory,
+        sdkDirSource: sdkDir.source,
+        projectRoot: projectRoot.directory,
+        projectRootSource: projectRoot.source,
       };
+      // The socket connecting and hello resolving are two different events,
+      // roughly 2s apart on real hardware (DeviceClient sets state="connected"
+      // on socket connect, then requests hello without awaiting it). The old
+      // `device.state === "connected" && device.hello` ternary collapsed that
+      // gap into "not connected", which made this tool's own summary disagree
+      // with its own `state: "connected"` payload field, and disagree with
+      // `findings` (which already had this third answer). Name the gap
+      // instead of hiding it in either direction, and never fall back to
+      // notConnectedMessage() while a socket is actually connected.
       const summary =
-        device.state === "connected" && device.hello
-          ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
-            `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
-          : device.notConnectedMessage();
+        device.state !== "connected"
+          ? device.notConnectedMessage()
+          : device.hello
+            ? `Connected to ${device.hello.packageName} on ${device.hello.device} ` +
+              `(API ${device.hello.sdkInt}). Collectors: ${device.hello.collectors.join(", ")}.`
+            : "Connected, waiting on the app's first check-in. Ask again in a moment.";
       return ok(summary, payload);
     },
   );
@@ -245,8 +267,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to }): Promise<ToolResult> => {
       const span = resolveWindow({ sinceMs, from, to });
+      const connected = device.state === "connected";
       if (!span) {
-        return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+        // resolveWindow returns null whenever the ring is empty, which is not
+        // the same thing as the device being unreachable — hello can have
+        // landed seconds ago with nothing collected yet. Printing the full
+        // troubleshooting wall in that case sends the first call after every
+        // install chasing a socket that was never the problem.
+        if (!connected) {
+          return ok(device.notConnectedMessage(), { window: null, findings: [], connected: false });
+        }
+        const summary = device.hello
+          ? `Connected to ${device.hello.packageName}, nothing buffered yet. Ask again in a moment.`
+          : "Connected, waiting on the app's first check-in. Ask again in a moment.";
+        return ok(summary, { window: null, findings: [], connected: true });
       }
 
       const buffered = timeline.buffer();
@@ -281,6 +315,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         eventsExamined: events.length,
         metrics: trace.metrics,
         findings,
+        connected,
       };
 
       const shortfall = clipped.start + clipped.end;

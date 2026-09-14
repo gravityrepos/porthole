@@ -47,6 +47,60 @@ val generateVersion = tasks.register("generatePortholeVersion") {
 
 kotlin.sourceSets.named("main") { kotlin.srcDir(generateVersion) }
 
+/**
+ * Regenerates `mcp/package.json`'s `version` field from `porthole` in
+ * `gradle/libs.versions.toml`, the same entry [generateVersion] reads, so the
+ * npm package `portholeUi` and `portholeMcpConfig` point at is never a
+ * hand-typed guess. `VersionConsistencyTest` still compares the two files —
+ * this is what keeps that comparison green rather than a reason to remove it,
+ * because the test guards the invariant and this task is how the invariant
+ * gets restored when something (a merge, a manual edit) breaks it.
+ *
+ * Deliberately does not read [project.version]. That value was fixed when
+ * this build was configured, which is fine for [generateVersion] because
+ * nothing upstream of it changes mid-build — but `./gradlew release` edits
+ * `gradle/libs.versions.toml` on disk *during its own run* and then invokes
+ * this task in a fresh `gradlew` process specifically so a configuration
+ * that already happened is not what answers the question. Reading the file
+ * again here, at execution time, means this task also does the right thing
+ * standing alone: hand-edit `mcp/package.json`'s version and re-run
+ * `./gradlew -p gradle-plugin generateMcpPackageVersion` and it puts the
+ * catalog's value back, without needing a fresh process to see a fresh
+ * catalog — there was never a stale one cached in the first place.
+ */
+val generateMcpPackageVersion = tasks.register("generateMcpPackageVersion") {
+    group = "release"
+    description = "Writes the catalog's `porthole` version into mcp/package.json's `version` field."
+
+    val catalogFile = layout.projectDirectory.file("../gradle/libs.versions.toml").asFile
+    val packageJsonFile = layout.projectDirectory.file("../mcp/package.json").asFile
+
+    // Not `outputs.upToDateWhen { false }`: a real output means Gradle can
+    // still say this is up to date when the catalog has not moved, and — just
+    // as importantly — say it is NOT up to date when someone hand-edits
+    // package.json's version outside of Gradle, because the recorded output
+    // snapshot then disagrees with what's on disk.
+    inputs.file(catalogFile).withPathSensitivity(PathSensitivity.NONE)
+    outputs.file(packageJsonFile)
+
+    doLast {
+        val toml = catalogFile.readText()
+        val catalogMatch = Regex("""^porthole\s*=\s*"([^"]+)"""", RegexOption.MULTILINE)
+            .find(toml)
+        val version = requireNotNull(catalogMatch) {
+            "no `porthole` entry under [versions] in ${catalogFile}"
+        }.groupValues[1]
+
+        val packageJson = packageJsonFile.readText()
+        val versionField = Regex("""^( {2}"version":\s*")[^"]+(")""", RegexOption.MULTILINE)
+        require(versionField.containsMatchIn(packageJson)) {
+            "no top-level \"version\" field in ${packageJsonFile}"
+        }
+        val updated = versionField.replace(packageJson) { m -> "${m.groupValues[1]}$version${m.groupValues[2]}" }
+        if (updated != packageJson) packageJsonFile.writeText(updated)
+    }
+}
+
 dependencies {
     // compileOnly: the consuming build always brings its own AGP, and the
     // plugin only touches the stable variant API. Verified to compile against
