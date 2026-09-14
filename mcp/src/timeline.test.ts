@@ -17,6 +17,16 @@ vi.mock("./adb.js", () => ({
   restartApp: vi.fn(() => ({ ok: true, output: "restarted" })),
 }));
 
+// Stubbed so the /api/findings "trace" branch can actually be reached in
+// this test environment, which has no real trace_processor_shell — without
+// this, findTraceProcessor() returns null and the app-scoping note this
+// ticket changed (GRA-157) is unreachable, the same gap a weaker version of
+// this file's test for it left open.
+vi.mock("./perfetto.js", () => ({
+  findTraceProcessor: vi.fn(() => "/fake/trace_processor_shell"),
+  askTrace: vi.fn(async () => ({ findings: [], unanswered: [] })),
+}));
+
 /**
  * A running timeline server, on a real port, answering real requests.
  *
@@ -381,6 +391,70 @@ describe("the tool endpoints", () => {
   it("404s a tool it does not have rather than serving the UI", async () => {
     const response = await timeline.send("/api/tools/nonsense", { method: "POST" });
     expect(response.status).toBe(404);
+  });
+});
+
+describe("GRA-157: the three sites that used to read hello without checking state", () => {
+  // FakeDevice (this file's own stub, not the real DeviceClient) does not
+  // enforce the "connected implies hello" invariant itself — nothing stops
+  // a test from setting state = "connected" here with hello still null. That
+  // is deliberate: it lets these tests drive "handshaking" directly instead
+  // of racing a real handshake, the same way device.ts's own tests use a
+  // raw server. The real DeviceClient's invariant is covered in
+  // device.test.ts.
+
+  it("/api/health reports connected: false with app/device null while handshaking, not the old self-contradicting combo", async () => {
+    timeline.device.state = "handshaking";
+    const response = await timeline.send("/api/health");
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { connected: boolean; app: unknown; device: unknown };
+    // Pre-GRA-157 this endpoint reported connected: true here (state was
+    // "connected" the instant the socket connected), with app and device
+    // both null — a combination this ticket's own table names as the bug.
+    expect(body).toMatchObject({ connected: false, app: null, device: null });
+  });
+
+  it("/api/health reports connected: true with app/device set once hello has actually landed", async () => {
+    timeline.device.state = "connected";
+    timeline.device.saidHello("com.example.shop");
+    const response = await timeline.send("/api/health");
+    const body = JSON.parse(response.body) as { connected: boolean; app: unknown; device: unknown };
+    expect(body).toMatchObject({ connected: true, app: "com.example.shop", device: "Pixel 8" });
+  });
+
+  it("/api/tools/restart names the handshake instead of a generic 'has not said hello yet' while one is in progress", async () => {
+    timeline.device.state = "handshaking";
+    const response = await timeline.send("/api/tools/restart", { method: "POST" });
+    expect(response.status).toBe(409);
+    expect(JSON.parse(response.body).output).toContain("Still waiting on the app's first check-in");
+  });
+
+  it("/api/tools/restart keeps the generic message when there is no handshake in progress at all", async () => {
+    timeline.device.state = "disconnected";
+    const response = await timeline.send("/api/tools/restart", { method: "POST" });
+    expect(response.status).toBe(409);
+    expect(JSON.parse(response.body).output).toBe("The app has not said hello yet.");
+  });
+
+  it("/api/findings' trace-scoping note says 'still waiting' while handshaking, not 'not attached'", async () => {
+    timeline.device.state = "handshaking";
+    const response = await timeline.send(
+      "/api/findings?trace=" + encodeURIComponent("/fake/trace.pftrace"),
+    );
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { notes: string[] };
+    expect(body.notes.join(" ")).toContain("Still waiting on the app's first check-in");
+    expect(body.notes.join(" ")).not.toContain("Not attached to an app");
+  });
+
+  it("/api/findings' trace-scoping note says 'not attached' when there is no handshake in progress at all", async () => {
+    timeline.device.state = "disconnected";
+    const response = await timeline.send(
+      "/api/findings?trace=" + encodeURIComponent("/fake/trace.pftrace"),
+    );
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { notes: string[] };
+    expect(body.notes.join(" ")).toContain("Not attached to an app");
   });
 });
 

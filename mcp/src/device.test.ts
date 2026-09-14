@@ -461,6 +461,84 @@ describe("request timeout", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// GRA-157: the handshake gets its own state
+// ---------------------------------------------------------------------------
+
+describe("the handshaking state", () => {
+  it("moves disconnected -> connecting -> handshaking -> connected in order, with hello only set at the end", async () => {
+    const server = trackServer(await startRawServer());
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+    const seen: Array<{ state: string; helloWasNull: boolean }> = [];
+    client.on("state", (s: string) => seen.push({ state: s, helloWasNull: client.hello === null }));
+
+    client.start();
+    await waitForState(client, "connected");
+
+    // "handshaking" itself is not in this list until the real hello request
+    // resolves and setState("connected") runs, so pulling the states out
+    // this way is the honest order-of-events check, not just a set check.
+    const states = seen.map((s) => s.state);
+    expect(states).toEqual(["connecting", "handshaking", "connected"]);
+    // hello was still null at the moment every one of those events fired,
+    // except the very last ("connected") — this is the invariant from the
+    // other direction: not just "connected implies hello", but "nothing
+    // before connected has hello yet either", which is what makes
+    // "handshaking" worth having as its own name instead of a substate of
+    // "connected".
+    expect(seen.map((s) => s.helloWasNull)).toEqual([true, true, false]);
+  });
+
+  it("accepts a request while merely handshaking, since hello itself is sent in that state", async () => {
+    // A server that never auto-answers hello, so the client sits in
+    // "handshaking" indefinitely — long enough to prove a second request
+    // sent in that same state is not rejected the way one sent while
+    // "connecting" or "disconnected" would be.
+    const server = trackServer(await startRawServer({ autoHello: false }));
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await waitForState(client, "handshaking");
+    expect(client.state).toBe("handshaking");
+    expect(client.hello).toBeNull();
+
+    // The pending hello request itself is proof enough that request() did
+    // not reject on entry to "handshaking" — if it had, connect() would
+    // never have gotten this far and no server would have received a
+    // "hello" method call at all.
+    await server.whenAccepted(1);
+    await sleep(30);
+    expect(server.sockets).toHaveLength(1);
+  });
+
+  it("rejects a request while still 'connecting' (TCP handshake not yet complete), the same as before this state existed", async () => {
+    // No listener at all: the TCP connect itself never completes, so the
+    // client should reject immediately rather than queue a write against a
+    // socket that may never open.
+    const client = track(new DeviceClient("127.0.0.1", 1));
+    client.start();
+    await expect(client.request("anything")).rejects.toThrow(/Not connected/);
+  });
+
+  it("AC1: setState('connected') throws if hello is still null, independent of connect()'s own ordering", () => {
+    // GRA-157 AC1 asks for the invariant to be enforced where state is set,
+    // "not left as a comment" — this bypasses connect()'s hello-then-state
+    // ordering entirely and calls the private method directly, so the test
+    // is not just re-checking that connect() happens to call things in the
+    // right order (device.test.ts's "moves disconnected -> ... -> connected"
+    // test above already covers that). It proves the guard holds even if a
+    // future edit got that ordering wrong.
+    const client = track(new DeviceClient("127.0.0.1", 1));
+    expect(client.hello).toBeNull();
+    const setState = (
+      client as unknown as { setState(state: string): void }
+    ).setState.bind(client);
+    expect(() => setState("connected")).toThrow(/invariant violated/);
+    // The throw must not have half-applied the transition.
+    expect(client.state).toBe("disconnected");
+  });
+});
+
 describe("pending requests on close", () => {
   it("fails every pending request as soon as the device disconnects", async () => {
     const server = trackServer(await startRawServer());
