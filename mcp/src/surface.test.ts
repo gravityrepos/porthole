@@ -368,6 +368,18 @@ describe("ConnectionState reads (GRA-162)", () => {
     // pendingMessage()/setState() are the one place `.state` is compared to
     // a literal on purpose, because they are what every other file is
     // supposed to call instead of doing this themselves.
+    //
+    // What this does not reach, so the next reader does not assume it does:
+    // it matches one spelling — `state`, `===`/`!==`, a double-quoted
+    // literal, all on one line — so a line break inside the comparison, an
+    // aliased or locally-copied `state` variable, reversed operand order, or
+    // single quotes all pass it unseen. The one worth naming on purpose is a
+    // hand-rolled `switch` on `ConnectionState` with no `never`-guarded
+    // default: `switch`-on-state is this ticket's own house idiom now, tsc
+    // only catches a non-exhaustive one when that guard is present, and this
+    // regex does not look for a switch at all. So: the compiler covers a new
+    // *state*; this guard covers one spelling of a new *comparison*. Neither
+    // is complete alone, and nothing here is complete either.
     const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
     const offenders: string[] = [];
     for (const file of productionSourceFiles()) {
