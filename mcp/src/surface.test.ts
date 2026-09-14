@@ -340,9 +340,29 @@ function productionSourceFiles(): string[] {
  * `toolSource()` above makes the same kind of trade: loose about things
  * this codebase does not actually do, strict about the one thing that
  * matters here.
+ *
+ * Normalises CRLF to LF first (GRA-166 item 6). Without this, a line ending
+ * in "\r\n" defeats the "//" stripping below: `.` in `/\/\/.*$/` does not
+ * match "\r" (it is a line terminator to the regex engine even without the
+ * `s` flag), and `$` without the `m` flag demands the true end of the
+ * string — so on a line carrying a trailing "\r" the pattern never reaches
+ * it and the replace silently no-ops, leaving the raw comment text in
+ * place. That is exactly how a prose comment like `// ... state ===
+ * "connected" ...` in `index.ts` starts matching the offender pattern below
+ * on a CRLF checkout (Windows with `core.autocrlf=true`) even though the
+ * only line-ending byte changed and no comparison was added: a false
+ * positive on a clean tree, which is worse than a missed real one — see the
+ * describe block below for why. Collapsing "\r\n" to "\n" up front costs
+ * nothing (it cannot change how many lines the file has, only how each
+ * line's own terminator is spelled) and makes every reader of this function
+ * — comment-blanking included — see the same normalised text regardless of
+ * which line ending the checkout happened to produce.
  */
 function stripComments(text: string): string {
-  const noBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "));
+  const normalized = text.replace(/\r\n/g, "\n");
+  const noBlockComments = normalized.replace(/\/\*[\s\S]*?\*\//g, (block) =>
+    block.replace(/[^\n]/g, " "),
+  );
   return noBlockComments
     .split("\n")
     .map((line) => line.replace(/\/\/.*$/, ""))
