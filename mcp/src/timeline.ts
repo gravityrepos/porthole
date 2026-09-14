@@ -295,7 +295,12 @@ export class TimelineServer {
             // boot clock, and the two differ by however long the device slept.
             const sample = within.find((e) => e.event === "clocks") ?? events.find((e) => e.event === "clocks");
             const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
-            const asked = askTrace({
+            // askTrace now spawns asynchronously (GRA-82), so this await is new
+            // here. It is safe: the admission gate above runs to completion
+            // synchronously, before this handler's first await of any kind, so
+            // making this one call asynchronous does not move it earlier than
+            // a check that already finished.
+            const asked = await askTrace({
               binary,
               trace: tracePath,
               packageName: app,

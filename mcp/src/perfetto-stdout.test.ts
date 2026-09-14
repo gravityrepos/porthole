@@ -1,8 +1,9 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { interpret, parseRows, type Rows } from "./perfetto.js";
+import { askTrace, findTraceProcessor, interpret, markerText, matchBatch, parseRows, type Rows } from "./perfetto.js";
 
 /**
  * The other fixtures are JSON exported from the trace viewer. These are the
@@ -141,5 +142,90 @@ describe("interpret, on what trace_processor prints", () => {
     // Five questions, five interpretations: a regression in any single query
     // shows up here as a missing finding rather than as silence.
     expect(findings.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+/**
+ * GRA-82 stopped running the five questions as five separate invocations and
+ * started running them as one script, each preceded by a `SELECT
+ * 'porthole:<id>' AS marker`. This is the same real stdout used above — real
+ * trace_processor output for a real 16MB capture, not invented rows — but
+ * wrapped in the marker shape a batched script actually produces, and
+ * concatenated in question order the way `buildScript` emits them.
+ *
+ * The property this pins is the one the ticket called out as most at risk
+ * from batching: that the five results still land keyed onto the right id in
+ * `Rows`, not shifted onto their neighbour, and that `interpret` produces the
+ * identical findings from the batched shape as from the five separate ones
+ * tested above.
+ */
+describe("matchBatch, on the five real fixtures concatenated in question order", () => {
+  const ids = ["jank", "thread_states", "binder", "render", "slices"];
+  const NONCE = "0123456789abcdef";
+  const batched = ids.map((id) => `"marker"\n"${markerText(NONCE, id)}"\n\n${stdout(id).trimEnd()}`).join("\n\n");
+  const { rows: matched, answered } = matchBatch(batched, ids, NONCE);
+
+  it("answers all five from one concatenated script", () => {
+    expect(answered).toBe(5);
+  });
+
+  it("keys every question's real rows onto its own id, not a neighbour's", () => {
+    for (const id of ids) {
+      expect(matched.get(id)).toEqual(rows(id));
+    }
+  });
+
+  it("produces the same findings batched as it does unbatched", () => {
+    const batchedRows = Object.fromEntries(matched) as Rows;
+    const batchedFindings = interpret(batchedRows);
+    const unbatchedFindings = interpret({
+      jank: rows("jank"),
+      thread_states: rows("thread_states"),
+      binder: rows("binder"),
+      render: rows("render"),
+      slices: rows("slices"),
+    });
+    expect(batchedFindings).toEqual(unbatchedFindings);
+  });
+});
+
+/**
+ * Nothing else in this suite exercises `hoistModules -> runBatch -> runScript`
+ * end to end: `perfetto.test.ts` proves `hoistModules` and `runBatch` in
+ * isolation, against a fake `run`, and the `matchBatch` test above replays
+ * real stdout but never asks `askTrace` to build that script and run it
+ * itself. That gap is exactly why M17 (deleting the `INCLUDE` emission) and
+ * M19 (passing empty `modules` from `askTrace`) both survived the first pass
+ * of mutation testing — a fake `run` never notices that the modules it never
+ * needed were also never sent.
+ *
+ * This is BRIEFING's recurring lesson applied to `askTrace` itself: a
+ * self-written fixture tests the format assumed, not the one that arrives, so
+ * this runs the real wiring against the real pinned binary and a real
+ * capture rather than another hand-built stand-in. It is gated on both being
+ * present and skips cleanly otherwise — this machine has both today
+ * (`findTraceProcessor()` finds the plugin's cached v58.2, and a real
+ * 10.96MB capture sits in `.porthole/traces/` from a prior device session),
+ * but neither is guaranteed on a fresh checkout or CI runner.
+ */
+describe("askTrace, end to end against the real binary and a real capture", () => {
+  const binary = findTraceProcessor();
+  const trace = join(process.cwd(), ".porthole", "traces", "porthole-1789157802606.pftrace");
+  const ready = binary !== null && existsSync(trace);
+
+  it.skipIf(!ready)("answers every question in one call against a real trace", async () => {
+    // The window and package below are this specific capture's own bounds
+    // and its one app process (`com.example.shop`, upid 53) — found by
+    // querying the trace directly with `SELECT MIN(ts), MAX(ts) FROM slice`
+    // and `SELECT name FROM process`, not guessed.
+    const result = await askTrace({
+      binary: binary as string,
+      trace,
+      packageName: "com.example.shop",
+      fromNs: 542738294836466,
+      toNs: 542749153837178,
+    });
+    expect(result.unanswered).toEqual([]);
+    expect(result.findings.length).toBeGreaterThan(0);
   });
 });
