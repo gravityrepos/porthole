@@ -1,10 +1,11 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { compare, parseCapture, report } from "./capture.js";
+import { capture, compare, parseCapture, report, type CaptureOptions } from "./capture.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
 
 /**
@@ -29,6 +30,113 @@ function trace(over: Partial<Trace> = {}): Trace {
     ...over,
   };
 }
+
+/**
+ * A raw TCP listener speaking just enough of the wire protocol for a real
+ * `DeviceClient` (which `capture()` constructs internally) to connect and
+ * exchange hello — with the hello answer deliberately delayed, so the test
+ * below exercises the real handshake window instead of an instant
+ * auto-answer racing nothing. See device.test.ts's own `startRawServer` for
+ * the pattern this borrows; duplicated rather than imported because
+ * device.test.ts's version lives in a test file, not a shared module.
+ */
+function startDelayedHelloServer(helloDelayMs: number): net.Server {
+  return net.createServer((socket) => {
+    socket.on("error", () => {});
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        if (!line) continue;
+        let request: { id: number; method: string } | undefined;
+        try {
+          request = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (request?.method === "hello") {
+          setTimeout(() => {
+            socket.write(
+              JSON.stringify({
+                id: request!.id,
+                ok: true,
+                result: {
+                  protocol: 1,
+                  packageName: "com.example.shop",
+                  processName: "com.example.shop",
+                  versionName: "1.0.0-test",
+                  device: "Test Device",
+                  sdkInt: 34,
+                  startedAt: 0,
+                  collectors: [],
+                },
+              }) + "\n",
+            );
+          }, helloDelayMs);
+        }
+      }
+    });
+  });
+}
+
+describe("capture() never records hello: null for a session it reports as connected (GRA-157 AC5)", () => {
+  let dir: string;
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "porthole-capture-race-"));
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stderr.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("waits through a delayed handshake and writes a trace with hello actually set", async () => {
+    // Longer than capture.ts's own fixed 750ms post-command wait ("the last
+    // events are still in flight when the child exits") — that wait is
+    // unrelated to the connection race this AC is about, but it is long
+    // enough to accidentally swallow a short hello delay and make this test
+    // pass even against the pre-GRA-157 code, which was checked by hand
+    // against 200ms before landing on this value. 1200ms clears it with
+    // margin while staying well under the ~2s measured on real hardware.
+    const server = startDelayedHelloServer(1200);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as net.AddressInfo).port;
+    const out = path.join(dir, "race-trace.json");
+    const options: CaptureOptions = {
+      port,
+      scenario: "race",
+      out,
+      withEvents: false,
+      failOn: "nothing",
+      forward: false,
+      command: [], // nothing to run; the race is entirely in the connect phase
+    };
+
+    try {
+      const code = await capture(options);
+      expect(code).toBe(0);
+      const trace = JSON.parse(readFileSync(out, "utf8")) as Trace;
+      // This is the actual assertion: buildTrace() reads packageName off
+      // `hello?.packageName`, which silently becomes "" if hello was null —
+      // no throw, no error, just a poisoned trace with an empty app name.
+      // Verified by hand against the pre-GRA-157 device.ts (awaitConnection()
+      // resolved on the raw TCP connect rather than on hello): this exact
+      // assertion went red with `expected '' to be 'com.example.shop'`,
+      // confirming both that this test detects the race and that capture.ts's
+      // own unrelated 750ms post-command wait is not what was protecting it.
+      expect(trace.app.packageName).toBe("com.example.shop");
+    } finally {
+      server.close();
+    }
+  });
+});
 
 describe("report() and compare() exit codes", () => {
   let dir: string;
