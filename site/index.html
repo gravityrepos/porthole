@@ -168,15 +168,38 @@
         grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
       }
       .cols-mid {
-        /* #install's only user. 270px let three equal columns squeeze the
-           Connect card's pre blocks into horizontal scroll well before 1440
-           (GRA-136 measurement: the output block needs ~570px). 520px means
-           auto-fit drops to two columns — then one — before that happens,
-           instead of shrinking three columns until they scroll. Wrapped in
-           min(520px, 100%): minmax()'s min alone is a hard floor, which blew
-           the grid past a narrow viewport's own width (GRA-136, caught at
-           375px — the page-level horizontal scroll the ticket rules out). */
-        grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
+        /* #install's only user: Install, Connect, Ask. The Connect card needs
+           ~570px for its widest pre (GRA-136 measurement), so three columns
+           never fit inside the 1600px wrap and auto-fit always gave two —
+           which put Ask on a second row under Install with the whole height of
+           the Connect card as empty space between them, because a grid row is
+           as tall as its tallest card. Placed explicitly instead: Connect
+           takes the right column for both rows, Install and Ask stack on the
+           left with no gap. DOM order stays 01, 02, 03 for reading order. */
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-areas:
+          "install connect"
+          "ask connect";
+      }
+      .cols-mid > :nth-child(1) {
+        grid-area: install;
+      }
+      .cols-mid > :nth-child(2) {
+        grid-area: connect;
+      }
+      .cols-mid > :nth-child(3) {
+        grid-area: ask;
+      }
+      @media (max-width: 1160px) {
+        /* Two 520px columns plus the gap no longer fit the wrap; one column,
+           in reading order. */
+        .cols-mid {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-areas:
+            "install"
+            "connect"
+            "ask";
+        }
       }
       .cols-tight {
         grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
