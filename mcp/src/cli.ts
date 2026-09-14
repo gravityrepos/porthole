@@ -7,6 +7,7 @@ import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { runAdb } from "./adb.js";
 import { bootPortholeServer } from "./index.js";
+import { parsePort, requiredValue } from "./args.js";
 
 /**
  * The human entry point.
@@ -22,39 +23,6 @@ interface Options {
   serial?: string;
   forward: boolean;
   open: boolean;
-}
-
-/** A parse failure that names what was wrong, for the caller to print and exit on. */
-export interface ParseError {
-  message: string;
-}
-
-/**
- * A port a device or a browser can plausibly reach. `--port` used to be
- * `Number(argv[++i])` with no check at all: a missing value is `NaN`, and a
- * `NaN` port is not a refusal, it is a listener that never connects to
- * anything while printing nothing to say why. Below 1024 needs privileges
- * this process does not have on most platforms; above 65535 does not exist;
- * a fraction is a typo, not a port.
- */
-export function parsePort(raw: string | undefined, option: string): number | ParseError {
-  if (raw === undefined || raw === "") {
-    return { message: `${option} needs a port number` };
-  }
-  // A port is a run of decimal digits, nothing else: `Number()` also accepts
-  // " 8677 " (trims whitespace), "1e4" (scientific notation) and "0x2000"
-  // (hex) as finite integers, none of which anyone typed on purpose.
-  if (/^-?\d+$/.test(raw)) {
-    const value = Number(raw);
-    if (value < 1024 || value > 65535) {
-      return { message: `${option} ${raw} is out of range (must be 1024-65535)` };
-    }
-    return value;
-  }
-  if (/^-?\d+\.\d+$/.test(raw)) {
-    return { message: `${option} ${raw} must be a whole number` };
-  }
-  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
 }
 
 const USAGE = `
@@ -109,8 +77,18 @@ export function parse(argv: string[]): Options {
         process.exit(2);
       }
       options.uiPort = value;
-    } else if (arg === "--serial") options.serial = argv[++i];
-    else if (arg === "--no-forward") options.forward = false;
+    } else if (arg === "--serial") {
+      // Previously `argv[++i]` raw: a missing value was consumed silently, and
+      // `--serial --port 8677` swallowed "--port" as the serial and left
+      // "8677" to be rejected next as a nonsense option — blaming the wrong
+      // token for the actual mistake. requiredValue names --serial instead.
+      const value = requiredValue(argv[++i], "--serial");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.serial = value;
+    } else if (arg === "--no-forward") options.forward = false;
     else if (arg === "--no-open") options.open = false;
     else if (arg === "--help" || arg === "-h") {
       process.stdout.write(USAGE);
