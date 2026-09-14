@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { capture, compare, parseCapture, report, type CaptureOptions } from "./capture.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
+import { buildRig } from "./testing/harness.js";
+
+const ESCAPE = /\x1b/;
 
 /**
  * parsePort, parseFailOn, requiredValue and readTrace — what GRA-93 is
@@ -223,6 +226,137 @@ describe("report() and compare() exit codes", () => {
     const after = write("after.json", JSON.stringify(trace()));
     const code = await compare(baseline, after);
     expect(code).toBe(0);
+  });
+});
+
+/**
+ * GRA-142: report()'s print call is supposed to decide colour from the
+ * real stream it is about to write to, not from a hardcoded default —
+ * report.test.ts already proves renderReport(trace) with no options stays
+ * plain and renderReport(trace, { color: true }) colours ERROR; what is not
+ * proven there is that capture.ts's own print call actually reads
+ * process.stdout.isTTY and NO_COLOR and threads the result through. These
+ * force process.stdout.isTTY the way a real terminal would, which is what
+ * makes this a forced-TTY test of the wiring rather than of renderReport
+ * itself.
+ */
+describe("report()'s print call wires real TTY-ness through to renderReport (GRA-142)", () => {
+  let dir: string;
+  let stdout: string[];
+  let originalIsTTY: boolean | undefined;
+  let originalNoColor: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "porthole-capture-colour-"));
+    stdout = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout.push(String(chunk));
+      return true;
+    });
+    originalIsTTY = process.stdout.isTTY;
+    originalNoColor = process.env.NO_COLOR;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.stdout.isTTY = originalIsTTY;
+    if (originalNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = originalNoColor;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeTrace(): string {
+    const file = path.join(dir, "trace.json");
+    writeFileSync(
+      file,
+      JSON.stringify(
+        trace({
+          findings: [
+            { id: "e", severity: "error", confidence: "observed", title: "an error" },
+          ],
+        }),
+      ),
+    );
+    return file;
+  }
+
+  it("colours ERROR when stdout is a real TTY", async () => {
+    process.stdout.isTTY = true;
+    delete process.env.NO_COLOR;
+    const code = await report(writeTrace());
+    expect(code).toBe(0);
+    expect(stdout.join("")).toContain("\x1b[31mERROR");
+  });
+
+  it("stays plain when stdout is a TTY but NO_COLOR is set", async () => {
+    process.stdout.isTTY = true;
+    process.env.NO_COLOR = "1";
+    const code = await report(writeTrace());
+    expect(code).toBe(0);
+    expect(stdout.join("")).not.toMatch(ESCAPE);
+  });
+
+  it("stays plain when stdout is not a TTY, NO_COLOR or not (the piped/CI case, and every test above this one)", async () => {
+    process.stdout.isTTY = false;
+    delete process.env.NO_COLOR;
+    const code = await report(writeTrace());
+    expect(code).toBe(0);
+    expect(stdout.join("")).not.toMatch(ESCAPE);
+  });
+});
+
+/**
+ * GRA-142 AC: "The MCP `findings` tool's returned text contains no escape
+ * bytes (test)." This goes through the real tool handler in index.ts — not
+ * owned by this ticket, and not touched by it — via the same behavioural
+ * harness index.test.ts uses, rather than asserting against report.ts's own
+ * output (findings never calls renderReport; its summary is built inline in
+ * index.ts from plain template literals). Forcing process.stdout.isTTY here
+ * is deliberate: it proves the tool text stays plain even in an environment
+ * that would colour the CLI path, i.e. that "plain" is not an accident of
+ * this test always running non-TTY.
+ */
+describe("the MCP findings tool never emits colour (GRA-142)", () => {
+  let originalIsTTY: boolean | undefined;
+  let originalNoColor: string | undefined;
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = true;
+    originalNoColor = process.env.NO_COLOR;
+    // Cleared, not just left alone. An ambient NO_COLOR=1 — a real thing in
+    // some shells/CI, and how this exact gap was found — makes shouldColor()
+    // return false regardless of isTTY. Left untouched, that would silently
+    // neutralise this test's TTY-forcing the moment findings is ever routed
+    // through report.ts's colouring the way capture.ts is, which is the
+    // regression this test exists to catch: the test would keep passing in
+    // any NO_COLOR-set environment even after that regression landed.
+    delete process.env.NO_COLOR;
+  });
+
+  afterEach(() => {
+    process.stdout.isTTY = originalIsTTY;
+    if (originalNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = originalNoColor;
+  });
+
+  it("findings' returned text has no escape bytes even with a real finding and a forced TTY", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "db_start", t: 1_000, data: { id: "q-1" } },
+        { event: "db_end", t: 1_012, data: { id: "q-1", sql: "SELECT 1", onMainThread: "true" } },
+      ]);
+      const result = await rig.client.callTool("findings", {});
+      expect(result.isError).toBeFalsy();
+      const payload = result.json as { findings: Array<{ severity: string }> };
+      // Sanity check that this actually exercised a coloured-elsewhere
+      // severity, not an empty list that would pass trivially.
+      expect(payload.findings.some((f) => f.severity === "error")).toBe(true);
+      expect(result.text).not.toMatch(ESCAPE);
+    } finally {
+      await rig.close();
+    }
   });
 });
 
