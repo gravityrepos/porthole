@@ -449,6 +449,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async ({ trace, from, to, packageName, traceProcessor }): Promise<ToolResult> => {
+      // GRA-157: connection state checked before the trace_processor lookup,
+      // not after. A device still mid-handshake is not the caller's fault and
+      // not fixed by anything on this machine, so naming that first means a
+      // caller who has not connected yet is never told to go install a
+      // binary when the real, more immediate blocker is the device.
+      const app = packageName ?? device.hello?.packageName;
+      if (!app) {
+        // "Connect to the app" was printed even while the socket was already
+        // connected and just waiting on hello — telling someone to do a
+        // thing that is already in progress. Naming the handshake instead of
+        // the generic advice is the whole fix; the advice itself (pass
+        // `packageName`) still applies either way.
+        const because =
+          device.state === "handshaking"
+            ? "the app is still waiting on its first check-in — try again in a moment, "
+            : "connect to the app, ";
+        return fail(
+          `No package to scope to: ${because}or pass \`packageName\` — without it the questions ` +
+            "answer for the whole device, which is a different question.",
+        );
+      }
+
       const binary = traceProcessor ?? process.env.PORTHOLE_TRACE_PROCESSOR ?? findTraceProcessor();
       if (!binary) {
         return fail(
@@ -457,23 +479,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             "it where this tool looks, so nothing further needs configuring. An existing copy " +
             "works too — set PORTHOLE_TRACE_PROCESSOR or pass `traceProcessor`. Either way the " +
             "trace itself is already readable at ui.perfetto.dev.",
-        );
-      }
-
-      const app = packageName ?? device.hello?.packageName;
-      if (!app) {
-        // GRA-157: "Connect to the app" was printed even while the socket
-        // was already connected and just waiting on hello — telling someone
-        // to do a thing that is already in progress. Naming the handshake
-        // instead of the generic advice is the whole fix; the advice itself
-        // (pass `packageName`) still applies either way.
-        const because =
-          device.state === "handshaking"
-            ? "the app just connected and has not said hello yet — try again in a moment, "
-            : "connect to the app, ";
-        return fail(
-          `No package to scope to: ${because}or pass \`packageName\` — without it the questions ` +
-            "answer for the whole device, which is a different question.",
         );
       }
 
