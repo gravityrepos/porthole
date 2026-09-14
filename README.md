@@ -1441,5 +1441,7 @@ closed question generally; it is one behaviour, confirmed on one device and
 one fingerprint.
 
 **Not done:** multi-process apps, and Compose versions other than the one in
-the version catalog. A second physical device, to separate the app-label gap
-above from this specific build.
+the version catalog. A second physical device is still wanted — not to
+settle the `--app` question above, which is now answered, but because GRA-67
+wants everything in 0.1.0 proved on two physical devices and GRA-111 wants
+real artifacts with provenance from more than one.
