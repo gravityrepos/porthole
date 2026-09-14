@@ -76,7 +76,12 @@ export class DeviceClient extends EventEmitter {
 
   stop(): void {
     this.closed = true;
+    // Clearing the timeout without nulling the field leaves scheduleReconnect()'s
+    // guard (`this.closed || this.reconnectTimer`) permanently true after a later
+    // start(): the stale, already-cleared timer looks exactly like a reconnect
+    // that is still scheduled, so a subsequent disconnect never retries.
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.socket?.destroy();
     this.socket = null;
     this.setState("disconnected");

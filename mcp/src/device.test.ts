@@ -389,6 +389,37 @@ describe("reconnect", () => {
     await sleep(800);
     expect(states, "a stopped client must not schedule a reconnect").not.toContain("connecting");
   }, 10_000);
+
+  it("stop() clears its reconnect timer field, not just the timeout, so a later start() can reconnect again", async () => {
+    const server = trackServer(await startRawServer());
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await waitForState(client, "connected");
+
+    // Disconnect once so scheduleReconnect() runs and sets a pending timer.
+    await server.whenAccepted(1);
+    server.destroyAll();
+    await waitForState(client, "disconnected");
+
+    // stop() while that timer is still pending. If it clears the timeout but
+    // leaves `reconnectTimer` pointing at the (now-dead) handle, every later
+    // scheduleReconnect() call sees a truthy `reconnectTimer` and treats a
+    // reconnect as already scheduled, forever.
+    client.stop();
+    client.start();
+    await waitForState(client, "connected");
+
+    // A second, independent disconnect. This is the reconnect that a leaked
+    // `reconnectTimer` would silently swallow: scheduleReconnect()'s guard
+    // would still see the stale reference from before stop() and never
+    // schedule anything, so the client would sit in "disconnected" forever
+    // instead of moving to "connecting".
+    await server.whenAccepted(2);
+    server.destroyAll();
+    await waitForState(client, "disconnected");
+    await waitForState(client, "connecting", 2_000);
+  }, 10_000);
 });
 
 // ---------------------------------------------------------------------------
