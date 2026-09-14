@@ -39,6 +39,20 @@ process.argv = originalArgv;
 exitDuringImport.mockRestore();
 stdoutDuringImport.mockRestore();
 
+// Shared by every describe below that spawns the compiled CLI as a real
+// subprocess (both "capture command" and "porthole ui"): the behaviour they
+// check lives in top-level script code that only runs the way a user's
+// shell runs it once compiled and invoked as `node dist/cli.js`, not through
+// vitest's own transform of the source. One build for the whole file, not
+// one per describe.
+const mcpRoot = path.resolve(fileURLToPath(import.meta.url), "..", "..");
+const distCli = path.join(mcpRoot, "dist", "cli.js");
+const tscBin = path.join(mcpRoot, "node_modules", "typescript", "bin", "tsc");
+
+beforeAll(() => {
+  execFileSync(process.execPath, [tscBin, "-p", mcpRoot], { stdio: "pipe" });
+}, 30_000);
+
 // parsePort itself — the pure validator `parse()` calls — is tested once,
 // in args.test.ts, alongside capture.ts's copy of the same suite. Testing it
 // again here would only be testing the same imported function twice under a
@@ -147,10 +161,6 @@ describe("parse() wiring", () => {
  * and the refusal tests below assert that sentinel is absent too.
  */
 describe("capture command: refused before device contact", () => {
-  const mcpRoot = path.resolve(fileURLToPath(import.meta.url), "..", "..");
-  const distCli = path.join(mcpRoot, "dist", "cli.js");
-  const tscBin = path.join(mcpRoot, "node_modules", "typescript", "bin", "tsc");
-
   // findAdb()'s order, since GRA-119, is PORTHOLE_SDK_DIR, then
   // local.properties, then ANDROID_HOME/ANDROID_SDK_ROOT, and only then a
   // bare "adb"/"adb.exe" off PATH. The shim is therefore pointed at with
@@ -177,11 +187,6 @@ describe("capture command: refused before device contact", () => {
   const adbShimInit = path.join(adbSdkRoot, "adb-shim-init.cjs");
 
   beforeAll(() => {
-    // A real build, not the vitest-transformed source: dispatch order lives
-    // in top-level script code that only runs the way a user's shell would
-    // run it once it is compiled and invoked as `node dist/cli.js`.
-    execFileSync(process.execPath, [tscBin, "-p", mcpRoot], { stdio: "pipe" });
-
     // The fake adb has to be something the OS can actually execute directly:
     // a hand-written .bat/.cmd will not do, because CreateProcess (what
     // spawnSync uses without a shell) needs a real PE/ELF/Mach-O image for a
