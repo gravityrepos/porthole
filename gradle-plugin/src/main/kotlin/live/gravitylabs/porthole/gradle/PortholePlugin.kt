@@ -15,7 +15,9 @@ import java.util.Properties
  * Three jobs:
  *  1. put the real runtime on debug build types and the no-op on the rest
  *  2. generate the `porthole_port` resource so the port lives in one place
- *  3. own the `adb forward` and the connection file the MCP server reads
+ *  3. own the `adb forward` and record it to a connection file (see
+ *     [PortholeConnectTask.connectionFile]) — as of now nothing reads that
+ *     file back automatically
  *
  * Apply it to your app module:
  * ```kotlin
