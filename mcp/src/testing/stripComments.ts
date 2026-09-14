@@ -67,12 +67,24 @@
  * scanned file.
  */
 export function stripComments(text: string): string {
-  // GRA-166 item 6: normalise CRLF first. `.` in `/\/\/.*$/`-style patterns
-  // does not match "\r" (it is a line terminator to the regex engine even
-  // without the `s` flag), so a line ending in "\r\n" defeated the old
-  // line-comment stripping — see surface.test.ts's dedicated CRLF test for
-  // the full story. Collapsing "\r\n" to "\n" up front cannot change how
-  // many lines the file has, only how each line's own terminator is spelled.
+  // GRA-166 item 6 added this to fix a bug that no longer exists in this
+  // form: the *old* implementation stripped line comments with a per-line
+  // regex (`line.replace(/\/\/.*$/, "")`), and `.` in that pattern does not
+  // match "\r" — a line terminator to the regex engine even without the `s`
+  // flag — so a line ending in "\r\n" defeated that regex's stripping
+  // entirely, leaving the raw comment text in place. GRA-168 replaced that
+  // per-line regex with the character-by-character scan below, and the scan
+  // treats "\r" as an ordinary non-newline character in every mode (blanked
+  // like any other comment-content character while inside a comment, copied
+  // through unchanged everywhere else) — so it no longer needs this line to
+  // handle CRLF correctly. Mutation-tested: deleting this replace() leaves
+  // the whole suite green, including surface.test.ts's dedicated CRLF test
+  // (see the comment there, updated alongside this one, for what that test
+  // covers now that this line is no longer what makes it pass). Kept anyway
+  // so this function always returns text on one canonical line ending,
+  // which costs nothing here (an LF-normalised string has the same number
+  // of lines as the original) and means nothing downstream has to reason
+  // about which line ending it might see.
   const normalized = text.replace(/\r\n/g, "\n");
 
   type Mode = "code" | "line" | "block" | "dq" | "sq" | "template";

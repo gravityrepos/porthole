@@ -337,16 +337,24 @@ function productionSourceFiles(): string[] {
 
 describe("stripComments (GRA-166 item 6)", () => {
   it("blanks a // comment whose line ends in \\r\\n, not just \\n", () => {
-    // Direct unit test on the normalisation step itself. The two describe
-    // blocks below that consume stripComments() only ever read real files
-    // off this checkout, and .gitattributes pins every checkout to LF (see
-    // the doc comment above stripComments()) — so nothing else in this file
-    // exercises the CRLF branch, ever. Without this test, deleting
-    // `text.replace(/\r\n/g, "\n")` from stripComments() leaves the whole
-    // suite green: the fix would have shipped with zero coverage of the
-    // exact line it added. Feeding stripComments() a CRLF string directly,
-    // rather than writing a temp file or mutating index.ts, is what makes
-    // this test independent of the working tree's own line endings.
+    // Direct unit test on CRLF handling, independent of the working tree's
+    // own line endings (.gitattributes pins every checkout to LF, so
+    // nothing else in this file ever exercises this path against a real
+    // file). This test predates GRA-168's rewrite of stripComments() from a
+    // per-line regex to the character-by-character scan it is now, and its
+    // original comment claimed that deleting the regex-era CRLF
+    // normalisation would leave the whole suite green *without* this test
+    // existing to catch it — true at the time, but now stale in a more
+    // important way: mutation-tested after the rewrite, deleting that same
+    // normalisation line leaves the whole suite green *with* this test
+    // present and passing too, because the new scan handles "\r" correctly
+    // on its own (see the comment on `const normalized = ...` in
+    // testing/stripComments.ts for why). So this test no longer guards the
+    // normalisation line specifically — nothing does, because nothing needs
+    // to. What it still guards, and why it stays: that stripComments()
+    // correctly blanks a comment on a CRLF-ending line, which is worth
+    // pinning in its own right given .gitattributes makes it otherwise
+    // unreachable from any real file in this checkout.
     const crlf = 'const ok = 1;\r\n// state === "connected", left here on purpose\r\nconst after = 2;\r\n';
     const stripped = stripComments(crlf);
     expect(stripped).not.toContain('state === "connected"');
@@ -442,6 +450,87 @@ describe("stripComments (GRA-168 item 1): string literals do not open or close a
     ].join("\n");
     const scanned = stripComments(src);
     expect(scanned).toContain('state === "connected"');
+  });
+
+  it("an escaped quote inside a double-quoted string does not end the string early", () => {
+    // QA mutation-tested the escape-handling branch itself (the
+    // `if (c === "\\" && next !== undefined) { ... }` inside the dq/sq
+    // case) and found it untested: a mutant that drops it survives the
+    // whole suite. The reproduction has to land the parity exactly right
+    // to demonstrate a real miss rather than a harmless no-op: a string
+    // with *two* escaped quotes before the "/*" ends up back in the
+    // correct mode by coincidence (each mis-toggle cancels the last), so
+    // it does not expose the bug. One escaped quote does: without the
+    // escape check, `"he said \"hi; /*` closes the string right at the
+    // escaped quote (the backslash is read as ordinary content, so the
+    // quote after it looks like the real terminator), landing back in
+    // code mode with `/*` immediately ahead and no real closing quote
+    // left on the line at all. From there `/*` is read as a genuine
+    // block-comment opener and blanks everything up to the next `*/` it
+    // finds -- the real offender on the next line, included. That is a
+    // miss, not a false positive: the guard goes blind rather than crying
+    // wolf, but it is the same root cause as the headline case above,
+    // reached through the escape path instead of the string-tracking one.
+    // With the real escape handling, the backslash-quote pair is consumed
+    // as one unit, the string stays open (deliberately unterminated here)
+    // through "hi; /*", and the newline fallback below hands line 2 back
+    // to a fresh, un-confused code mode.
+    const src = [
+      'const s = "he said \\"hi; /*',
+      'const qaOffender = ({ state: "c" } as { state: string }).state === "connected";',
+      'const qaClose = "*/";',
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).toContain('state === "connected"');
+  });
+
+  it("an escaped backtick inside a template literal does not end the template early", () => {
+    // Same gap and same parity requirement as the double-quote escape test
+    // above, for the template-literal mode's own escape handling (a
+    // separate branch in the implementation, mutated and tested
+    // separately for the same reason the string and switch guards above
+    // are checked in their own describe blocks rather than assumed to
+    // share one fate). One escaped backtick, no further real closing
+    // backtick on the line, so the mutant's mis-toggle lands exactly on
+    // "/*". With real escape handling the template stays open past this
+    // line (template literals may legitimately span lines, so this mode
+    // has no newline fallback); that is harmless here because template
+    // mode only ever copies characters through unchanged; it never blanks
+    // anything, so the offender on line 2 survives regardless of which
+    // mode nominally contains it.
+    const src = [
+      "const s = `he said \\`hi; /*",
+      'const qaOffender = ({ state: "c" } as { state: string }).state === "connected";',
+      'const qaClose = "*/";',
+    ].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).toContain('state === "connected"');
+  });
+
+  it("a string opened by a stray quote inside an untokenized regex literal does not swallow a later real comment (no false positive)", () => {
+    // QA's highest-priority finding: the dq/sq newline fallback
+    // (`else if (c === "\n") { mode = "code"; }`) was untested, and its
+    // *absence* produces a false positive rather than a miss — the more
+    // dangerous direction per item 6's thesis, since a guard that cries
+    // wolf on a clean tree gets deleted by the next person who hits it.
+    //
+    // The mechanism: regex literals are not tokenized (documented residue
+    // #1 on stripComments() above), so `/can't/` is read as the two plain
+    // characters '/' and 'c', 'a', 'n', then an apostrophe that *does*
+    // open sq-string mode, because apostrophes are otherwise
+    // indistinguishable from real single-quote string delimiters to a
+    // scanner that does not know what a regex is. Without the newline
+    // fallback, that spurious string mode has no way to end before another
+    // apostrophe shows up, so it swallows every following line, comments
+    // included, verbatim into the "scanned" output -- and a genuine prose
+    // comment mentioning the ConnectionState comparison a line below then
+    // reads as unblanked code and gets flagged. With the fallback, the
+    // spurious string ends at the newline right after `can't`, and the
+    // real "//" comment on the next line is recognised and blanked
+    // normally.
+    const src = ["const re = /can't/;", '// state === "connected" is examined here'].join("\n");
+    const scanned = stripComments(src);
+    expect(scanned).not.toContain('state === "connected"');
   });
 });
 
