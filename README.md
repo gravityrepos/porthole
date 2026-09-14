@@ -1107,8 +1107,11 @@ names a package, and Google has republished packages under an unchanged name
 before with different bits behind them — pinning the API level alone
 reintroduces the exact drift this exists to remove. `avd-spec.json` also
 records the image's own `ro.build.id` and `ro.build.version.incremental`,
-read out of its `build.prop`, and both scripts warn if what actually
-installed doesn't match. The chosen image is `google_atd` (Google's
+read out of its `build.prop`, and both scripts fail (not just warn) if what
+actually installed doesn't match — a pinned AVD running on the wrong build
+would produce measurements nobody could trust, so this is the one check
+that has to stop the run rather than continue past it. The chosen image is
+`google_atd` (Google's
 automated-test device tag) rather than the default `google_apis`: it boots
 faster and carries less that can vary run to run. RAM, core count, GPU mode
 (`swiftshader_indirect`), LCD density and refresh rate are pinned in
@@ -1168,7 +1171,15 @@ post-boot step should run, because the action takes `api-level`/`target`/
 `arch` rather than a package id and so cannot pin the exact build the way
 `create.sh`/`create.ps1` do — asserting the installed build's
 `ro.build.version.incremental` after boot is what turns an otherwise
-unpinnable input into a detected pin.
+unpinnable input into a detected pin. `ci.inputs` carries every field that
+defines this AVD's identity, not just the ones the action happens to have
+native slots for: `cores` and `profile` are the action's own inputs;
+`refreshRateHz`'s pin rides along inside `emulator-options` as a real
+`-vsync-rate 60` emulator flag; and `lcdDensity` has no action input or CLI
+flag at all, so it is still recorded in `ci.inputs` (for a cache key built
+from this block to reflect the whole AVD rather than part of it) with a
+note for GRA-101 to apply it post-boot via `adb shell wm density 420`, the
+same pattern the build-id check already uses.
 
 ## Wire protocol
 

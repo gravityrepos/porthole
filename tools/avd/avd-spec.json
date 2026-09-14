@@ -21,7 +21,7 @@
   },
 
   "config": {
-    "$comment": "Written into the AVD's config.ini after creation, every run, so a laptop AVD created months ago converges to the same values as one created today. Keys map 1:1 onto config.ini keys; see create.sh/create.ps1 applyConfig.",
+    "$comment": "Written into the AVD's config.ini after creation, every run, so a laptop AVD created months ago converges to the same values as one created today. Most keys map 1:1 onto config.ini keys; see create.sh/create.ps1 applyConfig. refreshRateHz is the one exception worth flagging: the emulator has no 'hw.lcd.refreshRate' property (that key does not exist in emulator/lib/hardware-properties.ini and is silently ignored if written) -- the real key is 'hw.lcd.vsync'. This is the field mcp/src/report.ts's comparability() gates on, via the runtime's own Display.getRefreshRate() reading, so writing the wrong ini key does not just fail to pin the number, it makes the gate check something that was never actually set. snapshotsEnabled=false is enforced by disabling every snapshot-related knob together (snapshot.present, fastboot.forceColdBoot/forceFastBoot, firstboot.bootFromLocalSnapshot/saveToLocalSnapshot) -- a pinned AVD exists to remove drift, and a boot that can silently resume from a stale snapshot on some knobs while others insist on cold boot is exactly that drift, one level down.",
     "ramSizeMb": 4096,
     "cpuCores": 4,
     "gpuMode": "swiftshader_indirect",
@@ -32,15 +32,18 @@
   },
 
   "ci": {
-    "$comment": "Handed to GRA-101 (owns .github/workflows/*, not touched here). reactivecircus/android-emulator-runner takes api-level/target/arch, not a packageId, so it cannot pin the build directly the way create.sh/create.ps1 do -- it resolves 'android-35 google_atd x86_64' through sdkmanager same as anyone typing that string would, and Google could republish under that tag. The mitigating step, left for GRA-101 to wire in: after boot, run `adb shell getprop ro.build.version.incremental` and fail the job if it does not equal systemImage.buildIncremental below. That turns an unpinnable input into a detected pin.",
+    "$comment": "Handed to GRA-101 (owns .github/workflows/*, not touched here). reactivecircus/android-emulator-runner takes api-level/target/arch, not a packageId, so it cannot pin the build directly the way create.sh/create.ps1 do -- it resolves 'android-35 google_atd x86_64' through sdkmanager same as anyone typing that string would, and Google could republish under that tag. The mitigating step, left for GRA-101 to wire in: after boot, run `adb shell getprop ro.build.version.incremental` and fail the job if it does not equal systemImage.buildIncremental below. That turns an unpinnable input into a detected pin. inputs.profile and inputs.cores are the action's own native inputs and pin device.profile/config.cpuCores directly. inputs.emulator-options carries '-vsync-rate 60' (a real emulator flag -- see `emulator -help-all`) to pin config.refreshRateHz the same way create.sh/create.ps1 do via hw.lcd.vsync. inputs.lcdDensity has no equivalent in this action (no CLI flag, no action input) and cannot be pinned at boot time the same way; it is still recorded here so a cache key built from this whole block reflects the AVD's full identity rather than a partial one, and GRA-101 should apply it post-boot the same way postBootVerification already does for the build pin, e.g. `adb shell wm density 420` (a real, verified WindowManager shell command) followed by re-reading `adb shell wm density` to confirm it took.",
     "action": "reactivecircus/android-emulator-runner",
     "inputs": {
       "api-level": 35,
       "target": "google_atd",
       "arch": "x86_64",
+      "profile": "pixel_6",
+      "cores": 4,
       "ram-size": "4096M",
       "disk-size": "6144M",
-      "emulator-options": "-no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none"
+      "lcdDensity": 420,
+      "emulator-options": "-no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none -vsync-rate 60"
     },
     "postBootVerification": {
       "property": "ro.build.version.incremental",

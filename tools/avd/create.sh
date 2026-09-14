@@ -101,8 +101,23 @@ fi
 
 CMDLINE_BIN="$SDK_ROOT/cmdline-tools/latest/bin"
 if [ ! -d "$CMDLINE_BIN" ]; then
+  if [ ! -d "$SDK_ROOT/cmdline-tools" ]; then
+    # Guard this explicitly: under `set -euo pipefail`, `find` on a directory
+    # that does not exist fails, and piping its output into `sort | head`
+    # inside a command substitution propagates that failure straight through
+    # `set -e` -- the script would exit 1 here with no message at all, before
+    # ever reaching the "sdkmanager/avdmanager not found" check below.
+    echo "error: no cmdline-tools directory found at $SDK_ROOT/cmdline-tools" >&2
+    echo "       install the \"Android SDK Command-line Tools\" package (Android Studio > SDK Manager > SDK Tools > check \"Android SDK Command-line Tools\"), or point ANDROID_HOME/ANDROID_SDK_ROOT at an SDK that already has it." >&2
+    exit 1
+  fi
   # Fall back to whatever versioned cmdline-tools directory exists.
-  CMDLINE_BIN="$(find "$SDK_ROOT/cmdline-tools" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -r | head -n1)/bin"
+  VERSIONED_DIR="$(find "$SDK_ROOT/cmdline-tools" -maxdepth 1 -mindepth 1 -type d | sort -r | head -n1)"
+  if [ -z "$VERSIONED_DIR" ]; then
+    echo "error: $SDK_ROOT/cmdline-tools exists but contains no versioned tools directory (expected e.g. \"latest\" or \"13.0\")" >&2
+    exit 1
+  fi
+  CMDLINE_BIN="$VERSIONED_DIR/bin"
 fi
 SDKMANAGER="$CMDLINE_BIN/sdkmanager"
 AVDMANAGER="$CMDLINE_BIN/avdmanager"
@@ -128,12 +143,24 @@ fi
 # stale -- either way it is a finding, not something to silently proceed past.
 ACTUAL_BUILD_ID="$(grep -o '^ro.build.id=.*' "$IMAGE_DIR/build.prop" 2>/dev/null | cut -d= -f2- || true)"
 ACTUAL_INCREMENTAL="$(grep -o '^ro.build.version.incremental=.*' "$IMAGE_DIR/build.prop" 2>/dev/null | cut -d= -f2- || true)"
+PIN_MISMATCH=0
 if [ -n "$ACTUAL_BUILD_ID" ] && [ "$ACTUAL_BUILD_ID" != "$BUILD_ID" ]; then
-  echo "warning: installed image build id ($ACTUAL_BUILD_ID) does not match the pin in avd-spec.json ($BUILD_ID)" >&2
-  echo "         this AVD will not be comparable to captures taken against the pinned build." >&2
+  echo "error: installed image build id ($ACTUAL_BUILD_ID) does not match the pin in avd-spec.json ($BUILD_ID)" >&2
+  PIN_MISMATCH=1
 fi
 if [ -n "$ACTUAL_INCREMENTAL" ] && [ "$ACTUAL_INCREMENTAL" != "$BUILD_INCREMENTAL" ]; then
-  echo "warning: installed image build incremental ($ACTUAL_INCREMENTAL) does not match the pin ($BUILD_INCREMENTAL)" >&2
+  echo "error: installed image build incremental ($ACTUAL_INCREMENTAL) does not match the pin ($BUILD_INCREMENTAL)" >&2
+  PIN_MISMATCH=1
+fi
+if [ "$PIN_MISMATCH" -eq 1 ]; then
+  # A pinned AVD that silently runs on the wrong build produces measurements
+  # nobody can trust -- this is the one check that is the whole point of the
+  # ticket, so it fails the script rather than warn and carry on. Re-pin
+  # avd-spec.json deliberately (see its systemImage.$comment) if Google has
+  # genuinely republished this package id with different bits behind it.
+  echo "         this AVD would not be comparable to captures taken against the pinned build." >&2
+  echo "         re-pin avd-spec.json's systemImage.buildId/buildIncremental deliberately, or remove the stale image and re-run." >&2
+  exit 1
 fi
 
 # --- 2. AVD: create only if it does not already exist -----------------------
@@ -177,12 +204,26 @@ set_ini_key "hw.cpu.ncore" "$CORES"
 set_ini_key "hw.gpu.enabled" "$GPU_ENABLED"
 set_ini_key "hw.gpu.mode" "$GPU_MODE"
 set_ini_key "hw.lcd.density" "$LCD_DENSITY"
-set_ini_key "hw.lcd.refreshRate" "$REFRESH_HZ"
+# hw.lcd.refreshRate does not exist as an emulator hardware property (see
+# emulator/lib/hardware-properties.ini) and is silently ignored -- the real
+# key controlling the guest display's refresh rate is hw.lcd.vsync.
+set_ini_key "hw.lcd.vsync" "$REFRESH_HZ"
 if [ "$SNAPSHOTS" = "yes" ]; then
   set_ini_key "snapshot.present" "yes"
 else
+  # A pinned AVD's whole point is a reproducible, cold-start boot, so every
+  # snapshot-related key has to agree that snapshots are off -- not just the
+  # ones that happen to win by precedence. fastboot.forceColdBoot alone was
+  # observed (QA on a471739) to still leave the AVD writing a
+  # 'default_boot' snapshot on exit, because fastboot.forceFastBoot and the
+  # firstboot.* keys were left at the pixel_6 profile's defaults (all "yes").
+  # Setting all five together removes the drift instead of relying on one
+  # key outranking four contradictory ones.
   set_ini_key "snapshot.present" "no"
   set_ini_key "fastboot.forceColdBoot" "yes"
+  set_ini_key "fastboot.forceFastBoot" "no"
+  set_ini_key "firstboot.bootFromLocalSnapshot" "no"
+  set_ini_key "firstboot.saveToLocalSnapshot" "no"
 fi
 
 echo ""

@@ -100,12 +100,29 @@ if (Test-Path $buildPropPath) {
   $buildProp = Get-Content $buildPropPath
   $actualBuildId = ($buildProp | Where-Object { $_ -match '^ro\.build\.id=' }) -replace '^ro\.build\.id=', ''
   $actualIncremental = ($buildProp | Where-Object { $_ -match '^ro\.build\.version\.incremental=' }) -replace '^ro\.build\.version\.incremental=', ''
+  # Write-Warning rather than Write-Error here: with $ErrorActionPreference
+  # = "Stop" (set at the top of this script), Write-Error is a terminating
+  # error and would abort on the *first* mismatch found, before the second
+  # check runs and before the combined failure message below can print.
+  # Write-Warning is unaffected by $ErrorActionPreference, so both checks
+  # run and report before the script actually fails.
+  $pinMismatch = $false
   if ($actualBuildId -and $actualBuildId -ne $buildId) {
     Write-Warning "installed image build id ($actualBuildId) does not match the pin in avd-spec.json ($buildId)"
-    Write-Warning "this AVD will not be comparable to captures taken against the pinned build."
+    $pinMismatch = $true
   }
   if ($actualIncremental -and $actualIncremental -ne $buildIncremental) {
     Write-Warning "installed image build incremental ($actualIncremental) does not match the pin ($buildIncremental)"
+    $pinMismatch = $true
+  }
+  if ($pinMismatch) {
+    # A pinned AVD that silently runs on the wrong build produces
+    # measurements nobody can trust -- this is the one check that is the
+    # whole point of the ticket, so it fails the script rather than warn
+    # and carry on. Re-pin avd-spec.json deliberately (see its
+    # systemImage.$comment) if Google has genuinely republished this
+    # package id with different bits behind it.
+    Write-Error "this AVD would not be comparable to captures taken against the pinned build. Re-pin avd-spec.json's systemImage.buildId/buildIncremental deliberately, or remove the stale image and re-run."
   }
 }
 
@@ -130,17 +147,61 @@ if (-not (Test-Path $configIniPath)) {
 # --- 3. config.ini: always converge the pinned keys --------------------------
 # Applied on every run (not just at creation) so an AVD from an older run of
 # this script ends up identical to one created fresh from today's spec.
+#
+# Byte parity with create.sh matters here, not just content parity: two
+# scripts that agree on every value but disagree on encoding still produce a
+# "pinned" AVD that is not actually the same artefact. PowerShell 5.1's
+# `Set-Content -Encoding utf8` writes a UTF-8 BOM, and both Set-Content and
+# Add-Content join lines with `[Environment]::NewLine` (CRLF on Windows) --
+# create.sh's awk/echo pipeline does neither. So this reads and rewrites the
+# whole file ourselves: decode as UTF-8 ignoring any BOM that avdmanager's
+# own output happened to include, normalize every line ending to LF before
+# touching anything (so an untouched line does not silently keep a CRLF
+# create.sh would never have written), then write back with
+# [System.Text.UTF8Encoding]::new($false) -- UTF-8, no BOM -- joined with
+# LF only.
+$noBomUtf8 = New-Object System.Text.UTF8Encoding($false)
+
+function Read-IniLines {
+  param([string]$Path)
+  $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+  if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+  $text = $text -replace "`r`n", "`n"
+  # Strip exactly one trailing newline before splitting, the same way awk's
+  # per-record read treats "line\n" as one record rather than two ("line"
+  # and ""). Skipping this turns every well-formed (newline-terminated)
+  # file into one with a phantom blank last line, which then survives as a
+  # real blank line in the middle of the file the moment anything is
+  # appended after it.
+  if ($text.EndsWith("`n")) { $text = $text.Substring(0, $text.Length - 1) }
+  return $text -split "`n"
+}
+
+function Write-IniLines {
+  param([string]$Path, [string[]]$Lines)
+  # create.sh's awk rewrite terminates every record (ORS="\n") and its
+  # append path (`echo ... >> file`) always adds a trailing "\n" too, so a
+  # config.ini touched by that script is always newline-terminated. Match
+  # that unconditionally rather than only when the input happened to be.
+  [System.IO.File]::WriteAllText($Path, (($Lines -join "`n") + "`n"), $noBomUtf8)
+}
+
 function Set-IniKey {
   param([string]$Path, [string]$Key, [string]$Value)
-  $lines = Get-Content $Path
+  $lines = Read-IniLines $Path
   $pattern = "^$([regex]::Escape($Key))\s*="
   if ($lines -match $pattern) {
     $lines = $lines | ForEach-Object {
       if ($_ -match $pattern) { "$Key=$Value" } else { $_ }
     }
-    Set-Content -Path $Path -Value $lines -Encoding utf8
+    Write-IniLines -Path $Path -Lines $lines
   } else {
-    Add-Content -Path $Path -Value "$Key=$Value" -Encoding utf8
+    # Matches create.sh's `echo "$key=$value" >> file`: appended as one more
+    # line after whatever was already there (including a trailing blank
+    # entry left behind by the `-split` above if the file ended in a
+    # newline, which reproduces create.sh's own trailing-newline behavior).
+    $lines += "$Key=$Value"
+    Write-IniLines -Path $Path -Lines $lines
   }
 }
 
@@ -149,12 +210,26 @@ Set-IniKey -Path $configIniPath -Key "hw.cpu.ncore" -Value $cores
 Set-IniKey -Path $configIniPath -Key "hw.gpu.enabled" -Value $gpuEnabled
 Set-IniKey -Path $configIniPath -Key "hw.gpu.mode" -Value $gpuMode
 Set-IniKey -Path $configIniPath -Key "hw.lcd.density" -Value $lcdDensity
-Set-IniKey -Path $configIniPath -Key "hw.lcd.refreshRate" -Value $refreshHz
+# hw.lcd.refreshRate does not exist as an emulator hardware property (see
+# emulator/lib/hardware-properties.ini) and is silently ignored -- the real
+# key controlling the guest display's refresh rate is hw.lcd.vsync.
+Set-IniKey -Path $configIniPath -Key "hw.lcd.vsync" -Value $refreshHz
 if ($snapshotsEnabled) {
   Set-IniKey -Path $configIniPath -Key "snapshot.present" -Value "yes"
 } else {
+  # A pinned AVD's whole point is a reproducible, cold-start boot, so every
+  # snapshot-related key has to agree that snapshots are off -- not just the
+  # ones that happen to win by precedence. fastboot.forceColdBoot alone was
+  # observed (QA on a471739) to still leave the AVD writing a
+  # 'default_boot' snapshot on exit, because fastboot.forceFastBoot and the
+  # firstboot.* keys were left at the pixel_6 profile's defaults (all "yes").
+  # Setting all five together removes the drift instead of relying on one
+  # key outranking four contradictory ones.
   Set-IniKey -Path $configIniPath -Key "snapshot.present" -Value "no"
   Set-IniKey -Path $configIniPath -Key "fastboot.forceColdBoot" -Value "yes"
+  Set-IniKey -Path $configIniPath -Key "fastboot.forceFastBoot" -Value "no"
+  Set-IniKey -Path $configIniPath -Key "firstboot.bootFromLocalSnapshot" -Value "no"
+  Set-IniKey -Path $configIniPath -Key "firstboot.saveToLocalSnapshot" -Value "no"
 }
 
 Write-Output ""
