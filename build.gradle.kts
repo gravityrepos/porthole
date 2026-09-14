@@ -275,17 +275,48 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
         // `:app:dependencies` is a *report* task: it renders an unresolved
         // dependency as "FAILED" inside the printed tree and still exits 0,
         // so it cannot be the thing releaseDryRun asserts against — it never
-        // actually resolves anything (GRA-100 QA, second pass). Calling
-        // Configuration.resolve() directly forces real resolution and throws
+        // actually resolves anything (GRA-100 QA, second pass). Reading
+        // `resolvedConfiguration.resolvedArtifacts` forces the same real
+        // resolution `Configuration.resolve()` did and throws
         // (ResolveException, non-zero exit) the moment an artifact is
-        // missing. Both classpaths are resolved, not just debug's: the
-        // plugin wires the debug build type to `runtime` and every other
-        // build type to `runtime-noop` (AndroidWiring.kt), so only resolving
+        // missing. Both classpaths are checked, not just debug's: the plugin
+        // wires the debug build type to `runtime` and every other build type
+        // to `runtime-noop` (AndroidWiring.kt), so only checking
         // debugRuntimeClasspath would leave runtime-noop untested.
+        //
+        // Resolving without success is not enough to prove either coordinate
+        // is present (GRA-165): `porthole { enabled.set(false) }` makes
+        // AndroidWiring.wire() return before adding any dependency at all
+        // (AndroidWiring.kt:59), so both configurations still resolve — to
+        // an empty, and therefore trivially successful, artifact set. The
+        // plugin marker itself needs no separate check here: applying
+        // `id("live.gravitylabs.porthole")` above already forced Gradle to
+        // resolve it from this consumer's exclusiveContent-scoped
+        // mavenLocal() before this build script could even configure, so a
+        // withheld marker fails the whole run before `resolvePorthole` is
+        // reached.
         tasks.register("resolvePorthole") {
             doLast {
-                configurations.getByName("debugRuntimeClasspath").resolve()
-                configurations.getByName("releaseRuntimeClasspath").resolve()
+                // No string templates in these messages: this whole file is
+                // itself the text of an outer Kotlin string template one
+                // level up (see writeScratchConsumer in the root
+                // build.gradle.kts), which would try to interpolate a bare
+                // ${'$'}configurationName here against its own scope, not
+                // this one. Plain concatenation sidesteps that entirely.
+                fun requirePortholeArtifact(configurationName: String, module: String) {
+                    val artifacts = configurations.getByName(configurationName).resolvedConfiguration.resolvedArtifacts
+                    check(
+                        artifacts.any {
+                            it.moduleVersion.id.group == "live.gravitylabs.porthole" && it.moduleVersion.id.name == module
+                        },
+                    ) {
+                        configurationName + " resolved (" + artifacts.size + " artifacts) but none was " +
+                            "live.gravitylabs.porthole:" + module + " — an empty or disabled porthole { } " +
+                            "block resolves just as successfully as a real dependency does."
+                    }
+                }
+                requirePortholeArtifact("debugRuntimeClasspath", "runtime")
+                requirePortholeArtifact("releaseRuntimeClasspath", "runtime-noop")
             }
         }
         """.trimIndent() + "\n",

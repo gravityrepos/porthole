@@ -25,6 +25,10 @@ dist/
 coverage/
 *.tgz
 
+# JUnit XML the vitest suites write when run with --reporter=junit
+# (CI does this; a local run reproducing that shape must not dirty the tree).
+mcp/test-results/
+
 # The npm package publishes dist/ and ui/dist/ through its `files` allowlist,
 # which wins over this file — verified with `npm pack --dry-run`. Ignoring them
 # here keeps build output out of git without keeping it out of the tarball.
