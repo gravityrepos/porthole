@@ -412,7 +412,10 @@
            term keeps the disc running off the right edge once the window is
            wider than that — at 1920 a fold-sized disc stops short of the edge
            and leaves the hole the founder complained about. The 156% ceiling
-           is where the rim stops reading as a circle. */
+           is where the rim stops reading as a circle. The bare 118% first is
+           the fallback: an engine that will not resolve a percentage inside
+           clamp() here drops that line and keeps the concept's own size. */
+        height: 118%;
         height: clamp(118%, calc(100vw - var(--art-left) + 6vw), 156%);
         width: auto;
         aspect-ratio: 1 / 1;
