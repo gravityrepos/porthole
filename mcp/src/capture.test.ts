@@ -318,14 +318,26 @@ describe("report()'s print call wires real TTY-ness through to renderReport (GRA
  */
 describe("the MCP findings tool never emits colour (GRA-142)", () => {
   let originalIsTTY: boolean | undefined;
+  let originalNoColor: string | undefined;
 
   beforeEach(() => {
     originalIsTTY = process.stdout.isTTY;
     process.stdout.isTTY = true;
+    originalNoColor = process.env.NO_COLOR;
+    // Cleared, not just left alone. An ambient NO_COLOR=1 — a real thing in
+    // some shells/CI, and how this exact gap was found — makes shouldColor()
+    // return false regardless of isTTY. Left untouched, that would silently
+    // neutralise this test's TTY-forcing the moment findings is ever routed
+    // through report.ts's colouring the way capture.ts is, which is the
+    // regression this test exists to catch: the test would keep passing in
+    // any NO_COLOR-set environment even after that regression landed.
+    delete process.env.NO_COLOR;
   });
 
   afterEach(() => {
     process.stdout.isTTY = originalIsTTY;
+    if (originalNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = originalNoColor;
   });
 
   it("findings' returned text has no escape bytes even with a real finding and a forced TTY", async () => {
