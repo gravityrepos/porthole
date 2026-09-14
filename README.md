@@ -335,6 +335,28 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 The MCP server and the UI are independent. Run either, or both at once — they
 each open their own connection to the device.
 
+**Environment variables**, for anyone not going through the generated
+`.mcp.json` above:
+
+| variable | default | what it sets |
+| --- | --- | --- |
+| `PORTHOLE_HOST` | `127.0.0.1` | host the forwarded device socket is reachable on |
+| `PORTHOLE_PORT` | `8677` | device port the porthole listens on |
+| `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
+| `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for [system traces](#system-traces) |
+| `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |
+
+Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
+and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by
+`portholeMcpConfig`, which knows both with certainty — the Gradle root
+project directory, and the SDK resolved the same way the plugin resolves it
+for `adb` itself — rather than guessing from whatever directory an MCP
+client happened to launch the server in. `porthole_status` reports which
+source each came from (`PORTHOLE_PROJECT_ROOT` or `cwd` for the root;
+`PORTHOLE_SDK_DIR`, `local.properties`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` or
+`PATH` for the SDK), which is where to look first if a resolved path looks
+wrong.
+
 ## What you actually have to write
 
 The short answer to "is it just the plugin and a dependency": nearly.
