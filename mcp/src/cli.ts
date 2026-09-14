@@ -6,6 +6,7 @@ import { DeviceClient } from "./device.js";
 import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { runAdb } from "./adb.js";
+import { bootPortholeServer } from "./index.js";
 import { parsePort, requiredValue } from "./args.js";
 
 /**
@@ -187,7 +188,13 @@ const [command, ...rest] = process.argv.slice(2);
 if (command === "ui") {
   await ui(rest);
 } else if (command === "mcp") {
-  await import("./index.js");
+  // Calls the same boot function `node dist/index.js` uses under its own
+  // `isMainModule()` guard, rather than `import("./index.js")`ing for the
+  // side effect. That side-effect import used to be how this worked, but it
+  // silently stopped booting anything once the boot moved behind the guard:
+  // `argv[1]` here is `cli.js`, so the guard (correctly) never fires for us.
+  // One boot path, two callers.
+  await bootPortholeServer();
 } else if (command === "capture") {
   const options = parseCapture(rest);
   if (options.forward) {

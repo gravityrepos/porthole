@@ -18,26 +18,38 @@ import type { DeviceEvent } from "./device.js";
 
 const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
 
-/** A tool's own block. Bare names also appear in the follow-up map, earlier. */
+/**
+ * A tool's own block. Bare names also appear in the follow-up map, earlier.
+ *
+ * Matches `server.registerTool(` followed by the tool's name on the next
+ * line, whatever the indentation — index.ts lives inside a function now (see
+ * `createPortholeServer`), and prettier is free to reindent it. The tests
+ * here care about a tool's wording and shape, never about the column it
+ * starts in.
+ */
 function toolSource(name: string): string {
-  const start = source.indexOf(`server.registerTool(
-  "${name}",`);
-  if (start < 0) throw new Error(`no such tool: ${name}`);
-  const next = source.indexOf("server.registerTool(", start + 20);
-  return source.slice(start, next < 0 ? undefined : next);
+  const pattern = new RegExp(`server\\.registerTool\\(\\s*\\n\\s*"${name}",`);
+  const match = pattern.exec(source);
+  if (!match) throw new Error(`no such tool: ${name}`);
+  const rest = source.slice(match.index + match[0].length);
+  const next = rest.search(/server\.registerTool\(/);
+  return source.slice(match.index, next < 0 ? undefined : match.index + match[0].length + next);
 }
 
 const event = (t: number, name: string, data: Record<string, unknown> = {}): DeviceEvent =>
   ({ t, seq: t, event: name, data }) as DeviceEvent;
 
 describe("the window", () => {
-  it("is the same three parameters on every tool that spans time", () => {
-    // Six tools take a window. If one of them hand-rolls its own again, an
-    // agent can no longer carry bounds between calls — which is how `timeline`
-    // ended up the only tool that could not be asked about a moment.
-    const shared = source.match(/\.\.\.windowShape/g) ?? [];
-    expect(shared.length).toBe(5); // the sixth uses `inputSchema: windowShape` whole
-
+  it("gives every windowed tool the same shared definition, not a hand-rolled copy", () => {
+    // The complaint this guards against is not "how many tools take a window" —
+    // that number grows every time a ticket adds one, and pinning it is what
+    // made this file need editing for reasons unrelated to correctness. What
+    // must stay true regardless of how many tools there are is that none of
+    // them declares its own copy of `sinceMs`/`from`/`to`: there is exactly
+    // one such declaration in the whole file, the shared `windowShape` itself.
+    // A tool that grows a second one is the `timeline` bug happening again —
+    // see index.test.ts for the behavioural version of this check, which
+    // catches it even if the second copy is spelled differently.
     const handRolled = source.match(/^\s+sinceMs: z/gm) ?? [];
     expect(handRolled.length, "a tool has grown its own window again").toBe(1); // the definition
   });
@@ -186,7 +198,9 @@ describe("the entry point", () => {
 describe("the server version", () => {
   it("is read from the package rather than retyped", () => {
     // The same drift that put a stale npm package name in the Gradle plugin.
-    expect(source).toContain("version: pkg.version");
+    // `options.version` is the test-only override `createPortholeServer`
+    // accepts; the fallback is still the package, never a literal.
+    expect(source).toContain("options.version ?? pkg.version");
     expect(source).not.toMatch(/version: "\d+\.\d+\.\d+"/);
   });
 });
