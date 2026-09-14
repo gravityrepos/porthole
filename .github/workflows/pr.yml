@@ -143,18 +143,31 @@ jobs:
                   f.write(text + "\n")
           PY
 
-      # Uploaded on every run, not just on failure: the defect this ticket
-      # exists for (GRA-75, GRA-137, GRA-144, and the local.properties skip
-      # GRA-150 hit) is invisible precisely on green builds, so the evidence
-      # has to survive a passing run too.
-      - name: Upload test reports
+      # AC1's artifact, split out from the HTML reports below and uploaded
+      # on every run, not just on failure: the defect this ticket exists for
+      # (GRA-75, GRA-137, GRA-144, and the local.properties skip GRA-150
+      # hit) is invisible precisely on green builds, so the evidence has to
+      # survive a passing run too. Kept small on purpose — just the XML, a
+      # few hundred KB across every module — so this stays seconds, not
+      # minutes, on the common case of a green PR.
+      - name: Upload JUnit XML
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: gradle-junit-xml
+          path: '**/build/test-results/'
+          if-no-files-found: warn
+
+      # The heavier HTML reports stay failure-only, unchanged from before
+      # this ticket: they are for a human digging into a red build, not for
+      # the every-PR signal AC1 asks for, and uploading them unconditionally
+      # would cost real time on every green run for no one to ever open.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
           name: gradle-test-reports
-          path: |
-            **/build/reports/tests/
-            **/build/test-results/
+          path: '**/build/reports/tests/'
           if-no-files-found: warn
 
       # site/api (Dokka's HTML) and the generated PortholeVersion.kt are the
