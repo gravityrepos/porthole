@@ -20,6 +20,68 @@ interface Props {
   askLabel: string;
 }
 
+interface ConnectionDisplay {
+  /** A CSS colour, used for both the dot and its label. */
+  tone: string;
+  label: string;
+  /** Only "connected" pulses — it is the one state actually receiving events. */
+  pulse: boolean;
+}
+
+/**
+ * GRA-161: what the pill says, pulled out of Header() so it can be tested
+ * without rendering a component — this workspace has no DOM-rendering test
+ * setup (see Header.test.tsx), the same reason FindingsLoader lives outside
+ * InsightsPanel.
+ *
+ * The switch below is intentionally NOT the never-guarded, throw-on-default
+ * pattern `device.ts`'s pendingMessage() and the server-side isAttached() /
+ * isConnected() / isHandshaking() use (GRA-162). Those run in a Node process
+ * where every ConnectionState value is produced by this same build, so a
+ * value outside the union really is unreachable and throwing to say so is
+ * safe. Here it is not: `connection` arrives over a WebSocket as a plain
+ * string, and the browser tab can be a slightly older build than the server
+ * sending it (a deploy mid-flight, a stale reload) — so a state this
+ * particular build's `ConnectionState` does not know about is a real
+ * possibility this render has to survive, not a bug to throw on.
+ *
+ * That is also the actual content of GRA-161 AC4 and GRA-162's shared
+ * argument: before this ticket, an unrecognised string fell through to the
+ * `else` branch, which was "disconnected" — a state this build has never
+ * heard of rendered as a proven failure. The `default` case below is the
+ * fix: unknown gets the same neutral treatment as "connecting" (a transient,
+ * unproven state, not an alarm), with the raw value kept in the label so it
+ * is debuggable rather than silently swallowed.
+ */
+export function connectionDisplay(
+  connection: ConnectionState,
+  eventsPerSecond: number,
+): ConnectionDisplay {
+  switch (connection) {
+    case "connected":
+      return { tone: "var(--accent)", label: `live · ${eventsPerSecond} evt/s`, pulse: true };
+    case "handshaking":
+      // GRA-161 AC2: neither the green "connected" pill (the app has not
+      // checked in yet, so that claim is not true) nor the red
+      // "disconnected" one (the socket is up; nothing has failed) — its own
+      // wording, matching the server's HANDSHAKE_PENDING_MESSAGE in
+      // substance: connected to the device, waiting on the app.
+      return { tone: "var(--color-muted)", label: "connected · waiting on app", pulse: false };
+    case "connecting":
+      // Also neutral, not the red it was before this ticket: dialling the
+      // socket has not failed at anything yet either. Handshaking and
+      // connecting are both "in progress, not proven bad" and now read that
+      // way instead of the pill inconsistently calling one of them a
+      // failure and not the other.
+      return { tone: "var(--color-muted)", label: "connecting", pulse: false };
+    case "disconnected":
+      return { tone: "var(--danger)", label: "disconnected", pulse: false };
+    default:
+      // See the function comment: deliberately not exhaustive-strict here.
+      return { tone: "var(--color-muted)", label: `state: ${connection as string}`, pulse: false };
+  }
+}
+
 export function Header({
   connection,
   hello,
@@ -36,13 +98,7 @@ export function Header({
   restartLabel,
   askLabel,
 }: Props) {
-  const live = connection === "connected";
-  const tone = live ? "var(--accent)" : "var(--danger)";
-  const status = live
-    ? `live · ${eventsPerSecond} evt/s`
-    : connection === "connecting"
-      ? "connecting"
-      : "disconnected";
+  const { tone, label, pulse } = connectionDisplay(connection, eventsPerSecond);
 
   return (
     <header className="flex min-h-[46px] flex-wrap items-center gap-x-4 gap-y-2.5 border-b border-[var(--color-line)] bg-gradient-to-b from-[#181e29] to-[#141924] px-3.5 py-[7px]">
@@ -64,11 +120,11 @@ export function Header({
         }}
       >
         <span
-          className={`size-[7px] rounded-full ${live ? "ph-pulse" : ""}`}
+          className={`size-[7px] rounded-full ${pulse ? "ph-pulse" : ""}`}
           style={{ background: tone }}
         />
         <span className="font-mono text-[11px] tracking-[0.06em]" style={{ color: tone }}>
-          {status}
+          {label}
         </span>
       </span>
 

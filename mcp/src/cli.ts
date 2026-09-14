@@ -2,7 +2,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
-import { DeviceClient } from "./device.js";
+import { DeviceClient, type ConnectionState } from "./device.js";
 import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { runAdb } from "./adb.js";
@@ -156,24 +156,44 @@ async function ui(argv: string[]): Promise<void> {
   console.error(`timeline at ${url}`);
   if (options.open) openBrowser(url);
 
-  device.on("state", (state: string) => {
-    if (state === "handshaking") {
-      // GRA-157: this fires exactly when the socket comes up, which is the
-      // real event the 2-second setTimeout below used to guess at. Printing
-      // here instead means the CLI says something true immediately on a
-      // slow device and does not need a fixed wait on a fast one — the
-      // opposite of what a timer can do.
-      console.error("connected, waiting on the app's first check-in...");
-    } else if (state === "connected") {
-      // hello is guaranteed non-null here — DeviceClient does not enter
-      // "connected" until it is (see device.ts's setState()) — so this no
-      // longer hedges with a ternary the way it had to before that was true.
-      const hello = device.hello as NonNullable<typeof device.hello>;
-      console.error(`connected to ${hello.packageName} on ${hello.device}`);
-    } else if (state === "disconnected") {
-      // Expected constantly during development: the app gets reinstalled and
-      // relaunched, and the client reconnects on its own.
-      console.error("waiting for the app...");
+  device.on("state", (state: ConnectionState) => {
+    // GRA-162: was an if/else-if chain with no final else, so "connecting"
+    // printed nothing — silently correct, but silently, and a fifth state
+    // would have joined it there without tsc ever noticing. A switch with
+    // an explicit (still silent) "connecting" case and a never-guarded
+    // default gives that same behaviour a name and makes the next state
+    // addition fail here instead of joining "connecting" by accident. Same
+    // precedent as pendingMessage() in device.ts.
+    switch (state) {
+      case "handshaking":
+        // GRA-157: this fires exactly when the socket comes up, which is the
+        // real event the 2-second setTimeout below used to guess at. Printing
+        // here instead means the CLI says something true immediately on a
+        // slow device and does not need a fixed wait on a fast one — the
+        // opposite of what a timer can do.
+        console.error("connected, waiting on the app's first check-in...");
+        break;
+      case "connected": {
+        // hello is guaranteed non-null here — DeviceClient does not enter
+        // "connected" until it is (see device.ts's setState()) — so this no
+        // longer hedges with a ternary the way it had to before that was true.
+        const hello = device.hello as NonNullable<typeof device.hello>;
+        console.error(`connected to ${hello.packageName} on ${hello.device}`);
+        break;
+      }
+      case "disconnected":
+        // Expected constantly during development: the app gets reinstalled and
+        // relaunched, and the client reconnects on its own.
+        console.error("waiting for the app...");
+        break;
+      case "connecting":
+        // No behaviour change (GRA-162 AC3): the original chain had no
+        // branch for "connecting" either, so this stays deliberately silent.
+        break;
+      default: {
+        const exhaustive: never = state;
+        throw new Error(`porthole ui: unhandled ConnectionState '${exhaustive as string}'`);
+      }
     }
   });
 

@@ -1,6 +1,31 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 /**
+ * GRA-161 AC1: `ConnectionState` re-exported, not redeclared. It used to be
+ * `"connecting" | "connected" | "disconnected"` here — a second, hand-typed
+ * copy of `mcp/src/device.ts`'s union — and that copy not knowing about
+ * GRA-157's "handshaking" member is exactly what produced the red pill this
+ * ticket exists to remove: the UI's type could not represent the state the
+ * server was actually sending, so `Header.tsx` fell through to its
+ * "anything else" branch, which was "disconnected".
+ *
+ * This is a plain `import type`, fully erased at build time — verified by
+ * building the UI (`npx vite build`) after adding it, which produced the
+ * same output as before with no Node code pulled into the bundle. It works
+ * because this workspace hoists a single `node_modules` (`ui/` has none of
+ * its own), so `@types/node` is visible here the same way it is from
+ * `mcp/src`, and `moduleResolution: "bundler"` follows the relative path
+ * outside `ui/src` without needing a package boundary. Unlike `DeviceEvent`
+ * and `Hello` below, which stay independently declared on purpose (see their
+ * own comment), `ConnectionState` is a closed union with nothing
+ * device-specific to narrow at the point of use — there is no honest
+ * "tolerate anything" version of it, so drift is only a cost here, never a
+ * flexibility.
+ */
+import type { ConnectionState } from "../../src/device.ts";
+export type { ConnectionState };
+
+/**
  * The wire format, as it actually arrives.
  *
  * Event payloads are loosely typed on purpose. They come from Kotlin as plain
@@ -29,8 +54,6 @@ export interface Hello {
   startedAt: number;
   collectors: string[];
 }
-
-export type ConnectionState = "connecting" | "connected" | "disconnected";
 
 export type ServerMessage =
   | {

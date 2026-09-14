@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { extname, resolve, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
-import type { DeviceClient, DeviceEvent } from "./device.js";
+import { isConnected, isHandshaking, type ConnectionState, type DeviceClient, type DeviceEvent } from "./device.js";
 import { askTrace, findTraceProcessor } from "./perfetto.js";
 import { buildTrace } from "./trace.js";
 
@@ -117,7 +117,7 @@ export class TimelineServer {
     ]);
 
     device.on("event", (event: DeviceEvent) => this.record(event));
-    device.on("state", (state: string) => this.broadcast({ type: "state", state }));
+    device.on("state", (state: ConnectionState) => this.broadcast({ type: "state", state }));
     device.on("hello", (hello: unknown) => {
       // A process is a session. Sequence numbers restart with it, so keeping the
       // previous process's events would put two timelines on one axis — and,
@@ -294,7 +294,8 @@ export class TimelineServer {
             // the caller to attach is misleading advice for something
             // already in progress. Name the wait instead when we can.
             notes.push(
-              this.device.state === "handshaking"
+              // GRA-162: isHandshaking() instead of `=== "handshaking"`.
+              isHandshaking(this.device.state)
                 ? "Still waiting on the app's first check-in, so there is no process yet to scope " +
                     "the trace to. Try again in a moment."
                 : "Not attached to an app, so there is no process to scope the trace to.",
@@ -353,7 +354,8 @@ export class TimelineServer {
             // it" wording is technically a beat early for the ~2s handshake
             // window itself, which is a smaller, pre-existing gap this
             // ticket does not close.
-            connected: this.device.state === "connected",
+            // GRA-162: isConnected() instead of `=== "connected"`.
+            connected: isConnected(this.device.state),
             app: this.device.hello?.packageName ?? null,
             device: this.device.hello?.device ?? null,
             bufferedEvents: this.events.length,
@@ -418,8 +420,9 @@ export class TimelineServer {
             // itself shortly" from "no device at all" the same way the
             // findings endpoint above now does, rather than one generic
             // sentence for both.
+            // GRA-162: isHandshaking() instead of `=== "handshaking"`.
             const output =
-              this.device.state === "handshaking"
+              isHandshaking(this.device.state)
                 ? "Still waiting on the app's first check-in. Try again in a moment."
                 : "The app has not said hello yet.";
             res.writeHead(409, { "content-type": "application/json" });

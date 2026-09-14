@@ -238,7 +238,19 @@ export class DeviceClient extends EventEmitter {
     // Only "connecting" (TCP handshake still in flight — this.socket exists
     // but has not fired "connect" yet) and "disconnected" have no usable
     // socket to write a frame to.
-    if (!socket || (this.state !== "handshaking" && this.state !== "connected")) {
+    //
+    // GRA-162 QA: this used to spell the same condition out longhand as
+    // `this.state !== "handshaking" && this.state !== "connected"`, which is
+    // isAttached() negated (De Morgan's) but written by hand instead of
+    // through it. That made this a sixth silent site the AC 2 probe did not
+    // catch: a `!==` pair against two literals still compiles unchanged when
+    // the union grows, and a future state would fall through to "not
+    // attached" and reject every request() call with the not-connected
+    // message even while the socket was genuinely live. Routing through
+    // isAttached() puts this choke point behind the same never-guarded
+    // switch as the rest, so a new state fails `tsc` here too instead of
+    // silently rejecting live traffic.
+    if (!socket || !isAttached(this.state)) {
       return Promise.reject(new Error(this.notConnectedMessage()));
     }
 
@@ -278,10 +290,16 @@ export class DeviceClient extends EventEmitter {
    * instead of a `default` that quietly falls through: a fifth
    * ConnectionState added later without a case here fails `tsc`, in this one
    * place, rather than silently being treated as either "connected" or the
-   * wall. This is deliberately the only place in the package with that
-   * check — everywhere else asks this method instead of re-deriving the
-   * answer from `state` and `hello` by hand, which is the actual fix GRA-157
-   * is about.
+   * wall. Everywhere else asks this method instead of re-deriving the answer
+   * from `state` and `hello` by hand, which is the actual fix GRA-157 is
+   * about. (GRA-162: this used to say it was "deliberately the only place in
+   * the package with that check" — it no longer is. QA counted eight sites
+   * outside this file that read `device.state === "…"` directly, which
+   * `tsc` does not flag when a state is added because `===` against a string
+   * literal just evaluates false for anything new. `isAttached()`,
+   * `isConnected()` and `isHandshaking()` below give those call sites the
+   * same guarantee this switch has always had, instead of leaving them to
+   * reinvent it inconsistently or not at all.)
    */
   pendingMessage(): string | null {
     switch (this.state) {
@@ -311,5 +329,78 @@ export class DeviceClient extends EventEmitter {
     ]
       .filter(Boolean)
       .join("\n");
+  }
+}
+
+// --- GRA-162: exhaustive readers of a bare ConnectionState ------------------
+//
+// Free functions, not methods, because every call site below holds a
+// ConnectionState value (`device.state`, or one carried on an event/message)
+// rather than a DeviceClient to ask. Each is a switch with the same
+// compiled-in `never` guard as pendingMessage() above: adding a fifth
+// ConnectionState without extending a case list here fails `tsc` at that
+// list, not silently at nothing. Three functions rather than one because the
+// call sites genuinely want three different questions answered, and a single
+// helper returning a wider type would just move the "did I handle the new
+// case" judgement call to every caller instead of to the compiler here.
+
+/**
+ * The "loose" sense `findings`, `porthole_status` and `what_was_happening`
+ * use: the socket is up, whether or not `hello` has landed. True for
+ * "handshaking" and "connected"; false for "connecting" and "disconnected".
+ */
+export function isAttached(state: ConnectionState): boolean {
+  switch (state) {
+    case "handshaking":
+    case "connected":
+      return true;
+    case "connecting":
+    case "disconnected":
+      return false;
+    default: {
+      const exhaustive: never = state;
+      throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
+    }
+  }
+}
+
+/**
+ * The "strict" sense: `hello` has actually landed. True only for
+ * "connected" — see setState()'s invariant above, which makes that the only
+ * state in which `hello` is guaranteed non-null.
+ */
+export function isConnected(state: ConnectionState): boolean {
+  switch (state) {
+    case "connected":
+      return true;
+    case "connecting":
+    case "handshaking":
+    case "disconnected":
+      return false;
+    default: {
+      const exhaustive: never = state;
+      throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
+    }
+  }
+}
+
+/**
+ * True only while the handshake is in flight: the socket is up, `hello` has
+ * not landed. Named separately from isAttached()/isConnected() because
+ * several call sites want to say something specific about the handshake
+ * window rather than lump it in with either "attached" or "not yet".
+ */
+export function isHandshaking(state: ConnectionState): boolean {
+  switch (state) {
+    case "handshaking":
+      return true;
+    case "connecting":
+    case "connected":
+    case "disconnected":
+      return false;
+    default: {
+      const exhaustive: never = state;
+      throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
+    }
   }
 }

@@ -4,7 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { DeviceClient, type DeviceEvent } from "./device.js";
+import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
 import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
@@ -269,7 +269,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // text below (both handshaking and connected get the non-wall story).
       // buildTrace(), further down, wants the strict sense instead — hello
       // itself, not a boolean — and asks device.hello directly for it.
-      const connected = device.state === "handshaking" || device.state === "connected";
+      // GRA-162: isAttached() replaces the inline `=== "handshaking" ||
+      // === "connected"` so a fifth ConnectionState fails `tsc` here instead
+      // of silently reading as not-connected. Same boolean, no behaviour
+      // change — GRA-163 (pending) is the ticket that may change what this
+      // field actually means.
+      const connected = isAttached(device.state);
       if (!span) {
         // resolveWindow returns null whenever the ring is empty, which is not
         // the same thing as the device being unreachable — hello can have
@@ -461,8 +466,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // thing that is already in progress. Naming the handshake instead of
         // the generic advice is the whole fix; the advice itself (pass
         // `packageName`) still applies either way.
+        // GRA-162: isHandshaking() instead of `=== "handshaking"` — same
+        // exhaustiveness argument as isAttached() above.
         const because =
-          device.state === "handshaking"
+          isHandshaking(device.state)
             ? "the app is still waiting on its first check-in — try again in a moment, "
             : "connect to the app, ";
         return fail(
@@ -596,7 +603,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // genuinely on its way) this fails and says so instead of guessing.
       // Fully disconnected keeps the old permissive behaviour: apps: []
       // captures the whole device, same as always.
-      if (!packages?.length && device.state === "handshaking") {
+      // GRA-162: isHandshaking() instead of `=== "handshaking"`.
+      if (!packages?.length && isHandshaking(device.state)) {
         return fail(
           "Still waiting on the app's first check-in, so there is no package to scope this " +
             "capture to yet. Try again in a moment, or pass `packages` explicitly to capture " +
@@ -705,7 +713,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // true for the identical state, under the identical prose. Exactly
         // the self-contradicting shape this whole ticket exists to remove,
         // reintroduced in the one site that arrived from GRA-154.
-        const connected = device.state === "handshaking" || device.state === "connected";
+        // GRA-162: isAttached() instead of the inline `===` pair — same
+        // note as findings' `connected` above applies here.
+        const connected = isAttached(device.state);
         const pending = device.pendingMessage();
         if (pending !== null) {
           return ok(pending, { moment: null, connected });
