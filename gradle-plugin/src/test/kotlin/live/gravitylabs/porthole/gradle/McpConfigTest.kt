@@ -13,6 +13,7 @@ import org.junit.Assume.assumeFalse
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import java.util.Properties
 
 /**
  * `portholeMcpConfig`, run for real through TestKit — GRA-119.
@@ -177,6 +178,70 @@ class McpConfigTest : StubAdbFunctionalTest() {
     }
 
     @Test
+    fun `a relative sdk dir resolves against the project root, not this JVM's working directory`() {
+        // GRA-150, AC3. Android Studio always writes an absolute sdk.dir, so
+        // this is a hand-edited-file case rather than a common one — but
+        // local.properties is exactly the kind of file a person edits, and a
+        // relative entry has one reasonable meaning: relative to the project
+        // that owns the file. `File(it).absolutePath` alone would instead
+        // resolve it against this JVM's own `user.dir`, which for a reused
+        // Gradle daemon is wherever that long-lived process happened to
+        // start — unrelated to projectDir.root, the scratch project this test
+        // just created. Comparing against `File(projectDir.root, ...)` rather
+        // than a literal string is what makes this a regression test for that
+        // exact bug: it fails if resolution ever goes back to being anchored
+        // on `user.dir` instead of the project root, on any host.
+        projectDir.newFolder("sdk-relative")
+        write("local.properties", "sdk.dir=sdk-relative\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        val expected = File(projectDir.root, "sdk-relative").absolutePath
+        assertEquals(expected, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `local properties escaping round-trips against the real file on this machine`() {
+        // AC4. Every Windows-shaped test above writes an escaped string this
+        // suite constructed by hand, which proves the parser reads back what
+        // was assumed it would write — precisely the failure mode behind this
+        // project's oldest lesson (self-written fixtures test the format you
+        // assumed, not the one that arrives). This one instead copies the
+        // real local.properties Android Studio wrote for this repository,
+        // byte for byte, and compares against an independent read of it
+        // (java.util.Properties, not resolveSdkDir) rather than a literal.
+        //
+        // System.getProperty("user.dir") here is this JVM's own working
+        // directory, not the scratch project's — Gradle sets a test task's
+        // working directory to its module (gradle-plugin), so the parent is
+        // the repository root, same as PortholeAgpCompatibilityTest.
+        val real = File(File(System.getProperty("user.dir")).parentFile, "local.properties")
+        assumeTrue("no local.properties next to the real build; nothing to compare against", real.isFile)
+
+        val props = Properties()
+        real.inputStream().use(props::load)
+        val rawSdkDir = props.getProperty("sdk.dir")
+        assumeTrue("the real local.properties has no usable sdk.dir", !rawSdkDir.isNullOrBlank())
+        val expected = File(rawSdkDir)
+        assumeTrue(
+            "expected an absolute, existing SDK directory from the real file, got $expected",
+            expected.isAbsolute && expected.isDirectory,
+        )
+
+        write("local.properties", real.readText())
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(expected.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
     fun `JSON serialization survives representative absolute path shapes`() {
         // The part of this ticket that is actually novel: the old code built
         // .mcp.json by interpolating values into a raw JSON string and
@@ -264,6 +329,24 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
         val result = buildWithEnv(
             mapOf("PATH" to (System.getenv("PATH") ?: ""), "ANDROID_HOME" to sdk.absolutePath),
+            "portholeMcpConfig",
+        )
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `falls back to ANDROID_SDK_ROOT when neither local properties nor ANDROID_HOME name an sdk`() {
+        // AC2: the full precedence chain is sdk.dir -> ANDROID_HOME ->
+        // ANDROID_SDK_ROOT. The other tests around this one pin the first two
+        // links; this is the third, otherwise unexercised by name.
+        val sdk = projectDir.newFolder("sdk-from-sdk-root")
+        scratch(registerTask())
+
+        val result = buildWithEnv(
+            mapOf("PATH" to (System.getenv("PATH") ?: ""), "ANDROID_SDK_ROOT" to sdk.absolutePath),
             "portholeMcpConfig",
         )
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
