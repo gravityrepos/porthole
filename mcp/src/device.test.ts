@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import net, { type AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DeviceClient, PROTOCOL_VERSION, type DeviceEvent } from "./device.js";
 
@@ -652,5 +653,41 @@ describe("protocol mismatch", () => {
     server.destroyAll();
     await waitForState(client, "disconnected");
     expect(client.protocolMismatch).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-96 QA follow-up: the two copies of PROTOCOL_VERSION do not drift
+// ---------------------------------------------------------------------------
+
+describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
+  // GRA-96's whole point is that the receiving side checks what it is given
+  // instead of trusting it silently -- but that check is only as good as
+  // this file's own PROTOCOL_VERSION, and nothing enforced that this
+  // constant and Protocol.kt's stayed the same number. Bumping one side
+  // while leaving the other at its old value is exactly the "receiving side
+  // does not validate what it is given" shape this ticket exists to close,
+  // one level up: the JVM suite has no way to know a TypeScript constant
+  // exists, and vice versa, so a source-text read across the language
+  // boundary is the only way one side can see the other's value at all --
+  // the same technique surface.test.ts already uses for cross-file checks
+  // within mcp/src.
+  it("device.ts's PROTOCOL_VERSION equals Protocol.kt's internal const", () => {
+    const kotlin = readFileSync(
+      new URL(
+        "../../runtime/src/main/kotlin/live/gravitylabs/porthole/protocol/Protocol.kt",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const match = kotlin.match(/internal const val PROTOCOL_VERSION\s*=\s*(\d+)/);
+    expect(match, "Protocol.kt's PROTOCOL_VERSION declaration was not found in the expected shape").not.toBeNull();
+    const kotlinVersion = Number(match![1]);
+    expect(
+      kotlinVersion,
+      `device.ts's PROTOCOL_VERSION (${PROTOCOL_VERSION}) must equal Protocol.kt's (${kotlinVersion}) -- ` +
+        "a mismatch here means the two sides of GRA-96's own check would silently disagree about what " +
+        "a matching handshake even is.",
+    ).toBe(PROTOCOL_VERSION);
   });
 });
