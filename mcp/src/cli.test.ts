@@ -473,3 +473,219 @@ describe("capture command: refused before device contact", () => {
     }
   });
 });
+
+/**
+ * GRA-162 QA (M4): `ui()`'s `device.on("state", ...)` switch — the four-case
+ * rewrite of what used to be an if/else-if chain — had no test at all before
+ * this. Mutating "handshaking" to print the disconnected message stayed
+ * green, because nothing in the suite ever entered the handler; it only ran
+ * as a side effect of a real `porthole ui` invocation, which nothing spawned.
+ *
+ * Same reasoning as "capture command" above for why this spawns the real
+ * `dist/cli.js`: the switch lives in a callback registered by top-level
+ * script code (`ui()`, called from the `command === "ui"` branch at the
+ * bottom of cli.ts), not by anything `import("./cli.js")` on its own would
+ * reach — importing the module for `parse` at the top of this file works
+ * only because process.argv is faked to have no command while that import
+ * happens.
+ */
+describe("porthole ui: state-change messages (GRA-162)", () => {
+  /** Bound and released immediately: proven free a moment ago, not reserved. */
+  async function freePort(): Promise<number> {
+    const probe = net.createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+    const port = (probe.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    return port;
+  }
+
+  /**
+   * Accepts the TCP connection — so DeviceClient reaches "handshaking" — and
+   * then answers nothing at all, ever. That holds the device in
+   * "handshaking" indefinitely, the same idea device.test.ts uses
+   * server-side for its own handshaking tests (a `hello` handler that
+   * returns a Promise which never resolves): the state is reached by
+   * construction, not by outrunning a timer.
+   */
+  function startSilentServer(): net.Server {
+    return net.createServer((socket) => {
+      socket.on("error", () => {});
+    });
+  }
+
+  /**
+   * Answers `hello` for real, so DeviceClient reaches "connected". A second,
+   * local copy of the same shape as "capture command" above's
+   * `startHelloServer` — not shared, because threading that describe's
+   * adb-shim concerns through a common helper would couple two things that
+   * do not otherwise depend on each other.
+   */
+  function startHelloServer(): net.Server {
+    return net.createServer((socket) => {
+      socket.on("error", () => {});
+      let buffer = "";
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        let newline = buffer.indexOf("\n");
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf("\n");
+          if (!line) continue;
+          let request: { id: number; method: string } | undefined;
+          try {
+            request = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (request?.method === "hello") {
+            socket.write(
+              JSON.stringify({
+                id: request.id,
+                ok: true,
+                result: {
+                  protocol: 1,
+                  packageName: "com.example.shop",
+                  processName: "com.example.shop",
+                  versionName: "1.0.0-test",
+                  device: "Test Device",
+                  sdkInt: 34,
+                  startedAt: 0,
+                  collectors: [],
+                },
+              }) + "\n",
+            );
+          }
+        }
+      });
+    });
+  }
+
+  interface UiProcess {
+    stderrText(): string;
+    kill(): void;
+  }
+
+  /**
+   * `ui()` never exits on its own — it runs until SIGINT/SIGTERM — so this
+   * cannot be `spawnSync`/awaited to completion the way "capture command"'s
+   * helpers are. It keeps a live, growing buffer of stderr instead, for
+   * `waitForStderr` below to poll.
+   */
+  function spawnUi(args: string[]): UiProcess {
+    const child = spawn(process.execPath, [distCli, "ui", ...args]);
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    // Drained, not inspected: an unread stdout pipe fills and backpressures
+    // the child once `openBrowser`'s own stdout (there is none) or any
+    // future stdout write blocks on a full buffer, which would stall the
+    // very state transition this test is waiting to observe.
+    child.stdout.on("data", () => {});
+    return {
+      stderrText: () => stderr,
+      kill: () => child.kill(),
+    };
+  }
+
+  async function waitForStderr(
+    proc: UiProcess,
+    pattern: string,
+    timeoutMs = 8_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (proc.stderrText().includes(pattern)) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(
+      `timed out after ${timeoutMs}ms waiting for stderr to contain ${JSON.stringify(pattern)}; ` +
+        `got: ${JSON.stringify(proc.stderrText())}`,
+    );
+  }
+
+  it('prints the handshaking message — neither "disconnected" nor a crash — while hello is outstanding', async () => {
+    const port = await freePort();
+    const uiPort = await freePort();
+    const server = startSilentServer();
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+    try {
+      await waitForStderr(proc, "connected, waiting on the app's first check-in...");
+      // The specific failure GRA-162 exists to prevent: a mutated or
+      // regressed switch treating "handshaking" as "disconnected".
+      expect(proc.stderrText()).not.toContain("waiting for the app...");
+    } finally {
+      proc.kill();
+      server.close();
+    }
+  });
+
+  it("prints the connected message, naming the app and device, once hello resolves", async () => {
+    const port = await freePort();
+    const uiPort = await freePort();
+    const server = startHelloServer();
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+    try {
+      await waitForStderr(proc, "connected to com.example.shop on Test Device");
+    } finally {
+      proc.kill();
+      server.close();
+    }
+  });
+
+  it("prints the disconnected message when nothing is listening on the device port", async () => {
+    const port = await freePort();
+    const uiPort = await freePort();
+    // No server bound to `port` at all: the OS refuses the connection, which
+    // is what drives DeviceClient to "disconnected" rather than leaving it
+    // stuck in "connecting" — see device.ts's close handler.
+    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+    try {
+      await waitForStderr(proc, "waiting for the app...");
+    } finally {
+      proc.kill();
+    }
+  });
+
+  it("survives a reconnect — disconnected, silently through connecting again, to handshaking — without crashing", async () => {
+    // "connecting" is the one case this file cannot assert on directly: its
+    // entire contract is to print nothing (GRA-162 AC3, no behaviour
+    // change — the original if/else-if chain had no branch for it either),
+    // so there is no stderr signal that would distinguish "the switch
+    // reached this case and did nothing" from "the switch was never
+    // reached at all". It is also unreachable on the *first* connection
+    // attempt specifically: `device.start()` inside ui() emits "connecting"
+    // synchronously, before `device.on("state", ...)` is even registered
+    // (that registration waits on `await timeline.start()`), so the very
+    // first "connecting" event fires to no listener, structurally, not by
+    // race. A reconnect is different — by the time DeviceClient retries,
+    // the listener has existed for a while — so this test drives one for
+    // real: refuse the first connection (forcing "disconnected", which
+    // schedules a reconnect), then make the device answer, and check the
+    // process is still alive and reaches "handshaking" on the far side.
+    // That does not prove what "connecting" printed (nothing, by design),
+    // but it does prove the switch did not throw or misroute while passing
+    // through it — the one thing a test could get wrong here.
+    const port = await freePort();
+    const uiPort = await freePort();
+    const proc = spawnUi(["--port", String(port), "--ui-port", String(uiPort), "--no-forward", "--no-open"]);
+    let server: net.Server | undefined;
+    try {
+      await waitForStderr(proc, "waiting for the app...");
+      server = startSilentServer();
+      // The exact port just refused a connection and nothing ever accepted
+      // one on it, so there is no lingering socket in a wait state to
+      // conflict with binding it again immediately.
+      await new Promise<void>((resolve) => server!.listen(port, "127.0.0.1", () => resolve()));
+      // RECONNECT_MIN_MS is 500ms (device.ts); the generous timeout below
+      // covers a slow CI machine without assuming a tighter bound than the
+      // production backoff actually guarantees.
+      await waitForStderr(proc, "connected, waiting on the app's first check-in...", 10_000);
+      expect(proc.stderrText()).not.toMatch(/unhandled ConnectionState/);
+    } finally {
+      proc.kill();
+      server?.close();
+    }
+  });
+});
