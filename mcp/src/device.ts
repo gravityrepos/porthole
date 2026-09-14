@@ -34,6 +34,19 @@ export interface Hello {
 }
 
 /**
+ * GRA-96: the constant this side of the socket owns, matching
+ * `PROTOCOL_VERSION` in `runtime/.../protocol/Protocol.kt` — the two are not
+ * derived from a shared source, so a wire-format change obliges updating
+ * both by hand (see that file's own comment on the constant it owns). This
+ * is a bare integer with no `major.minor` split: a match means compatible,
+ * anything else is a refusal, recorded in `protocolMismatch` below rather
+ * than thrown, so the rest of the handshake can finish and the mismatch can
+ * be reported as the specific, actionable message `porthole_status` needs
+ * (GRA-96 AC1/AC2) instead of a generic connection failure.
+ */
+export const PROTOCOL_VERSION = 1;
+
+/**
  * GRA-157: the socket connecting and the app saying hello are two different
  * events, roughly 2s apart on real hardware, and treating them as one was the
  * bug. "handshaking" names the gap: the socket is up, `request()` can already
@@ -78,6 +91,19 @@ export class DeviceClient extends EventEmitter {
   state: ConnectionState = "disconnected";
   hello: Hello | null = null;
   lastError: string | null = null;
+  /**
+   * GRA-96: null when the app's `hello.protocol` matches `PROTOCOL_VERSION`,
+   * otherwise the sentence `porthole_status` reports verbatim — set once,
+   * in `connect()`'s hello handler, right where `hello` itself is set, so it
+   * is never stale relative to whichever `hello` is currently held. Kept
+   * separate from `lastError`: that field means "the socket or a request
+   * failed", this one means "the socket and the handshake both succeeded and
+   * the two sides still cannot be trusted to agree on the wire format" — a
+   * different fact that deserves its own name instead of overloading
+   * lastError's "something went wrong" with a case that is not a failure to
+   * connect at all.
+   */
+  protocolMismatch: string | null = null;
 
   constructor(
     private readonly host: string,
@@ -133,6 +159,21 @@ export class DeviceClient extends EventEmitter {
           // also asserts this itself, so a future edit that reordered these
           // two lines would fail loudly instead of reintroducing the race.
           this.hello = hello;
+          // GRA-96: computed right where `hello` is set, not deferred to
+          // whichever tool asks later — a caller reading `protocolMismatch`
+          // right after the "hello" event below always sees the answer for
+          // the `hello` it just received, never a stale one from a previous
+          // connection. Refusal, not a thrown error: the socket is fine and
+          // the app really did answer, so the rest of the surface (findings,
+          // timeline, …) still works for whatever it can, and this is the
+          // one specific, actionable fact layered on top (GRA-96 AC1/AC2).
+          this.protocolMismatch =
+            hello.protocol === PROTOCOL_VERSION
+              ? null
+              : `The app is speaking protocol ${hello.protocol}; this server understands protocol ` +
+                `${PROTOCOL_VERSION}. Update the app's Porthole runtime dependency to a version that ` +
+                `speaks protocol ${PROTOCOL_VERSION}, or pin the npm package this MCP server runs from ` +
+                `(in .mcp.json) to the version that matches the app.`;
           this.setState("connected");
           this.emit("hello", hello);
         })
@@ -158,6 +199,11 @@ export class DeviceClient extends EventEmitter {
     socket.on("close", () => {
       this.socket = null;
       this.hello = null;
+      // GRA-96: cleared with `hello`, for the same reason — a mismatch is a
+      // fact about the `hello` that produced it, and once that `hello` is
+      // gone (a new connection will get its own, possibly no longer
+      // mismatched) there is nothing left for this to still be true about.
+      this.protocolMismatch = null;
       this.failPending("device disconnected");
       this.setState("disconnected");
       this.scheduleReconnect();

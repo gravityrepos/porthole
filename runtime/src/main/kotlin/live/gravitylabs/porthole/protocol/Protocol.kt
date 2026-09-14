@@ -70,6 +70,35 @@ internal data class Hello(
     val collectors: List<String>,
 )
 
+/**
+ * The wire format's own version, sent as [Hello.protocol] and — as of GRA-96
+ * — actually checked by the receiving end (`mcp/src/device.ts` owns a copy
+ * of this same integer and compares it against what a connecting app sends).
+ * Before GRA-96 the field was sent and never read: a runtime built against
+ * one wire format and an MCP server built against another connected without
+ * complaint and simply produced whatever partial nonsense `ignoreUnknownKeys`
+ * and missing-field defaults happened to paper over.
+ *
+ * Compatibility rule, for whoever edits this next: this is a bare integer,
+ * not a `major.minor` pair, so there is no partial-compatibility case to
+ * reason about — every value here already *is* a major version, and "same
+ * major" reduces to "the two sides sent the same number". Concretely:
+ *
+ *  - `hello.protocol == PROTOCOL_VERSION` on the reading side: compatible,
+ *    proceed as today.
+ *  - any other value: a refusal, not a best-effort attempt to limp along —
+ *    the receiving side reports which two versions disagree and what to do
+ *    about it (update the runtime dependency, or pin the npm package to a
+ *    matching version) rather than silently decoding a frame shaped
+ *    differently than it expects.
+ *
+ * Bumping this number is a breaking-wire-format change by definition: it
+ * obliges updating the constant `device.ts` compares against in the same
+ * commit (search that file for `PROTOCOL_VERSION`), and it means every app
+ * built against the old runtime will be refused by a newer MCP server (and
+ * vice versa) until it is rebuilt. That is the point — a silent partial
+ * decode is exactly the failure mode this version field exists to prevent.
+ */
 internal const val PROTOCOL_VERSION = 1
 
 // ---------------------------------------------------------------------------
