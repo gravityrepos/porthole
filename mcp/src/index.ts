@@ -59,6 +59,75 @@ export interface PortholeServer {
  * in-memory transport — rather than grepping this file's source for the
  * properties a tool is supposed to have.
  */
+/**
+ * GRA-169: `ok()` (below) finds its payload by the first blank line, and
+ * every interpolated summary it builds carries at least one value that
+ * arrived over the wire from the device (hello.device, hello.packageName, a
+ * lastExited process's own copies of both) with nothing guaranteeing it is
+ * single-line. A blank line inside any of them used to re-split the answer
+ * at the wrong point: `testing/harness.ts`'s `parsePayload()` (and any real
+ * consumer following the same "summary\n\n{json}" convention) slices from
+ * the middle of the summary's own prose instead of the start of the JSON,
+ * and `JSON.parse` throws — not degraded output, no payload at all, in all
+ * three tools identically, since they all build their summaries out of the
+ * same handful of interpolation points.
+ *
+ * The three options this ticket named were: make the split structural
+ * (return the payload as its own content block, or behind an unforgeable
+ * delimiter), normalise interpolated values at the boundary, or assert the
+ * invariant in `ok()`. Structural was ruled out for this ticket
+ * specifically: `testing/harness.ts`'s `parsePayload()` (used by every test
+ * file that calls a tool through `rig.client`, not just this one)
+ * hardcodes the "summary\n\n{json}" shape, and that file is owned by other
+ * nodes, not this ticket — changing the wire shape here without changing
+ * every reader of it in lockstep would just move the unparseable-payload
+ * bug from "adversarial device data" to "every test in the suite", which is
+ * not a fix.
+ *
+ * So: normalise, but at the one chokepoint every tool's answer already
+ * passes through (`ok()`'s call to this function), not at each of the
+ * dozen places a summary is built — the per-call-site version of this fix
+ * is exactly the "cheaper, but only defends the values someone remembered
+ * to wrap" shape the ticket warns has failed here repeatedly (GRA-163's own
+ * AC1 test caught one such spot by accident). Collapsing at the chokepoint
+ * means every existing call site is covered automatically, and so is every
+ * future one — nobody has to remember. This turns any run of two or more
+ * newlines (optionally with spaces or tabs between them) into a single
+ * space, which is the only substring this file ever treats as meaningful
+ * ("\n\n", the delimiter `ok()` itself appends), so after normalising, that
+ * substring cannot occur inside a summary no matter what the device sent.
+ *
+ * Module-level and exported, rather than a closure inside
+ * `createPortholeServer`, purely so `index.test.ts` can hold this function
+ * itself to the standard the ticket asks the fix to meet — collapsing
+ * "\n \n" (whitespace between the newlines) and multiple consecutive blank
+ * lines, not just the single "\n\n" case a reader might assume is the only
+ * shape a blank line takes — instead of only exercising it indirectly
+ * through a handful of device fixtures that happen to reach `ok()`.
+ *
+ * What this still does not defend: anything that reaches a payload *field*
+ * rather than a summary is untouched on purpose — payload is
+ * `JSON.stringify`'d, which already escapes a raw newline as `\n`, so
+ * nothing in the JSON half can ever contain a literal blank line. And this
+ * fixes the delimiter, not truthfulness: a value that collapses a blank
+ * line into a space is still whatever string the device sent, so two
+ * device names that differ only in embedded whitespace now read
+ * identically in prose. Nothing here defends against a value engineered to
+ * defeat this function with a line-terminator this project has not seen a
+ * device use (U+2028/U+2029, or a bare `\r` with no matching `\n`) — those
+ * are not blank lines by this function's definition and would need their
+ * own test before anyone could claim they are handled.
+ */
+export function collapseBlankLines(text: string): string {
+  let previous: string;
+  let collapsed = text.replace(/\r\n/g, "\n");
+  do {
+    previous = collapsed;
+    collapsed = collapsed.replace(/\n[ \t]*\n/g, " ");
+  } while (collapsed !== previous);
+  return collapsed;
+}
+
 export function createPortholeServer(options: PortholeServerOptions = {}): PortholeServer {
   const device = options.device ?? new DeviceClient(HOST, PORT);
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
@@ -71,77 +140,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
   /**
-   * GRA-169: `ok()` finds its payload by the first blank line, and every
-   * interpolated summary here carries at least one value that arrived over
-   * the wire from the device (hello.device, hello.packageName, a lastExited
-   * process's own copies of both) with nothing guaranteeing it is
-   * single-line. A blank line inside any of them used to re-split the
-   * answer at the wrong point: `testing/harness.ts`'s `parsePayload()` (and
-   * any real consumer following the same "summary\n\n{json}" convention)
-   * slices from the middle of the summary's own prose instead of the
-   * start of the JSON, and `JSON.parse` throws — not degraded output, no
-   * payload at all, in all three tools identically, since they all build
-   * their summaries out of the same handful of interpolation points.
-   *
-   * The three options this ticket named were: make the split structural
-   * (return the payload as its own content block, or behind an
-   * unforgeable delimiter), normalise interpolated values at the
-   * boundary, or assert the invariant here. Structural was ruled out for
-   * this ticket specifically: `testing/harness.ts`'s `parsePayload()` (used
-   * by every test file that calls a tool through `rig.client`, not just
-   * this one) hardcodes the "summary\n\n{json}" shape, and that file is
-   * owned by other nodes, not this ticket — changing the wire shape here
-   * without changing every reader of it in lockstep would just move the
-   * unparseable-payload bug from "adversarial device data" to "every test
-   * in the suite", which is not a fix.
-   *
-   * So: normalise, but at the one chokepoint every tool's answer already
-   * passes through, not at each of the dozen places a summary is built —
-   * the per-call-site version of this fix is exactly the "cheaper, but
-   * only defends the values someone remembered to wrap" shape the ticket
-   * warns has failed here repeatedly (GRA-163's own AC1 test caught one
-   * such spot by accident). Collapsing here means every existing call site
-   * is covered automatically, and so is every future one — nobody has to
-   * remember. `collapseBlankLines()` turns any run of two or more
-   * newlines (optionally with spaces or tabs between them) into a single
-   * space, which is the only substring this file ever treats as
-   * meaningful ("\n\n", the delimiter `ok()` itself appends below), so
-   * after normalising, that substring cannot occur inside `summary` no
-   * matter what the device sent.
-   *
-   * The assertion after it is the ticket's third option, kept as well
-   * rather than instead: it does not widen what is defended (a bug in
-   * `collapseBlankLines()` is the only way to reach it), but it turns
-   * "the split silently lands in the wrong place" into "this throws,
-   * loudly, in whichever test or manual call first hits it" if that
-   * ever happens — dying at the source instead of at a consumer, which is
-   * the ticket's own third option, not a restatement of the first.
-   *
-   * What this still does not defend: anything that reaches a payload
-   * *field* rather than a summary is untouched on purpose — payload is
-   * `JSON.stringify`'d, which already escapes a raw newline as `\n`, so
-   * nothing in the JSON half can ever contain a literal blank line. And
-   * this fixes the delimiter, not truthfulness: a value that collapses
-   * a blank line into a space is still whatever string the device sent,
-   * so two device names that differ only in embedded whitespace now read
-   * identically in prose. Nothing here defends against a value engineered
-   * to defeat `collapseBlankLines()` itself with a line-terminator this
-   * project has not seen a device use (U+2028/U+2029, or a bare `\r` with
-   * no matching `\n`) — those are not blank lines by this function's
-   * definition and would need their own test before anyone could claim
-   * they are handled.
+   * Summary line first, then the JSON. The summary is often the whole
+   * answer. GRA-169: `collapseBlankLines()` (above) is the actual defence;
+   * the check right after it is the ticket's third option kept in addition
+   * to, not instead of, normalising — it does not widen what is defended (a
+   * bug in `collapseBlankLines()` is the only way to reach it), but it
+   * turns "the split silently lands in the wrong place" into "this throws,
+   * loudly, in whichever call first hits it" if that ever happens — dying
+   * at the source instead of at a consumer.
    */
-  function collapseBlankLines(text: string): string {
-    let previous: string;
-    let collapsed = text.replace(/\r\n/g, "\n");
-    do {
-      previous = collapsed;
-      collapsed = collapsed.replace(/\n[ \t]*\n/g, " ");
-    } while (collapsed !== previous);
-    return collapsed;
-  }
-
-  /** Summary line first, then the JSON. The summary is often the whole answer. */
   function ok(summary: string, payload: unknown): ToolResult {
     const safeSummary = collapseBlankLines(summary);
     if (safeSummary.includes("\n\n")) {

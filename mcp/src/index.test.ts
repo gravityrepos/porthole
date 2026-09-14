@@ -7,6 +7,7 @@ import path from "node:path";
 import { buildRig, buildRingInState, waitUntil, type Rig } from "./testing/harness.js";
 import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
+import { collapseBlankLines } from "./index.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -1069,6 +1070,62 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
     } finally {
       await rig.close();
     }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// GRA-169: collapseBlankLines() itself, direct — not only through the three
+// tools that happen to call it
+// -----------------------------------------------------------------------------
+//
+// The integration tests below prove the fix end to end, but every one of
+// them feeds exactly one blank-line shape (two adjacent "\n"s) through
+// exactly two fields. That is enough to prove the chokepoint is wired, not
+// that the function backing it is correct in general — the same "N tests
+// reddened is not N things defended" trap this project has hit before. A
+// direct unit test can cover shapes no device fixture here happens to
+// produce: whitespace sitting between the two newlines, three or more
+// blank lines in a row, and CRLF line endings, none of which "Pixel\n\n7a"
+// exercises.
+describe("GRA-169: collapseBlankLines()", () => {
+  it("collapses a plain blank line", () => {
+    expect(collapseBlankLines("summary\n\npayload")).toBe("summary payload");
+  });
+
+  it("collapses a blank line with spaces or tabs on it", () => {
+    expect(collapseBlankLines("summary\n   \npayload")).toBe("summary payload");
+    expect(collapseBlankLines("summary\n\t\t\npayload")).toBe("summary payload");
+  });
+
+  it("collapses three and four consecutive newlines, not just two", () => {
+    expect(collapseBlankLines("a\n\n\nb")).not.toContain("\n\n");
+    expect(collapseBlankLines("a\n\n\n\nb")).not.toContain("\n\n");
+    // And it must not merely hide the count — the text on both sides has
+    // to survive, or a version that collapsed too aggressively (e.g. to
+    // the empty string) would pass the toContain-only checks above.
+    expect(collapseBlankLines("a\n\n\n\nb")).toContain("a");
+    expect(collapseBlankLines("a\n\n\n\nb")).toContain("b");
+  });
+
+  it("collapses several separate blank lines in the same string", () => {
+    const result = collapseBlankLines("one\n\ntwo\n\nthree");
+    expect(result).not.toContain("\n\n");
+    expect(result).toBe("one two three");
+  });
+
+  it("collapses a CRLF blank line", () => {
+    expect(collapseBlankLines("summary\r\n\r\npayload")).not.toContain("\n\n");
+  });
+
+  it("leaves a single newline alone — this is not a linter, only blank lines are the target", () => {
+    // The notConnectedMessage() troubleshooting list (device.ts) is legible,
+    // deliberate multi-line prose. Collapsing every newline, not just blank
+    // ones, would flatten it and this function has no business doing that.
+    expect(collapseBlankLines("line one\nline two")).toBe("line one\nline two");
+  });
+
+  it("leaves ordinary text with no newlines at all untouched", () => {
+    expect(collapseBlankLines("nothing to collapse here")).toBe("nothing to collapse here");
   });
 });
 
