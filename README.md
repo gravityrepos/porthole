@@ -880,9 +880,15 @@ by actually publishing something, using no credentials at all: `npm pack
 `publishToMavenLocal -PRELEASE_SIGNING_ENABLED=false` followed by resolving
 the plugin and the runtime AAR from `mavenLocal()` in a separate scratch
 project — no `includeBuild`, the consumer path a real app takes; and
-`publishPlugins --validate-only` against the Portal's own metadata checks. If
-the plugin ever pointed a consumer at a runtime version nobody actually
-published, this is where that shows up — not in someone else's build.
+`validatePlugins`, checking the plugin's own structure with no network call.
+Deliberately not `publishPlugins --validate-only`: measured against the real
+Gradle Plugin Portal, that flag still authenticates and POSTs the plugin
+bundle — it only avoided actually publishing 0.1.0 a second time because the
+Portal rejected it as already existing, and pointed at a version that had
+never been published, the same call would have published it. If the plugin
+ever pointed a consumer at a runtime version nobody actually published, the
+mavenLocal() resolution above is where that shows up — not in someone else's
+build.
 
 The publish order itself is not arbitrary. `portholeUi` launches the timeline
 with `npx --package @gravitylabsllc/porthole@<version>`, and the plugin
