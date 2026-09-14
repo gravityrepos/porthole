@@ -363,16 +363,23 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
  * Java-properties-escaped (a Windows path's drive-letter colon and every
  * backslash come out doubled), and `Properties` un-escapes that on read the
  * same way it always has.
+ *
+ * A present-but-blank `sdk.dir=` is treated as absent rather than as a path.
+ * `File("")` is not nothing: its `absolutePath` is the current working
+ * directory, so a blank line would have written the Gradle daemon's cwd into
+ * `.mcp.json` as the Android SDK — a confidently wrong answer, and worse than
+ * the omission that lets the MCP server fall back to its own walk.
  */
 internal fun resolveSdkDir(projectRoot: File): File? {
     val local = File(projectRoot, "local.properties")
     if (local.isFile) {
         val props = Properties()
         local.inputStream().use(props::load)
-        props.getProperty("sdk.dir")?.let { return File(it) }
+        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
     }
     return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
         .mapNotNull { System.getenv(it) }
+        .filter { it.isNotBlank() }
         .map(::File)
         .firstOrNull { it.isDirectory }
 }

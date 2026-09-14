@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeFalse
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 
@@ -125,6 +126,18 @@ class McpConfigTest : StubAdbFunctionalTest() {
         // drive letter: no colon to properties-escape, but two leading
         // backslashes that must survive both the properties parse and the
         // JSON serialize.
+        //
+        // Windows-only for the same reason the POSIX case below is POSIX-only:
+        // the shape is decided by java.io.File, not by this task. On Linux a
+        // UNC string is not absolute at all — every backslash is an ordinary
+        // filename character — so the task correctly resolves it against the
+        // project directory and the assertion below compares a resolved path
+        // against a raw one. The `JSON serialization survives representative
+        // absolute path shapes` test carries the UNC *string* through the real
+        // writer and reader on every platform, which is the part of this that
+        // is genuinely portable.
+        assumeTrue("a UNC string is only an absolute path on Windows", isWindowsHost())
+
         val unc = "\\\\build-server\\share\\Android Sdk"
         val escaped = unc.replace("\\", "\\\\")
         write("local.properties", "sdk.dir=$escaped\n")
@@ -203,6 +216,45 @@ class McpConfigTest : StubAdbFunctionalTest() {
         )
         // PORTHOLE_PROJECT_ROOT is unconditional — the plugin always knows it.
         assertTrue(env.containsKey("PORTHOLE_PROJECT_ROOT"))
+    }
+
+    @Test
+    fun `treats a blank sdk dir as absent rather than as the working directory`() {
+        // `sdk.dir=` with nothing after it is what a half-edited or
+        // tool-generated local.properties looks like. Taken at its word it
+        // becomes File(""), whose absolutePath is the Gradle daemon's current
+        // working directory — so .mcp.json would have named some arbitrary
+        // directory as the Android SDK, which is worse than saying nothing,
+        // because the MCP server's own walk never gets a chance to run.
+        write("local.properties", "sdk.dir=\n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertFalse(
+            "a blank sdk.dir must not become a path, got: $env",
+            env.containsKey("PORTHOLE_SDK_DIR"),
+        )
+    }
+
+    @Test
+    fun `a blank sdk dir does not shadow ANDROID_HOME`() {
+        // The other half of the same bug: a blank value that is treated as a
+        // hit stops the env-var fallback from ever being consulted.
+        val sdk = projectDir.newFolder("sdk-behind-a-blank")
+        write("local.properties", "sdk.dir=   \n")
+        scratch(registerTask())
+
+        val result = buildWithEnv(
+            mapOf("PATH" to (System.getenv("PATH") ?: ""), "ANDROID_HOME" to sdk.absolutePath),
+            "portholeMcpConfig",
+        )
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
     }
 
     @Test
