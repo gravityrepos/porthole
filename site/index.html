@@ -184,6 +184,9 @@
         grid-template-areas:
           "install connect"
           "ask connect";
+        /* Room under both columns before the next screen's rule, so the
+           Connect card's bottom border does not sit on the separator. */
+        margin-bottom: 28px;
       }
       .cols-mid > :nth-child(1) {
         grid-area: install;
@@ -193,6 +196,10 @@
       }
       .cols-mid > :nth-child(3) {
         grid-area: ask;
+        /* Bottom-justified: its lower edge lines up with the Connect card's,
+           and the space the left column has spare sits between 1 and 3
+           rather than under 3 (founder, on the merged page). */
+        align-self: end;
       }
       @media (max-width: 1160px) {
         /* Two 520px columns plus the gap no longer fit the wrap; one column,
@@ -203,6 +210,9 @@
             "install"
             "connect"
             "ask";
+        }
+        .cols-mid > :nth-child(3) {
+          align-self: start;
         }
       }
       .cols-tight {
