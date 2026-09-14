@@ -784,6 +784,86 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       await rig.close();
     }
   });
+
+  // QA round 1 (verdict at bfd6ca7): the thirteenth state, missed by the
+  // twelve above because none of them combine an empty ring with a
+  // `lastExited`. It arises from a real sequence: a process runs and dies
+  // (lastExited set, ring holds its leftovers), then a genuinely new
+  // process connects -- its own `hello` clears the ring (timeline.ts) --
+  // and dies before emitting anything at all. The ring is empty again, but
+  // `lastExited` now names the second process. Before this fix,
+  // `porthole_status` reported `exitedProcess` unconditionally while
+  // `findings`/`what_was_happening`'s empty-ring branches reported nothing
+  // -- cross-tool disagreement -- and `pendingMessage()`'s own prose said
+  // "whatever is still buffered is from X" while the payload right next to
+  // it said `bufferedEvents: 0` / `findings: []` -- prose contradicting its
+  // own payload in a single answer, which is the hardware form of the
+  // original bug and wider than what was filed.
+  it("the empty-ring-plus-lastExited state: all three tools agree the process exited and nothing is buffered", async () => {
+    const rig = await buildRig();
+    try {
+      // Session A: connects, produces one event, then exits.
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      expect(rig.timeline.buffer().length).toBeGreaterThan(0);
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      expect(rig.device.lastExited?.hello.startedAt).toBe(0);
+
+      // Session B: a genuinely new process (different startedAt), which
+      // clears the ring on its own hello, then exits before emitting
+      // anything. stop()/start() is buildRingInState's own trick for a
+      // deterministic reconnect rather than waiting on the real backoff
+      // timer.
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: 999,
+        collectors: [],
+      }));
+      rig.device.stop();
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+      expect(rig.timeline.buffer()).toHaveLength(0); // the new hello cleared it
+
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      expect(rig.timeline.buffer()).toHaveLength(0);
+      expect(rig.device.lastExited?.hello.startedAt).toBe(999);
+
+      const status = await rig.client.callTool("porthole_status", {});
+      const findings = await rig.client.callTool("findings", {});
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+
+      for (const [name, result] of [
+        ["porthole_status", status],
+        ["findings", findings],
+        ["what_was_happening", wwh],
+      ] as const) {
+        expect(result.text, `${name} should name the exited process`).toContain("com.example.shop");
+        expect(result.text, `${name} must say nothing is buffered`).toContain(
+          "nothing is currently buffered from it",
+        );
+        expect(
+          result.text,
+          `${name} must not claim data is present when the ring is empty`,
+        ).not.toContain("what follows is from it");
+        expect(
+          (result.json as { exitedProcess: { packageName: string } | null }).exitedProcess,
+          `${name}'s payload must carry exitedProcess too, not just its prose`,
+        ).toMatchObject({ packageName: "com.example.shop", device: "Test Device" });
+      }
+
+      expect(status.json).toMatchObject({ bufferedEvents: 0 });
+      expect(findings.json).toMatchObject({ connected: false, findings: [] });
+      expect(wwh.json).toMatchObject({ connected: false });
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 describe("resolveSdkDir's blank sdk.dir from local.properties (M6b)", () => {

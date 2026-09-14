@@ -95,31 +95,64 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     }
   }
 
+  type ExitedProcess = { packageName: string; device: string; disconnectedAt: string };
+
   /**
    * GRA-163: the payload half of the stale-ring fix, so an agent can tell
    * live data from post-mortem data without parsing the prose next to it.
-   * `connected` is whatever the caller already worked out for the field of
-   * that name in its own payload — this does not recompute it, because
-   * `findings`' empty-ring arm and its non-empty one ask different
-   * questions of `device.state` (see that tool below) and this helper has
-   * no business re-deciding which one applies.
    *
-   * Null whenever `connected` is true (nothing to explain) or nothing has
+   * GRA-163 QA round 1: this used to take the caller's own `connected`
+   * value as a parameter, so it agreed with whichever sense of "connected"
+   * the caller happened to be using for its own boolean field — loose
+   * (isAttached) on an empty-ring branch, strict (pending === null) on a
+   * non-empty one. That is fine for the `connected` field itself (GRA-157
+   * chose the loose sense on purpose, for "should an agent keep polling"),
+   * but `exitedProcess` answers a different question — "is what I am about
+   * to hand back confirmed to belong to the running process" — and that
+   * question has exactly one right answer regardless of which `connected`
+   * a given branch reports, or it is the same defect this ticket exists to
+   * remove: three tools (or two branches of one tool) disagreeing about the
+   * same state. So this is gated on `device.pendingMessage() === null`
+   * directly — the strict sense, always, independent of the caller's own
+   * `connected` — which is also why `porthole_status` (which never had a
+   * `connected` field at all) and `findings`/`what_was_happening`'s
+   * empty-ring branches (which report the loose sense) now all agree with
+   * the non-empty branches on when this is null.
+   *
+   * Null whenever a session is currently confirmed live, or nothing has
    * ever exited in this server's lifetime (`device.lastExited` starts
    * null). Otherwise the last confirmed process and when its socket closed,
    * in the same shape every tool that calls this returns it in, so the
    * three tools' payloads agree on more than just prose.
    */
-  function exitedProcessField(
-    connected: boolean,
-  ): { packageName: string; device: string; disconnectedAt: string } | null {
-    if (connected || !device.lastExited) return null;
+  function exitedProcessField(): ExitedProcess | null {
+    if (device.pendingMessage() === null || !device.lastExited) return null;
     const { hello, disconnectedAt } = device.lastExited;
     return {
       packageName: hello.packageName,
       device: hello.device,
       disconnectedAt: new Date(disconnectedAt).toISOString(),
     };
+  }
+
+  /**
+   * The prose half, and — after QA round 1 — the *only* place any tool says
+   * anything about an exited process. `device.ts`'s `pendingMessage()` used
+   * to append its own sentence here ("whatever is still buffered is from
+   * X"), which was wrong on any branch where nothing actually is buffered:
+   * `pendingMessage()` has no visibility into `timeline.buffer()`, only
+   * this file does. `hasBufferedData` must be true only when the ring this
+   * particular answer is about genuinely has content — every call site
+   * below passes the same fact it already used to choose its branch (the
+   * `!span`/`events.length === 0` checks), never a guess.
+   */
+  function exitedProcessNotice(exited: ExitedProcess | null, hasBufferedData: boolean): string {
+    if (!exited) return "";
+    return hasBufferedData
+      ? `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; what ` +
+          "follows is from it, not from what is running now. "
+      : `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; nothing ` +
+          "is currently buffered from it. ";
   }
 
   // ---------------------------------------------------------------------------
@@ -241,19 +274,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // null only when state === "connected", which now guarantees `hello`
       // is set, so the non-null assertion below is the invariant, not a hope.
       const pending = device.pendingMessage();
+      const bufferedEvents = timeline.buffer().length;
       // GRA-163: same structured field findings and what_was_happening carry
       // — null once connected, otherwise the last confirmed process and when
-      // it exited, in the payload as well as folded into `pending`'s prose
-      // (device.ts's withExitedSessionNote()), so an agent reading any of
-      // the three tools' JSON alone sees the same fact.
-      const exitedProcess = exitedProcessField(pending === null);
+      // it exited, so an agent reading any of the three tools' JSON alone
+      // sees the same fact. QA round 1: `exitedProcessNotice()` builds the
+      // matching sentence from `bufferedEvents` above, so it can never claim
+      // buffered data this tool is not itself reporting any.
+      const exitedProcess = exitedProcessField();
+      const notice = exitedProcessNotice(exitedProcess, bufferedEvents > 0);
       const payload = {
         state: device.state,
         host: HOST,
         port: PORT,
         app: device.hello,
         timelineUi: timeline.isRunning() ? timeline.url() : null,
-        bufferedEvents: timeline.buffer().length,
+        bufferedEvents,
         lastError: device.lastError,
         // GRA-96: null on a healthy handshake, otherwise the same sentence
         // `summary` uses below — reported in the payload too so a caller
@@ -274,10 +310,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // actionable message... not a generic failure" into the actual summary
       // text an agent reads, rather than a field it has to know to check.
       const summary =
-        pending ??
-        device.protocolMismatch ??
-        `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
-          `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`;
+        notice +
+        (pending ??
+          device.protocolMismatch ??
+          `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
+            `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`);
       return ok(summary, payload);
     },
   );
@@ -328,11 +365,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // own comment for why the two cannot share one boolean.
         const connected = isAttached(device.state);
         const pending = device.pendingMessage();
+        // GRA-163 QA round 1: called on this branch too now — an empty ring
+        // can still have a `lastExited` behind it (reconnect, hello clears
+        // the ring, then the new process dies before emitting anything),
+        // and `porthole_status` was already reporting that unconditionally
+        // while this branch reported nothing at all, which is the exact
+        // cross-tool disagreement this ticket exists to remove.
+        // `hasBufferedData: false` because this branch is reached only when
+        // the ring is empty — the prose must not claim otherwise.
+        const exitedProcess = exitedProcessField();
+        const notice = exitedProcessNotice(exitedProcess, false);
         if (pending !== null) {
-          return ok(pending, { window: null, findings: [], connected });
+          return ok(notice + pending, { window: null, findings: [], connected, exitedProcess });
         }
         const summary = `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`;
-        return ok(summary, { window: null, findings: [], connected });
+        return ok(notice + summary, { window: null, findings: [], connected, exitedProcess });
       }
 
       const buffered = timeline.buffer();
@@ -358,15 +405,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // Structured, not just prose (per the founder-pending assumption this
       // ticket is built on): null once connected, otherwise the process
       // `device` last confirmed and when it exited, so an agent can branch
-      // on this without parsing the summary text.
-      const exitedProcess = exitedProcessField(connected);
-      const notice = connected
-        ? ""
-        : exitedProcess
-          ? `These findings are from ${exitedProcess.packageName} on ${exitedProcess.device}, which ` +
-            `exited at ${exitedProcess.disconnectedAt}, not from what is running now. `
-          : "Nothing has confirmed itself as the running process yet, so these findings are not yet " +
-            "confirmed to be live. ";
+      // on this without parsing the summary text. `hasBufferedData: true`
+      // because this is the non-empty branch — the ring genuinely has
+      // events, even if the requested window clips around them.
+      const exitedProcess = exitedProcessField();
+      const notice = exitedProcessNotice(exitedProcess, true);
 
       // Asking about a moment the ring no longer holds returns nothing, which is
       // indistinguishable from a moment when nothing happened. They are opposite
@@ -790,12 +833,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // branch below asks the strict question instead.
         const connected = isAttached(device.state);
         const pending = device.pendingMessage();
+        // GRA-163 QA round 1: same fix as findings' empty-ring arm — an
+        // empty ring can still have a `lastExited` behind it, and
+        // `porthole_status` was already reporting that unconditionally
+        // while this branch reported nothing, the same cross-tool
+        // disagreement. `hasBufferedData: false`: this branch is reached
+        // only when the ring is empty.
+        const exitedProcess = exitedProcessField();
+        const notice = exitedProcessNotice(exitedProcess, false);
         if (pending !== null) {
-          return ok(pending, { moment: null, connected });
+          return ok(notice + pending, { moment: null, connected, exitedProcess });
         }
         return ok(
-          `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`,
-          { moment: null, connected },
+          notice +
+            `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`,
+          { moment: null, connected, exitedProcess },
         );
       }
 
@@ -809,7 +861,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // time someone asked.
       const pending = device.pendingMessage();
       const connected = pending === null;
-      const exitedProcess = exitedProcessField(connected);
+      const exitedProcess = exitedProcessField();
 
       let moment_at = at;
       let clock: { bootMs: number; sleepMs: number; sampledAt: number } | null = null;
@@ -833,16 +885,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         return ok("Give either `at` or `bootMs`.", { moment: null, connected, exitedProcess });
       }
 
-      // A short prefix for the two branches below that actually describe
-      // ring content, matching findings' own wording so an agent reading
-      // both tools about the same stale window sees the same story.
-      const notice = connected
-        ? ""
-        : exitedProcess
-          ? `This is from ${exitedProcess.packageName} on ${exitedProcess.device}, which exited at ` +
-            `${exitedProcess.disconnectedAt}, not from what is running now. `
-          : "Nothing has confirmed itself as the running process yet, so this is not yet confirmed to " +
-            "be live. ";
+      // The same shared sentence findings uses, so an agent reading both
+      // tools about the same stale window sees the same story — not two
+      // hand-written near-duplicates that can drift apart from each other.
+      // `hasBufferedData: true`: this is the non-empty branch.
+      const notice = exitedProcessNotice(exitedProcess, true);
 
       // Outside the buffer is a different answer from "nothing happened", and
       // conflating them is how an agent concludes the app was idle.

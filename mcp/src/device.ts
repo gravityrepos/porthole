@@ -75,6 +75,29 @@ export type ConnectionState = "disconnected" | "connecting" | "handshaking" | "c
  * of the session boundary: a `hello` discards the previous session's ring;
  * a close records the one that just ended, for whoever reads what is left
  * of it afterward.
+ *
+ * **This is the coordinator's assumption pending the founder's override,
+ * not the founder's decision.**
+ * **Assumed: option 2 — label answers as belonging to the exited process,
+ * rather than clearing the ring or hiding them.**
+ * Retaining `lastExited` (instead of, say, dropping it the moment the
+ * socket closes, which would make a stale ring silently indistinguishable
+ * from an empty one again) is that bet, placed here because this is where
+ * someone unwinding it would start looking — a search of `index.ts` alone
+ * would not show that a decision was made, only its consequences. If the
+ * founder rules the other way, the fix is to stop setting this field (or to
+ * clear it, and the ring, on close) rather than to hunt through every
+ * caller. Five tests currently pin this bet and would need to change with
+ * it: `index.test.ts`'s "AC1: with a non-empty ring and the device
+ * disconnected, all three tools agree and none reports the dead process as
+ * live", "AC2/AC5: with a non-empty ring and the device handshaking again,
+ * no tool reports connected: true about the previous session's data", "AC3:
+ * on socket close the ring is kept, not cleared, and device.lastExited
+ * records who it belonged to", and "the ordinary case is unaffected:
+ * connected: true still means the ring is confirmed live, not a previous
+ * session's leftovers"; and `timeline.test.ts`'s "the ring is not cleared
+ * by a close — only by a new hello — so it still holds what an exited
+ * process produced".
  */
 export interface ExitedSession {
   /** The process that produced whatever the ring may still hold. */
@@ -118,8 +141,11 @@ export class DeviceClient extends EventEmitter {
    * from then on, the most recent one — overwritten on every subsequent
    * close that had a `hello`, so it always names the last confirmed process,
    * never a stale one from further back. See the close handler in
-   * `connect()` for where it is set, and `pendingMessage()` for where it
-   * turns into the sentence every tool shares.
+   * `connect()` for where it is set, and index.ts's `exitedProcessField()`/
+   * `exitedProcessNotice()` for where it turns into what every tool
+   * actually reports (moved there after QA round 1: this field says whose
+   * process it is, but only the caller knows whether the ring it is about
+   * to describe is empty — see `pendingMessage()`'s own comment below).
    */
   lastExited: ExitedSession | null = null;
   /**
@@ -385,13 +411,38 @@ export class DeviceClient extends EventEmitter {
    * same guarantee this switch has always had, instead of leaving them to
    * reinvent it inconsistently or not at all.)
    */
+  /**
+   * GRA-163 QA round 1: this used to append an "exited process" sentence of
+   * its own (`withExitedSessionNote()`, now removed) whenever `lastExited`
+   * was set. That sentence unconditionally said "whatever is still buffered
+   * is from X" — true on the branch that has a non-empty ring, false on the
+   * branch that does not (the empty-ring-plus-`lastExited` case: a process
+   * reconnects, clears the ring on its own `hello`, then dies before
+   * emitting anything), because this method has no way to know which one it
+   * is being asked from — `pendingMessage()` only ever sees `this.state`
+   * and `this.lastExited`, never `timeline.buffer().length`. Two more
+   * faults rode along with that one: `porthole_status` calls
+   * `exitedProcessField()` unconditionally while `findings`/
+   * `what_was_happening` only called it from their non-empty-ring branch,
+   * so the same state produced a payload with `exitedProcess` on one tool
+   * and without it on another — and the prose was folded into this string
+   * while the structured field lived in index.ts, so the two could disagree
+   * even about a single tool's own single answer.
+   *
+   * The fix moves all of it to index.ts's `exitedProcessNotice()`, called
+   * from every branch of every tool that might describe ring content,
+   * because index.ts is the one place that actually knows whether the ring
+   * it is about to describe is empty. This method goes back to answering
+   * exactly what its name says: how to reconnect, or that the handshake is
+   * still pending. Nothing else.
+   */
   pendingMessage(): string | null {
     switch (this.state) {
       case "disconnected":
       case "connecting":
-        return this.withExitedSessionNote(this.notConnectedMessage());
+        return this.notConnectedMessage();
       case "handshaking":
-        return this.withExitedSessionNote(HANDSHAKE_PENDING_MESSAGE);
+        return HANDSHAKE_PENDING_MESSAGE;
       case "connected":
         return null;
       default: {
@@ -399,42 +450,6 @@ export class DeviceClient extends EventEmitter {
         throw new Error(`DeviceClient: unhandled ConnectionState '${exhaustive as string}'`);
       }
     }
-  }
-
-  /**
-   * GRA-163: the other half of the session boundary a `hello` already had —
-   * a `hello` discards whatever ring content came before it (timeline.ts),
-   * so whoever asks about a ring a close left behind needs to be told, in
-   * the one sentence every tool already shares via `pendingMessage()`,
-   * whose process that data is from and when it stopped. Appended rather
-   * than folded into `notConnectedMessage()`/`HANDSHAKE_PENDING_MESSAGE`
-   * themselves, so those two keep meaning exactly what their names say —
-   * "here is how to reconnect" / "still waiting on the first check-in" —
-   * and this stays the one place that adds "and by the way, whatever you
-   * asked about belongs to a process that is gone."
-   *
-   * A no-op until something has actually exited (`lastExited` starts null
-   * and only a close that had a `hello` ever sets it), so a fresh server
-   * that has never seen a device says exactly what it said before this
-   * ticket.
-   *
-   * A single `\n`, not a blank line: every tool's `ok()` helper splits its
-   * own "summary\n\n{json}" on the first blank line to hand a test the
-   * payload half (see testing/harness.ts's parsePayload()), so a second
-   * blank line inside the summary itself would be read as the boundary
-   * instead, and everything after it — this sentence, and the real JSON —
-   * would fail to parse as the payload. Single newlines nest inside the
-   * summary safely; `notConnectedMessage()` below already relies on the
-   * same thing for its own numbered list.
-   */
-  private withExitedSessionNote(base: string): string {
-    if (!this.lastExited) return base;
-    const { hello, disconnectedAt } = this.lastExited;
-    return (
-      `${base}\nWhatever is still buffered is from ${hello.packageName} on ${hello.device}, ` +
-      `which exited at ${new Date(disconnectedAt).toISOString()}. That is the last thing it did, ` +
-      "not what is happening now."
-    );
   }
 
   notConnectedMessage(): string {
