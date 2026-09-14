@@ -305,6 +305,16 @@ describe("line framing", () => {
 // reconnect
 // ---------------------------------------------------------------------------
 
+// GRA-170 note: this file never constructs a TimelineServer, so none of the
+// "reconnect" tests below touch the event ring at all — they exercise only
+// DeviceClient's own backoff/timer machinery (does it wait, does stop()
+// cancel a pending timer, and so on). The session-boundary decision that
+// ticket is about — does a new hello clear or carry forward the ring — lives
+// entirely in timeline.ts and is only reachable where a DeviceClient is
+// wired to a real TimelineServer, which is index.test.ts's job (see its
+// "GRA-170" describe block) and testing/harness.ts's buildRig/
+// buildRingInState. Nothing here was a candidate for that measurement, and
+// nothing here needed to change for it.
 describe("reconnect", () => {
   it("waits before retrying, and doubles the wait on a second consecutive failure", async () => {
     const server = trackServer(await startRawServer());

@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildRig, buildRingInState, waitUntil, type Rig } from "./testing/harness.js";
+import {
+  buildRig,
+  buildRingInState,
+  waitUntil,
+  DEFAULT_STARTED_AT_MS,
+  type Rig,
+} from "./testing/harness.js";
 import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 import { collapseBlankLines } from "./index.js";
@@ -815,7 +821,9 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       expect(rig.timeline.buffer().length).toBeGreaterThan(0);
       rig.fakeDevice.disconnectAll();
       await waitUntil(() => rig.device.state === "disconnected");
-      expect(rig.device.lastExited?.hello.startedAt).toBe(0);
+      // GRA-170: the default fixture's startedAt is no longer a fixed 0 —
+      // it is this session's actual first value from the default handler.
+      expect(rig.device.lastExited?.hello.startedAt).toBe(DEFAULT_STARTED_AT_MS);
 
       // Session B: a genuinely new process (different startedAt), which
       // clears the ring on its own hello, then exits before emitting
@@ -872,7 +880,121 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       await rig.close();
     }
   });
+});
 
+describe("GRA-170: an ordinary reconnect's startedAt, not a fixture accident, decides whether the ring clears", () => {
+  // Measured before this ticket, across this file and device.test.ts (the
+  // only two files that can drive DeviceClient through the rig; device.test.ts
+  // never wires a TimelineServer, so it has zero candidates structurally):
+  // exactly one test ever let a *second* real hello land after a first one
+  // through buildRig/buildRingInState — the "empty-ring-plus-lastExited"
+  // test above — and it only reached the "clear" branch by overriding
+  // `startedAt` to 999 by hand. Nothing reached "carry forward" through the
+  // rig at all, because the old default handler returned the same literal
+  // `0` on every call and no reconnect test used two unmodified hellos to
+  // find out what that would do. That is the blast radius this ticket
+  // exists to close: not "every reconnect test carries forward", but "no
+  // reconnect test exercises either branch via the plain default fixture,
+  // and the one test that reaches the decision at all forces it by hand."
+  //
+  // These two tests are the missing evidence, one per branch, both driven
+  // through a real reconnect (disconnect, then device.stop()/start() —
+  // buildRingInState's own deterministic-reconnect trick) rather than by
+  // constructing a TimelineServer and firing a synthetic `hello` at it by
+  // hand the way timeline.test.ts's own (non-rig) tests do.
+
+  it("an unmodified reconnect — no test-side startedAt override — clears the ring by default", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      expect(rig.timeline.buffer().length).toBeGreaterThan(0);
+      const firstStartedAt = rig.device.hello?.startedAt;
+
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      rig.device.stop();
+      // No `hello` override at all: the plain default fixture, exactly what
+      // most reconnect-adjacent tests in this file already use for other
+      // reasons. This is the case that used to be structurally incapable of
+      // clearing anything, because the default's startedAt never changed.
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+
+      expect(rig.device.hello?.startedAt).not.toBe(firstStartedAt);
+      expect(rig.timeline.buffer()).toHaveLength(0);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("a reconnect that deliberately repeats the same startedAt (the same process, after a transient drop) carries the ring forward", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      const before = rig.timeline.buffer().length;
+      expect(before).toBeGreaterThan(0);
+      const pinnedStartedAt = rig.device.hello?.startedAt;
+      expect(pinnedStartedAt).toBeDefined();
+
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      rig.device.stop();
+      // The deliberate case (AC3): hold startedAt fixed across the
+      // reconnect, exactly as a still-alive process would, since
+      // SystemClock.uptimeMillis() does not change just because the socket
+      // dropped and came back.
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: pinnedStartedAt,
+        collectors: [],
+      }));
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+
+      expect(rig.device.hello?.startedAt).toBe(pinnedStartedAt);
+      expect(rig.timeline.buffer()).toHaveLength(before);
+
+      // The other half of the same claim, in the same test: inverting the
+      // comparison to clear only when startedAt EQUALS the previous value
+      // (the inverse of the real rule) leaves `this.startedAt` permanently
+      // undefined -- a real number is never `===` to it, so the assignment
+      // never fires, on this hello or any later one. The ring then never
+      // clears again for the rest of the test, which would pass everything
+      // asserted above vacuously regardless of whether the two startedAt
+      // values above actually differ. Reconnecting once more with a
+      // genuinely different startedAt, and requiring the ring to clear
+      // *this* time, rules that out: only a comparison that treats "equal"
+      // and "different" as distinct cases passes both halves.
+      rig.fakeDevice.disconnectAll();
+      await waitUntil(() => rig.device.state === "disconnected");
+      rig.device.stop();
+      rig.fakeDevice.on("hello", () => ({
+        protocol: 1,
+        packageName: "com.example.shop",
+        processName: "com.example.shop",
+        versionName: "1.0.0-test",
+        device: "Test Device",
+        sdkInt: 34,
+        startedAt: (pinnedStartedAt ?? 0) + 1,
+        collectors: [],
+      }));
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "connected");
+
+      expect(rig.device.hello?.startedAt).toBe((pinnedStartedAt ?? 0) + 1);
+      expect(rig.timeline.buffer()).toHaveLength(0);
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("more GRA-163 tools coverage", () => {
   // QA round 2: exitedProcessNotice()'s QA-round-1 rewrite silently dropped
   // a sentence the original fix had -- "Nothing has confirmed itself as the
   // running process yet" -- for the one case that has real buffered data
