@@ -404,10 +404,18 @@ checkout · 9.8s · Google sdk_gphone16k_x86_64 (60Hz) · com.example.shop
            worst 276ms · most often in swapBuffers
 
   quiet: memory
+
+  frame budget 16.7ms · 214 recompositions · 4 calls (2 still open) · 11 queries
 ```
 
-The last line is not padding. A report that only ever lists problems gives no
-signal that the things it did not mention were actually checked.
+The last "quiet" line is not padding. A report that only ever lists problems
+gives no signal that the things it did not mention were actually checked.
+
+The footer's counts include spans that were still open when the capture
+ended — a call that never came back still happened and still cost the wait —
+and the `(N still open)` qualifier travels with the number it counts so "4
+calls" cannot be misread as four completions. It is left off entirely when
+nothing was open, which is almost every run.
 
 Every finding carries how strongly it can be claimed. **observed** means the
 device said so — a query ran on the main thread, a frame missed its deadline.
@@ -505,7 +513,8 @@ runtime's own atrace sections are already inside it: navigations, HTTP calls,
 queries and stalls, so the capture arrives annotated with what the app was
 doing and not only what the kernel was doing. The result says how many of
 those labels it found, which is how you know the annotation actually
-happened.
+happened — and on at least one physical device (see Status) that count came
+back zero, so treat it as something to check per device rather than assumed.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of five questions — jank, thread states,
@@ -1015,7 +1024,13 @@ the PNG and not at the SVG.
 
 ## API documentation
 
-The published surface is about twenty declarations. Dokka renders them:
+The published surface is 53 declarations — 8 classes and objects (`Porthole`,
+`PortholeInitializer`, `BodyCapture` and its `Companion`, `KtorPorthole`,
+`OkHttpPorthole`, `RoomPorthole`, `SqlitePorthole`) and 45 members and
+top-level functions between them — counted from `site/api`'s own pages (58
+total, minus the module root, the navigation sidebar and the three
+package-overview pages, which describe the surface but are not part of it).
+Dokka renders them:
 
 ```bash
 ./gradlew :runtime:apiDocs     # into site/api, where the site serves it
@@ -1114,6 +1129,32 @@ wired into `check`) fails the PR instead of drifting in silently.
 No job in this workflow ever runs a publish task, and the workflow has no
 secrets — the emulator, the AGP compatibility matrix and anything nightly are
 separate, slower checks that live outside this workflow entirely.
+
+**The exec-bit rule.** A `*.sh` or `gradlew` committed from a Windows checkout
+arrives in the index as mode `100644` — Windows has no such bit to record —
+and a Linux runner honours the bit it does have. The first run on `origin`
+died at the very first step, `./gradlew: Permission denied`, and
+`tools/avd/create.sh` had the identical fault waiting behind it. The fix is
+`git update-index --chmod=+x <path>`, applied directly to the index since a
+Windows working tree cannot express the bit for a normal `git add` to pick
+up; `git ls-files -s <path>` reading `100755` (not `100644`) is how to check
+it stuck. Any script this repo adds for a Linux or macOS runner — or for a
+contributor on either — needs this checked once at commit time, because nothing
+short of running it there will surface the omission before CI does.
+
+**The stopwatch-test lesson.** A test that asserts a fold finishes inside some
+fixed number of milliseconds is a bet on the runner's speed, not on the code:
+one such test passed at ~5ms locally and took 14.6ms on a GitHub runner,
+failing a green PR on a machine-speed difference rather than a regression.
+What the test actually needed to guard was that parents resolve through an
+index rather than a scan — so it now times a scan of the same data in the
+same process and asserts the indexed fold comes in under half of that,
+warming the indexed run once first so the JIT's first-call cost doesn't land
+on the measurement. The scan is a fixed multiple slower on every machine
+tried, which is the property that matters; an absolute millisecond bar is
+either flaky on the slow machine or meaningless on the fast one. Any new
+timing assertion in this codebase should measure against a same-process
+baseline, never a wall-clock constant.
 
 ## Emulator
 
@@ -1280,26 +1321,45 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-341 tests: 129 on the JVM, 212 across the MCP server and the timeline. The
+723 tests: 312 on the JVM (`./gradlew test`, which covers both build types of
+`runtime` and `runtime-noop` plus the Gradle plugin — 2 skipped, 0 failures),
+301 in the MCP server (`cd mcp && npm test` — 1 skipped, gated on a real
+`trace_processor` binary and a real capture both being present on the
+machine, which they are not on a fresh checkout), and 110 in the timeline UI
+(`cd mcp && npm run test:ui`, a separate suite from the server's). The
 runtime's arithmetic is covered where it has been wrong before — a long freeze
 counted in refreshes rather than in relaxed deadlines, and a stalled thread's
 stack ordered so the app's own frames lead. A parity test compares the public
 surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
-integration. Two of the 129 are the AGP compatibility pair, which skips unless
-given a version to check, since it needs an SDK and the network.
+integration. The 2 JVM skips are the AGP compatibility pair, which needs an
+SDK and the network and skips cleanly without a version to check.
 
-**Verified on a device:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
+**Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
 the database inspector, restart, automatic view model naming, a captured
 system trace holding the runtime's own atrace spans, and the fixed
 system-trace questions interpreted from trace_processor's real output
 against it.
 
-**Not verified on a device:** `PortholeBackStack` for Navigation 3. The sample
-is on Navigation 2, and adding an alpha dependency to prove a six-line wrapper
-was a poor trade; the function it calls is unit tested. Blocking GC is also
-written but never observed — the emulator did not produce one.
+**Not verified on the emulator:** `PortholeBackStack` for Navigation 3. The
+sample is on Navigation 2, and adding an alpha dependency to prove a six-line
+wrapper was a poor trade; the function it calls is unit tested. Blocking GC is
+also written but never observed — the emulator did not produce one.
 
-**Not done:** a physical device, multi-process apps, and Compose versions other
-than the one in the version catalog.
+**Verified on a physical device:** wave 2's integration QA ran end to end on a
+real Pixel 10 Pro XL, fingerprint
+`google/mustang_beta/mustang:17/CP41.260814.003.B1/16166531:user/release-keys`
+(Android 17, API 37), and passed. One hard negative from that run is worth
+recording plainly rather than folding into a PASS: this device does not
+honour `perfetto --app <pkg>` — a capture came back with `portholeLabels: 0`
+and `ATRACE_TAG_APP` stayed clear, and the same thing reproduced running
+`perfetto` by hand outside Porthole entirely, so it is not this tool's own
+bug. Whether that is the beta build or the Android 17 platform is not yet
+known — it needs a second device to tell apart. Read this as neither "works
+on Android 17" nor "broken on Android 17"; it is an open question on one
+fingerprint.
+
+**Not done:** multi-process apps, and Compose versions other than the one in
+the version catalog. A second physical device, to separate the app-label gap
+above from this specific build.
