@@ -238,7 +238,19 @@ export class DeviceClient extends EventEmitter {
     // Only "connecting" (TCP handshake still in flight — this.socket exists
     // but has not fired "connect" yet) and "disconnected" have no usable
     // socket to write a frame to.
-    if (!socket || (this.state !== "handshaking" && this.state !== "connected")) {
+    //
+    // GRA-162 QA: this used to spell the same condition out longhand as
+    // `this.state !== "handshaking" && this.state !== "connected"`, which is
+    // isAttached() negated (De Morgan's) but written by hand instead of
+    // through it. That made this a sixth silent site the AC 2 probe did not
+    // catch: a `!==` pair against two literals still compiles unchanged when
+    // the union grows, and a future state would fall through to "not
+    // attached" and reject every request() call with the not-connected
+    // message even while the socket was genuinely live. Routing through
+    // isAttached() puts this choke point behind the same never-guarded
+    // switch as the rest, so a new state fails `tsc` here too instead of
+    // silently rejecting live traffic.
+    if (!socket || !isAttached(this.state)) {
       return Promise.reject(new Error(this.notConnectedMessage()));
     }
 
