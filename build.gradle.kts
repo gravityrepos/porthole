@@ -1,5 +1,11 @@
 import java.io.ByteArrayOutputStream
 import java.time.LocalDate
+import live.gravitylabs.porthole.release.changelogUnreleasedBody
+import live.gravitylabs.porthole.release.cutChangelog
+import live.gravitylabs.porthole.release.validateCleanTree
+import live.gravitylabs.porthole.release.validateHasReleasableChanges
+import live.gravitylabs.porthole.release.validateReleaseBranch
+import live.gravitylabs.porthole.release.validateReleaseVersion
 
 plugins {
     // Every plugin the subprojects use has to be declared here, even though
@@ -104,6 +110,29 @@ fun gradlewCommand(vararg args: String): List<String> {
     return listOf(rootDir.resolve(wrapper).absolutePath) + args
 }
 
+// `buildSrc` is where the release-tasks changelog parser and gates live now
+// (GRA-100 fix pass: they need to be unit tested, and a Kotlin script body
+// cannot be imported by a test). Unlike gradle-plugin, buildSrc is not an
+// included build `./gradlew test` can add as a task dependency — Gradle
+// builds and compiles it automatically to configure this script, but does
+// not expose it through `gradle.includedBuild(...)` the way `pluginBuild`
+// above is exposed, and does not run its own `test` task as a side effect of
+// anything short of asking for it by name. Proven by running `./gradlew
+// help` with a deliberately failing buildSrc test in place: BUILD SUCCESSFUL.
+// So `test`/`check` fork a fresh process for `-p buildSrc test`, the same
+// structural move `release` already makes for `-p gradle-plugin` and for the
+// same reason: nothing else reaches across the build boundary.
+val buildSrcTest = tasks.register("buildSrcTest") {
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    description = "Runs buildSrc's tests (the release-tasks changelog parser and gates) via a fresh process."
+    notCompatibleWithConfigurationCache(
+        "shells out to a fresh gradlew process for buildSrc, which this build's task graph cannot depend on directly",
+    )
+    doLast { exec { commandLine(gradlewCommand("-p", "buildSrc", "test", "--rerun-tasks")) } }
+}
+tasks.named("test") { dependsOn(buildSrcTest) }
+tasks.named("check") { dependsOn(buildSrcTest) }
+
 // npm on Windows is a shim (.cmd), which the JVM's process launcher cannot
 // exec directly the way it execs a real binary — it needs a shell in front
 // of it. Nothing analogous is needed for git or gradlew, which are real
@@ -134,54 +163,11 @@ fun writeCatalogVersion(catalogFile: File, newVersion: String) {
     catalogFile.writeText(pattern.replaceFirst(text, "porthole = \"$newVersion\""))
 }
 
-// Anchored to the start of a line on purpose: this file's own intro prose
-// mentions `` `## [Unreleased]` `` inline as documentation, and a plain
-// substring search (`String.indexOf`) matched that mention instead of the
-// actual heading — found by running `release` for real in a scratch clone,
-// where it silently mistook the whole Unreleased section for empty. Only a
-// `##` at column zero is a heading; nothing that appears mid-line counts.
-val changelogUnreleasedHeadingPattern = Regex("""^## \[Unreleased\]""", RegexOption.MULTILINE)
-val changelogVersionHeadingPattern = Regex("""^## \[""", RegexOption.MULTILINE)
-
-/** The `[bodyStart, bodyEnd)` offsets between `## [Unreleased]` and the next `## [` heading (or EOF). */
-fun changelogUnreleasedBounds(changelog: String): Pair<Int, Int> {
-    val heading = changelogUnreleasedHeadingPattern.find(changelog)
-    requireNotNull(heading) { "CHANGELOG.md has no '## [Unreleased]' heading at the start of a line" }
-    val bodyStart = changelog.indexOf('\n', heading.range.last).let { if (it < 0) changelog.length else it + 1 }
-    val next = changelogVersionHeadingPattern.find(changelog, bodyStart)
-    val bodyEnd = next?.range?.first ?: changelog.length
-    return bodyStart to bodyEnd
-}
-
-fun changelogUnreleasedBody(changelog: String): String {
-    val (bodyStart, bodyEnd) = changelogUnreleasedBounds(changelog)
-    return changelog.substring(bodyStart, bodyEnd)
-}
-
-/** A `### Heading` with no `- ` entries under it is not a change, just a label. */
-fun hasReleasableChanges(unreleasedBody: String): Boolean =
-    unreleasedBody.lineSequence().any { it.trimStart().startsWith("- ") }
-
-/**
- * Moves the Unreleased body into a new dated section and leaves a fresh,
- * empty Unreleased behind for whatever lands next. Subsections that carried
- * no entries are dropped rather than carried forward empty.
- */
-fun cutChangelog(changelog: String, newVersion: String, date: String): String {
-    val (bodyStart, bodyEnd) = changelogUnreleasedBounds(changelog)
-    val body = changelog.substring(bodyStart, bodyEnd)
-
-    val carried = body.split(Regex("""(?=^### )""", RegexOption.MULTILINE))
-        .filter { section -> section.lineSequence().any { it.trimStart().startsWith("- ") } }
-        .joinToString("") { it.trimEnd('\n') + "\n\n" }
-        .trimEnd('\n')
-
-    val freshUnreleased = "\n### Added\n\n### Changed\n\n### Fixed\n\n"
-    val datedSection = "## [$newVersion] - $date\n\n$carried\n\n"
-
-    return (changelog.substring(0, bodyStart) + freshUnreleased + datedSection + changelog.substring(bodyEnd))
-        .replace(Regex("""\n{3,}"""), "\n\n")
-}
+// The CHANGELOG.md parser (changelogUnreleasedBody, hasReleasableChanges,
+// cutChangelog) and the release-version/branch/tree gates (validateRelease*)
+// used to live here inline. They moved to buildSrc (GRA-100 fix pass) so
+// they can be unit tested — see buildSrc/src/main/kotlin/live/gravitylabs/porthole/release
+// and the imports at the top of this file.
 
 /**
  * The paths `npm pack` would ship, with the Vite content hash in the UI
@@ -279,8 +265,6 @@ fun writeScratchConsumer(dir: File, portholeVersion: String, agpVersion: String)
     )
 }
 
-val releaseVersionPattern = Regex("""\d+\.\d+\.\d+(-.+)?""")
-
 tasks.register("release") {
     group = "release"
     description = "Bumps the version, updates the changelog, runs the full suite, commits and tags. " +
@@ -288,53 +272,82 @@ tasks.register("release") {
     notCompatibleWithConfigurationCache(releaseIncompatibleWithCache)
 
     doLast {
-        val newVersion = providers.gradleProperty("version").orNull
-            ?: throw GradleException("release needs -Pversion=X.Y.Z")
-        if (!releaseVersionPattern.matches(newVersion)) {
-            throw GradleException("version must look like X.Y.Z or X.Y.Z-suffix; got '$newVersion'")
-        }
-
-        val branch = gitOutput("rev-parse", "--abbrev-ref", "HEAD")
-        if (branch != "main") {
-            throw GradleException("release only runs on main; the current branch is '$branch'")
-        }
-
-        val dirty = gitOutput("status", "--porcelain")
-        if (dirty.isNotBlank()) {
-            throw GradleException("release needs a clean working tree; 'git status --porcelain' is not empty")
-        }
+        // `-Pversion=X.Y.Z` is the primary form, but Windows PowerShell 5.1
+        // — this project's primary shell — mangles an *unquoted* dotted
+        // value on the command line before Gradle ever sees it: `gradlew
+        // release -Pversion=0.2.0` arrives as the two tokens `-Pversion=0`
+        // and `.2.0`, and Gradle reports "Task '.2.0' not found" long before
+        // this task's own validation runs. Quoting the whole assignment
+        // (`"-Pversion=0.2.0"`, documented in README.md) avoids that
+        // entirely. $PORTHOLE_RELEASE_VERSION is a second way in for anyone
+        // who would rather not depend on quoting a property value correctly
+        // on every shell this ever runs on.
+        val newVersion = validateReleaseVersion(
+            providers.gradleProperty("version").orNull
+                ?: providers.environmentVariable("PORTHOLE_RELEASE_VERSION").orNull,
+        )
+        validateReleaseBranch(gitOutput("rev-parse", "--abbrev-ref", "HEAD"))
+        validateCleanTree(gitOutput("status", "--porcelain"))
 
         val changelogFile = file("CHANGELOG.md")
         val changelogText = changelogFile.readText()
-        if (!hasReleasableChanges(changelogUnreleasedBody(changelogText))) {
-            throw GradleException(
-                "CHANGELOG.md's Unreleased section has no entries; add one before releasing $newVersion",
-            )
+        validateHasReleasableChanges(changelogUnreleasedBody(changelogText), newVersion)
+
+        // From here on this task has real side effects on disk. A failure
+        // partway through used to leave gradle/libs.versions.toml and
+        // mcp/package.json bumped and uncommitted — release's own dirty-tree
+        // gate then refused the very next attempt, and recovery was a manual
+        // `git checkout --`. Both files are written only here, at run time,
+        // never committed as part of this change, and rolled back to the
+        // text read above if anything past this point throws.
+        val catalogFile = file("gradle/libs.versions.toml")
+        val packageJsonFile = file("mcp/package.json")
+        val originalCatalogText = catalogFile.readText()
+        val originalPackageJsonText = packageJsonFile.readText()
+        fun rollBackVersionFiles() {
+            logger.lifecycle("release: failed after bumping the version; rolling gradle/libs.versions.toml and mcp/package.json back")
+            catalogFile.writeText(originalCatalogText)
+            packageJsonFile.writeText(originalPackageJsonText)
         }
 
-        logger.lifecycle("release: writing porthole = \"$newVersion\"")
-        val catalogFile = file("gradle/libs.versions.toml")
-        writeCatalogVersion(catalogFile, newVersion)
+        try {
+            logger.lifecycle("release: writing porthole = \"$newVersion\"")
+            writeCatalogVersion(catalogFile, newVersion)
 
-        // Fresh process: see the note above this section for why this cannot
-        // be a task dependency of `release` itself.
-        exec { commandLine(gradlewCommand("-p", "gradle-plugin", "generateMcpPackageVersion", "--rerun-tasks")) }
+            // Fresh process: see the note above this section for why this
+            // cannot be a task dependency of `release` itself.
+            exec { commandLine(gradlewCommand("-p", "gradle-plugin", "generateMcpPackageVersion", "--rerun-tasks")) }
 
-        logger.lifecycle("release: running the full check and both builds")
-        exec { commandLine(gradlewCommand("check", "build", "--rerun-tasks")) }
+            logger.lifecycle("release: running the full check and both builds")
+            exec { commandLine(gradlewCommand("check", "build", "--rerun-tasks")) }
 
-        logger.lifecycle("release: running both npm suites")
-        exec { commandLine(npmCommand("ci")); workingDir = file("mcp") }
-        exec { commandLine(npmCommand("run", "build")); workingDir = file("mcp") }
-        exec { commandLine(npmCommand("test")); workingDir = file("mcp") }
-        exec { commandLine(npmCommand("run", "test:ui")); workingDir = file("mcp") }
+            logger.lifecycle("release: running both npm suites")
+            exec { commandLine(npmCommand("ci")); workingDir = file("mcp") }
+            exec { commandLine(npmCommand("run", "build")); workingDir = file("mcp") }
+            exec { commandLine(npmCommand("test")); workingDir = file("mcp") }
+            exec { commandLine(npmCommand("run", "test:ui")); workingDir = file("mcp") }
+        } catch (e: Exception) {
+            rollBackVersionFiles()
+            throw e
+        }
 
         logger.lifecycle("release: cutting CHANGELOG.md")
         changelogFile.writeText(cutChangelog(changelogText, newVersion, LocalDate.now().toString()))
 
-        exec { commandLine(listOf("git", "add", "--", "gradle/libs.versions.toml", "mcp/package.json", "CHANGELOG.md")) }
-        exec { commandLine(listOf("git", "commit", "-m", "Release v$newVersion")) }
-        exec { commandLine(listOf("git", "tag", "-a", "v$newVersion", "-m", "v$newVersion")) }
+        val releaseFiles = listOf("gradle/libs.versions.toml", "mcp/package.json", "CHANGELOG.md")
+        try {
+            exec { commandLine(listOf("git", "add", "--") + releaseFiles) }
+            exec { commandLine(listOf("git", "commit", "-m", "Release v$newVersion")) }
+            exec { commandLine(listOf("git", "tag", "-a", "v$newVersion", "-m", "v$newVersion")) }
+        } catch (e: Exception) {
+            // `git add` may already have staged the bump; unstage before
+            // restoring the working tree, or the index and HEAD disagree
+            // even once the files on disk are back to what they were.
+            exec { commandLine(listOf("git", "reset", "--") + releaseFiles) }
+            changelogFile.writeText(changelogText)
+            rollBackVersionFiles()
+            throw e
+        }
 
         println(
             """
@@ -357,8 +370,9 @@ tasks.register("release") {
 
 tasks.register("releaseDryRun") {
     group = "release"
-    description = "Rehearses a release with no publishing credentials: npm pack, publishToMavenLocal plus a " +
-        "real consumer resolution, and publishPlugins --validate-only. Never publishes."
+    description = "Rehearses a release with no publishing credentials: npm pack, publishToMavenLocal for both " +
+        "the runtime AARs and the Gradle plugin, a real consumer resolution of all three, and validatePlugins. " +
+        "Never publishes, and never calls publishPlugins or its --validate-only form."
     notCompatibleWithConfigurationCache(releaseIncompatibleWithCache)
 
     doLast {
@@ -394,6 +408,22 @@ tasks.register("releaseDryRun") {
         exec {
             commandLine(gradlewCommand("publishToMavenLocal", "-PRELEASE_SIGNING_ENABLED=false", "--rerun-tasks"))
         }
+
+        // The Gradle plugin is a separate included build (gradle-plugin/);
+        // the root `publishToMavenLocal` above reaches only :runtime and
+        // :runtime-noop, never :gradle-plugin — root `./gradlew
+        // publishToMavenLocal --dry-run` shows an 82-task graph entirely
+        // under `:runtime:*`/`:runtime-noop:*`, no `:gradle-plugin:*` task
+        // in it anywhere. Without this, the consumer resolution below only
+        // ever succeeded because some *earlier* command had left the plugin
+        // sitting in this machine's ~/.m2 already — on a clean checkout, or
+        // at any version after a real bump, it failed with "Plugin ... was
+        // not found in any of the following sources" (GRA-100 QA). No
+        // `-PRELEASE_SIGNING_ENABLED`: com.gradle.plugin-publish's
+        // `publishToMavenLocal` has no signing task in its graph to gate —
+        // confirmed with `-p gradle-plugin publishToMavenLocal --dry-run`.
+        logger.lifecycle("releaseDryRun: publishToMavenLocal -p gradle-plugin")
+        exec { commandLine(gradlewCommand("-p", "gradle-plugin", "publishToMavenLocal", "--rerun-tasks")) }
 
         val catalogFile = file("gradle/libs.versions.toml")
         val version = readCatalogEntry(catalogFile, "porthole")
@@ -434,9 +464,10 @@ tasks.register("releaseDryRun") {
             |releaseDryRun OK for v$version. Nothing was published:
             |
             |  npm pack would ship ${actualFiles.size} files, matching mcp/expected-package-files.txt
-            |  publishToMavenLocal produced live.gravitylabs.porthole:runtime:$version and
-            |    :runtime-noop:$version, and a separate project (no includeBuild) resolved both
-            |    of those plus the plugin itself from mavenLocal() alone
+            |  publishToMavenLocal (root, then -p gradle-plugin) produced
+            |    live.gravitylabs.porthole:runtime:$version, :runtime-noop:$version and the plugin
+            |    itself, and a separate project (no includeBuild) resolved all three from
+            |    mavenLocal() alone — the same resolution a real consumer app performs
             |  validatePlugins found no problems with the plugin's own structure, entirely locally
             |
             |A real release still ends with the four commands `release` prints — this only
