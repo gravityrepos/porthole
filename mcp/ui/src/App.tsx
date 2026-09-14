@@ -88,10 +88,53 @@ export function protocolMismatchMessage(hello: Hello | null): string | null {
   );
 }
 
+/**
+ * GRA-96 QA follow-up: this workspace has no DOM-rendering test setup
+ * (Header.tsx's `connectionDisplay` and InsightsPanel's `FindingsLoader` are
+ * pulled out of their components for the same reason), and deliberately
+ * stays that way — jsdom/happy-dom plus a testing-library is a real
+ * dependency decision for the whole `ui` package, bigger than one ticket,
+ * and should not arrive as a side effect of a fix pass. That left a real
+ * gap: `protocolMismatchMessage` was tested directly, but the JSX condition
+ * that decided *whether to render the banner at all* (`{protocolMismatch &&
+ * (<div>...)}`, inline in App()'s JSX) was not exercised by anything, so
+ * either that condition or the `protocolMismatch` variable feeding it could
+ * be broken with the UI suite staying 124/124 green.
+ *
+ * The fix is to make the render *decision* — not just the message text — a
+ * pure function, by having it return the actual node (or null) rather than
+ * a boolean or a string. React elements are plain objects
+ * (`{ type, props, ... }`) built by JSX/`React.createElement` at *call*
+ * time, not by a DOM renderer, so `protocolBanner(hello).type` and
+ * `.props.children` are inspectable in a plain Node test environment with
+ * no jsdom involved — confirmed by the tests in App.test.tsx below, which
+ * import this function and read `.type`/`.props` directly. App()'s JSX
+ * collapses to `{protocolBanner(store.hello)}`, a single call with nothing
+ * left beside it to mutate independently.
+ *
+ * This does not make the *rendering* tested — nothing proves App()'s JSX
+ * still calls this function with the right argument, or that React actually
+ * mounts what it returns. That residual gap is real, but it is now "does
+ * the JSX invoke this one function correctly", which is a much smaller and
+ * more obvious thing to get wrong than the condition-plus-variable pair this
+ * replaces.
+ */
+export function protocolBanner(hello: Hello | null) {
+  const message = protocolMismatchMessage(hello);
+  if (!message) return null;
+  return (
+    <div
+      role="alert"
+      className="border-b border-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_12%,transparent)] px-3.5 py-1.5 font-mono text-[11px] text-[var(--danger)]"
+    >
+      {message}
+    </div>
+  );
+}
+
 export function App() {
   const { store, version } = useDeviceStream();
   const setup = useSetup(isAttached(store.connection));
-  const protocolMismatch = protocolMismatchMessage(store.hello);
   // One extra view, so a path check earns its keep where a router would not.
   const [route, setRoute] = useState(() => location.pathname.replace(/\/+$/, ""));
 
@@ -238,15 +281,10 @@ export function App() {
         />
         {/* GRA-96 AC3: right below the connection state, not buried in a
             panel — a mismatched build should be the first thing read, since
-            every lane below can be silently wrong data instead of no data. */}
-        {protocolMismatch && (
-          <div
-            role="alert"
-            className="border-b border-[var(--danger)] bg-[color-mix(in_srgb,var(--danger)_12%,transparent)] px-3.5 py-1.5 font-mono text-[11px] text-[var(--danger)]"
-          >
-            {protocolMismatch}
-          </div>
-        )}
+            every lane below can be silently wrong data instead of no data.
+            A single call to the tested protocolBanner() above, not an
+            inline condition — see that function's comment. */}
+        {protocolBanner(store.hello)}
       </div>
 
       <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)_clamp(200px,30vw,332px)]">

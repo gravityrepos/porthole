@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { isAttached, protocolMismatchMessage } from "./App";
+import { isAttached, protocolBanner, protocolMismatchMessage } from "./App";
 import type { ConnectionState, Hello } from "./types";
 
 /**
@@ -74,5 +74,32 @@ describe("protocolMismatchMessage (GRA-96 AC3)", () => {
     expect(message).toContain("2");
     expect(message).toContain("1");
     expect(message).toMatch(/update|reload/i);
+  });
+});
+
+describe("protocolBanner (GRA-96 QA follow-up: the render decision, not just the text)", () => {
+  // React elements returned by JSX are plain objects built at call time, not
+  // by a DOM renderer -- `.type`/`.props` are inspectable here with no
+  // jsdom and no render step. This is what makes the render *decision*
+  // testable without adding a DOM test environment (the EM's explicit
+  // ruling): App()'s JSX now collapses to a single `{protocolBanner(...)}`
+  // call, so mutating what gets shown means mutating this function, which
+  // these tests exercise directly.
+
+  it("renders nothing before hello has landed or when protocols agree", () => {
+    expect(protocolBanner(null)).toBeNull();
+    expect(protocolBanner(hello({ protocol: 1 }))).toBeNull();
+  });
+
+  it("renders an alert carrying protocolMismatchMessage's own text when protocols disagree", () => {
+    const mismatched = hello({ protocol: 2 });
+    const banner = protocolBanner(mismatched);
+    expect(banner).not.toBeNull();
+    // Same element shape App.tsx used to hand-write inline -- proving this
+    // function decides both "whether" (non-null) and "what" (role="alert",
+    // the exact message) instead of just the message half.
+    expect(banner!.type).toBe("div");
+    expect(banner!.props.role).toBe("alert");
+    expect(banner!.props.children).toBe(protocolMismatchMessage(mismatched));
   });
 });
