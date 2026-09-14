@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { buildTrace, type Finding } from "./trace.js";
 import type { DeviceEvent } from "./device.js";
 import { buildRig } from "./testing/harness.js";
+import { stripComments } from "./testing/stripComments.js";
 
 /**
  * The shape of the MCP surface, rather than any one tool's output.
@@ -328,51 +329,11 @@ function productionSourceFiles(): string[] {
     .sort();
 }
 
-/**
- * Blanks out comments without disturbing line numbers, so an offender's
- * reported line still points at the real line. A block comment's content
- * becomes spaces, one per character, with its own newlines left in place —
- * so a match that would have spanned the comment's start and end markers is
- * neither created nor hidden by the blanking; a line ("//") comment is cut
- * from its marker to the end of its line. This does not understand string
- * literals — a comment marker inside a quoted string would be mistaken for
- * a real comment — which is a known, accepted gap in a file whose own
- * `toolSource()` above makes the same kind of trade: loose about things
- * this codebase does not actually do, strict about the one thing that
- * matters here.
- *
- * Normalises CRLF to LF first (GRA-166 item 6). Without this, a line ending
- * in "\r\n" defeats the "//" stripping below: `.` in `/\/\/.*$/` does not
- * match "\r" (it is a line terminator to the regex engine even without the
- * `s` flag), and `$` without the `m` flag demands the true end of the
- * string — so on a line carrying a trailing "\r" the pattern never reaches
- * it and the replace silently no-ops, leaving the raw comment text in
- * place. That is exactly how a prose comment like `// ... state ===
- * "connected" ...` in `index.ts` starts matching the offender pattern below
- * on a CRLF-ending file even though the only line-ending byte changed and
- * no comparison was added: a false positive on a clean tree, which is worse
- * than a missed real one — see the describe block below for why. `.gitattributes`
- * pins `* text=auto eol=lf` (an `eol` directive overrides `core.autocrlf`
- * unconditionally), so a plain `git clone` cannot actually produce this —
- * the real routes are an editor saving CRLF, a patch or archive applied
- * outside git, or an edit to `.gitattributes` itself. Narrower than it
- * looks, but still a route, and still a false positive rather than a missed
- * real one when it happens. Collapsing "\r\n" to "\n" up front costs
- * nothing (it cannot change how many lines the file has, only how each
- * line's own terminator is spelled) and makes every reader of this function
- * — comment-blanking included — see the same normalised text regardless of
- * which line ending the checkout happened to produce.
- */
-function stripComments(text: string): string {
-  const normalized = text.replace(/\r\n/g, "\n");
-  const noBlockComments = normalized.replace(/\/\*[\s\S]*?\*\//g, (block) =>
-    block.replace(/[^\n]/g, " "),
-  );
-  return noBlockComments
-    .split("\n")
-    .map((line) => line.replace(/\/\/.*$/, ""))
-    .join("\n");
-}
+// `stripComments()` used to live here as its own copy (and a second,
+// drifting copy in device.test.ts) — see `./testing/stripComments.ts` for
+// the shared implementation, its CRLF-normalisation rationale (GRA-166 item
+// 6), and the string-literal-awareness fix and documented residue (GRA-168
+// items 1 and 3).
 
 describe("stripComments (GRA-166 item 6)", () => {
   it("blanks a // comment whose line ends in \\r\\n, not just \\n", () => {

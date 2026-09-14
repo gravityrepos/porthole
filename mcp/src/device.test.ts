@@ -4,6 +4,7 @@ import net, { type AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DeviceClient, PROTOCOL_VERSION, type DeviceEvent } from "./device.js";
+import { stripComments } from "./testing/stripComments.js";
 
 /**
  * device.ts is the only place that turns raw TCP bytes from the Android
@@ -680,19 +681,16 @@ describe("protocol mismatch", () => {
  * outside comments, and finding zero or more than one is a parser giving up
  * rather than guessing, not a drift assertion.
  *
- * Duplicated here rather than imported from surface.test.ts: this ticket's
- * `Owns` is `device.test.ts`, not `surface.test.ts` (a different agent
- * owns that file, per BRIEFING.md's rule that two nodes never own one
- * file), and the function is small enough that duplicating it is cheaper
- * than coupling two files neither of us is meant to both edit.
+ * GRA-168 item 3: this used to be duplicated here rather than imported from
+ * surface.test.ts, because this ticket's `Owns` was `device.test.ts`, not
+ * `surface.test.ts` (a different agent owned that file, per BRIEFING.md's
+ * rule that two nodes never own one file), and the function was small
+ * enough that duplicating it was cheaper than coupling two files neither of
+ * us was meant to both edit. That constraint no longer holds — see
+ * `./testing/stripComments.ts` for the shared implementation, which also
+ * carries the string-literal-awareness fix from GRA-168 item 1 (this scan
+ * gets that fix by construction now, without a second patch).
  */
-function stripComments(text: string): string {
-  const noBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "));
-  return noBlockComments
-    .split("\n")
-    .map((line) => line.replace(/\/\/.*$/, ""))
-    .join("\n");
-}
 
 /**
  * GRA-166 item 7, QA round 2: the strip above was proven by hand -- mutate
