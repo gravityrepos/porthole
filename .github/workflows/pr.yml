@@ -77,8 +77,78 @@ jobs:
       - name: ./gradlew check
         run: ./gradlew check --warning-mode all
 
+      # GRA-159: a green ./gradlew check tells you every test that ran
+      # passed, not how many ran. This reads the JUnit XML every JVM test
+      # task already writes under */build/test-results/**, whether check
+      # above passed or failed, and prints the one thing that XML normally
+      # only exists to feed an HTML report nobody opens on a green build:
+      # total/passed/failed/skipped, and the skipped tests by name. The
+      # skipped set is the actual signal — see GRA-159 for the four times a
+      # test silently not running was mistaken for a test passing.
+      #
+      # Plain xml.etree rather than a new dependency: this file only owns
+      # this workflow, and the input is Gradle's own trusted test-result
+      # output from the same job, not attacker-controlled XML.
+      - name: Print JVM test summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import xml.etree.ElementTree as ET
+
+          total = passed = failed = skipped = 0
+          skipped_names = []
+          failed_names = []
+
+          paths = sorted(glob.glob("**/build/test-results/**/*.xml", recursive=True))
+          for path in paths:
+              try:
+                  root = ET.parse(path).getroot()
+              except ET.ParseError:
+                  continue
+              suite_name = root.get("name", path)
+              for tc in root.findall("testcase"):
+                  total += 1
+                  name = f"{tc.get('classname', suite_name)} > {tc.get('name', '?')}"
+                  if tc.find("skipped") is not None:
+                      skipped += 1
+                      skipped_names.append(name)
+                  elif tc.find("failure") is not None or tc.find("error") is not None:
+                      failed += 1
+                      failed_names.append(name)
+                  else:
+                      passed += 1
+
+          lines = ["### Gradle (JVM) test summary", ""]
+          if not paths:
+              lines.append("No JUnit XML found under **/build/test-results/ — the test tasks did not run or produced no output.")
+          else:
+              lines.append(f"total: {total}  passed: {passed}  failed: {failed}  skipped: {skipped}")
+              lines.append("")
+              if skipped_names:
+                  for n in skipped_names:
+                      lines.append(f"- skipped: {n}")
+              else:
+                  lines.append("no skipped tests")
+              for n in failed_names:
+                  lines.append(f"- failed: {n}")
+
+          text = "\n".join(lines)
+          print(text)
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write(text + "\n")
+          PY
+
+      # Uploaded on every run, not just on failure: the defect this ticket
+      # exists for (GRA-75, GRA-137, GRA-144, and the local.properties skip
+      # GRA-150 hit) is invisible precisely on green builds, so the evidence
+      # has to survive a passing run too.
       - name: Upload test reports
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gradle-test-reports
@@ -141,8 +211,97 @@ jobs:
       # `.github/workflows/pr.yml` and `README.md#ci` only). Calling both
       # scripts here is the workaround; fixing `npm test` is left as a
       # follow-up for whoever next owns mcp/package.json.
-      - run: npm test
-      - run: npm run test:ui
+      #
+      # GRA-159: both suites now also write JUnit XML, invoked as `npx
+      # vitest run` directly rather than through the npm scripts above —
+      # `npm test -- <args>` forwards extra flags fine, but `npm run test:ui`
+      # is itself `npm run test --workspace porthole-ui`, and a second layer
+      # of `npm run` does not forward a third `--` (checked by hand: the
+      # reporter flags never reached vitest through it). Calling `vitest run`
+      # straight, with the same config each package already has, runs the
+      # exact same tests the two scripts above run — only the reporter
+      # changes, never the test selection.
+      - name: npm test (server suite, + JUnit XML)
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=test-results/server-junit.xml
+      - name: npm run test:ui (+ JUnit XML)
+        working-directory: mcp/ui
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=../test-results/ui-junit.xml
+
+      # Same instrument as the Gradle job, same reason: a green matrix leg
+      # here is exactly where the server suite's one real skip (the
+      # trace_processor end-to-end test, GRA-144) goes unnoticed today.
+      # Regex-based, not an XML library: vitest's own junit reporter always
+      # writes one flat <testcase> per test with an optional nested
+      # <skipped/> or <failure>, so this reads that shape directly rather
+      # than adding a dependency for a format this workflow's own steps just
+      # produced.
+      - name: Print vitest test summary
+        if: always()
+        run: |
+          node -e '
+            const { readFileSync, readdirSync, existsSync, appendFileSync } = require("node:fs");
+            const { join } = require("node:path");
+
+            const dir = "test-results";
+            const files = existsSync(dir)
+              ? readdirSync(dir).filter((f) => f.endsWith(".xml")).sort()
+              : [];
+
+            const lines = ["### Node (vitest, ${{ matrix.os }}) test summary", ""];
+            if (files.length === 0) {
+              lines.push("No JUnit XML found under mcp/test-results/ — the test steps did not produce output.");
+            }
+
+            const decode = (s) =>
+              s.replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&quot;/g, "\"").replace(/&apos;/g, "'"'"'").replace(/&amp;/g, "&");
+
+            for (const file of files) {
+              const xml = readFileSync(join(dir, file), "utf8");
+              let total = 0, passed = 0, failed = 0, skipped = 0;
+              const skippedNames = [];
+              const failedNames = [];
+              const testcaseRe = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
+              let m;
+              while ((m = testcaseRe.exec(xml))) {
+                const attrs = m[1];
+                const body = m[3] || "";
+                const nameMatch = attrs.match(/\bname="([^"]*)"/);
+                const classMatch = attrs.match(/\bclassname="([^"]*)"/);
+                const name = decode(`${classMatch ? classMatch[1] + " > " : ""}${nameMatch ? nameMatch[1] : "?"}`);
+                total++;
+                if (/<skipped\b/.test(body)) {
+                  skipped++;
+                  skippedNames.push(name);
+                } else if (/<failure\b/.test(body) || /<error\b/.test(body)) {
+                  failed++;
+                  failedNames.push(name);
+                } else {
+                  passed++;
+                }
+              }
+              lines.push(`**${file}** — total: ${total}  passed: ${passed}  failed: ${failed}  skipped: ${skipped}`);
+              for (const n of skippedNames) lines.push(`- skipped: ${n}`);
+              for (const n of failedNames) lines.push(`- failed: ${n}`);
+              lines.push("");
+            }
+
+            const text = lines.join("\n");
+            console.log(text);
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + "\n");
+            }
+          '
+
+      # Always, not on failure: same reasoning as the Gradle job's upload.
+      # One name per OS leg — upload-artifact rejects two uploads with the
+      # same name in one run, and this matrix has three.
+      - name: Upload vitest test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vitest-test-results-${{ matrix.os }}
+          path: mcp/test-results/
+          if-no-files-found: warn
 
       - run: npm run lint
 
