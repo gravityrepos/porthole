@@ -62,6 +62,12 @@ dependencies {
     // back off is an Android framework question, not a Kotlin one, and
     // nothing about it can be answered from a plain JVM test double.
     testImplementation(libs.robolectric)
+
+    // work-runtime is compileOnly in production (optional integration), which
+    // otherwise leaves it off the unit-test classpath entirely: classPresent
+    // ("androidx.work.WorkManager") is false under Robolectric and the whole
+    // WorkManagerPorthole branch of install() never runs in any test.
+    testImplementation(libs.work.runtime)
 }
 
 // The published API is about twenty declarations, and most of them are

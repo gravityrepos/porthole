@@ -106,9 +106,12 @@ object Porthole {
         val watchdog: MainThreadWatchdog,
         val nav: NavCollector?,
         val nav3: BackStackCollector,
+        val workManager: WorkManagerPorthole?,
         val server: PortholeSocketServer,
         val startedAt: Long,
         val collectors: List<String>,
+        val setupHandler: Handler,
+        val setupTask: Runnable,
     )
 
     // -- lifecycle ---------------------------------------------------------
@@ -164,8 +167,21 @@ object Porthole {
             watchdog.start()
             collectors += "main_thread"
 
-            if (classPresent("androidx.work.WorkManager")) {
-                if (WorkManagerPorthole.install(app, inflight, ring)) collectors += "workmanager"
+            // Nullable and only constructed once WorkManager is confirmed
+            // present: WorkManagerPorthole's own fields reference WorkInfo,
+            // so building an instance before that check would throw
+            // NoClassDefFoundError in an app that never depended on
+            // work-runtime in the first place. An instance rather than the
+            // stateless object this used to be, so shutdown() has something
+            // to call stop() on — the coroutine scope observe() opens used to
+            // live only in that function's local variable, reachable by
+            // nothing once it returned, session included.
+            val workManager = if (classPresent("androidx.work.WorkManager")) {
+                WorkManagerPorthole().also { wm ->
+                    if (wm.install(app, inflight, ring)) collectors += "workmanager"
+                }
+            } else {
+                null
             }
 
             snapshots.start()
@@ -184,6 +200,13 @@ object Porthole {
             val finalCollectors = collectors.toList()
 
             val server = PortholeSocketServer(port, ring)
+            // Held as fields, not posted from a value nobody keeps, so
+            // shutdown() can cancel this specific callback rather than
+            // leaving it to fire into a session that has already ended. Ten
+            // install/shutdown cycles used to queue ten of these, each
+            // outliving the session that scheduled it.
+            val setupHandler = Handler(Looper.getMainLooper())
+            val setupTask = Runnable { Setup.log() }
             val s = Session(
                 app = app,
                 port = port,
@@ -202,9 +225,12 @@ object Porthole {
                 watchdog = watchdog,
                 nav = nav,
                 nav3 = BackStackCollector(ring),
+                workManager = workManager,
                 server = server,
                 startedAt = nowMs(),
                 collectors = finalCollectors,
+                setupHandler = setupHandler,
+                setupTask = setupTask,
             )
             registerMethods(s)
             server.start()
@@ -213,7 +239,7 @@ object Porthole {
             Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
             // After the app has had a chance to build its clients. Asking
             // now would report everything as missing.
-            Handler(Looper.getMainLooper()).postDelayed({ Setup.log() }, SETUP_REPORT_DELAY_MS)
+            setupHandler.postDelayed(setupTask, SETUP_REPORT_DELAY_MS)
         }
     }
 
@@ -228,6 +254,7 @@ object Porthole {
     fun shutdown() {
         synchronized(this) {
             val s = session ?: return
+            s.setupHandler.removeCallbacks(s.setupTask)
             s.server.stop()
             s.snapshots.stop()
             s.logs.stop()
@@ -238,6 +265,7 @@ object Porthole {
             s.watchdog.stop()
             s.recompositions.stop()
             s.nav?.unregister()
+            s.workManager?.stop()
             session = null
         }
     }

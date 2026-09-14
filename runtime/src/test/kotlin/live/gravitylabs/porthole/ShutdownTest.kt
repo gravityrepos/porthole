@@ -6,9 +6,12 @@ import android.app.Application
 import android.content.Context
 import android.net.ConnectivityManager
 import java.lang.reflect.Method
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -81,6 +84,18 @@ class ShutdownTest {
         val connectivity = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val baselineNetworkCallbacks = connectivity?.let { shadowOf(it).networkCallbacks.size } ?: 0
 
+        // Compose's own bookkeeping, not Robolectric's - SnapshotWatcher calls
+        // Snapshot.registerApplyObserver, which appends to this static list on
+        // androidx.compose.runtime.snapshots.SnapshotKt and never shrinks it
+        // back down on its own. Deleting `s.snapshots.stop()` from
+        // Porthole.shutdown() (mutation M09) left every existing test green
+        // because nothing here read this list; ten cycles with the line
+        // removed take it from 1 to 11, one orphaned observer per install.
+        val observersField = Class.forName("androidx.compose.runtime.snapshots.SnapshotKt")
+            .getDeclaredField("applyObservers")
+            .apply { isAccessible = true }
+        val baselineObservers = (observersField.get(null) as Collection<*>).size
+
         repeat(10) {
             Porthole.install(app, port = 0)
             Porthole.shutdown()
@@ -108,6 +123,11 @@ class ShutdownTest {
                 shadowOf(connectivity).networkCallbacks.size,
             )
         }
+        assertEquals(
+            "Compose Snapshot apply observers",
+            baselineObservers,
+            (observersField.get(null) as Collection<*>).size,
+        )
     }
 
     // -- every collector with a start has a matching stop, and shutdown()
@@ -191,6 +211,98 @@ class ShutdownTest {
             (m.name == "start" && m.parameterCount == 0) ||
                 (m.name == "install" && m.parameterCount >= 1)
         }
+
+    // -- the reported collector list is the real one, not a placeholder -----
+
+    @Test
+    fun `install reports the collectors that actually started`() {
+        // Session(collectors = emptyList()) would leave every other test in
+        // this suite green - nothing here previously read the `hello`
+        // payload's `collectors` field back. Building `finalCollectors` before
+        // Session exists (see the comment at that call site in Porthole.kt)
+        // removed a real hazard - a later reordering silently reading the
+        // list before every append had happened - but nothing asserted the
+        // content, so a regression that handed Session an empty list outright
+        // would have passed too.
+        Porthole.install(app, port = 0)
+        try {
+            val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
+            @Suppress("UNCHECKED_CAST")
+            val collectors = sessionFields(session)["collectors"] as? List<String>
+                ?: error("Session.collectors was not a List<String>")
+
+            assertTrue(
+                "expected install() to report the collectors it actually started; got: $collectors",
+                collectors.containsAll(
+                    listOf("recompositions", "semantics_tree", "state", "inflight", "logs", "memory"),
+                ),
+            )
+        } finally {
+            Porthole.shutdown()
+        }
+    }
+
+    // -- the one leak this Windows host cannot show on its own ---------------
+
+    @Test
+    fun `shutdown destroys a still-running log capture process`() {
+        // On this host `logcat` does not exist, so LogCollector's own two
+        // spawn attempts fail within milliseconds and its reader thread exits
+        // on its own whether or not stop() ever runs - which is exactly why
+        // deleting `s.logs.stop()` from Porthole.kt (mutation M05) left every
+        // test in this file green. On a device, logcat is a real process
+        // whose stdout pipe blocks the reader thread in a native read that
+        // Thread.interrupt() cannot reach; only process.destroy() ends it.
+        //
+        // `findstr` with a pattern that can never match reproduces that
+        // shape without a device: it blocks reading its own stdin and writes
+        // nothing to stdout while it waits, so it is a real, still-running
+        // process exactly like an unread logcat pipe. Swapping it into the
+        // real Session's real LogCollector - the same reflection this file
+        // already uses on Session's own fields - and then calling the real
+        // Porthole.shutdown() is what proves the production call chain
+        // (`s.logs.stop()` -> `process?.destroy()`) actually reaches it,
+        // rather than testing LogCollector in isolation.
+        val stub = runCatching {
+            ProcessBuilder("findstr", "zzz_this_pattern_never_matches_zzz").start()
+        }.getOrNull()
+        assumeTrue("findstr is not available on this host", stub != null)
+        val process = stub!!
+
+        try {
+            Porthole.install(app, port = 0)
+            val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
+            val logs = sessionFields(session)["logs"] ?: error("Session has no `logs` field")
+            setPrivateField(logs, "process", process)
+
+            assertTrue("expected the stub process to still be running", process.isAlive)
+
+            Porthole.shutdown()
+
+            assertTrue(
+                "shutdown() should have destroyed the process s.logs.stop() was holding",
+                process.waitFor(5, TimeUnit.SECONDS),
+            )
+            assertFalse(process.isAlive)
+        } finally {
+            runCatching { process.destroyForcibly() }
+        }
+    }
+
+    private fun setPrivateField(target: Any, name: String, value: Any?) {
+        var klass: Class<*>? = target.javaClass
+        while (klass != null) {
+            try {
+                val field = klass.getDeclaredField(name)
+                field.isAccessible = true
+                field.set(target, value)
+                return
+            } catch (_: NoSuchFieldException) {
+                klass = klass.superclass
+            }
+        }
+        error("could not find field `$name` on ${target.javaClass}")
+    }
 
     // -- shutdown() is safe when there was never anything to shut down ------
 
