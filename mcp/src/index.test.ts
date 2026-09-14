@@ -43,20 +43,28 @@ describe("the harness", () => {
 
 describe("every tool that declares a window examines the same span", () => {
   /**
-   * Tools discovered by their live JSON schema, not by name. The shared
-   * `windowShape` always declares exactly these three keys together —
-   * `sinceMs`, `from` and `to` — so a tool's schema carrying all three is
-   * how you tell "this tool takes the shared window" from a tool that
-   * merely happens to have a `from`/`to` pair for some other reason
-   * (`ask_system_trace` takes `from`/`to` scoped to a trace file, with no
-   * `sinceMs`, and is deliberately not part of this group).
+   * Tools discovered by their live JSON schema, not by name. This used to
+   * require all three of `sinceMs`/`from`/`to` together, on the theory that
+   * the shared `windowShape` always declares exactly those three keys. That
+   * missed the actual historical bug shape: a tool that hand-rolls its own
+   * window by declaring only `sinceMs` (or only `from`/`to`) is invisible to
+   * an "all three" filter, so it never gets exercised by the test below and
+   * a broken hand-rolled window would sail through. Declaring *any* of the
+   * three is now enough to be considered windowed.
+   *
+   * The one legitimate exception is `ask_system_trace`, which takes `from`/
+   * `to` scoped to a trace file rather than the shared live-buffer window,
+   * and has no `sinceMs` — it is named here rather than narrowing the filter
+   * back down, so a future tool with a real `sinceMs`-only bug cannot hide
+   * behind a broadened exclusion.
    */
   async function windowedTools(rig: Rig): Promise<string[]> {
     const tools = await rig.client.listTools();
     return tools
       .filter((t) => {
+        if (t.name === "ask_system_trace") return false;
         const props = (t.inputSchema.properties ?? {}) as Record<string, unknown>;
-        return "sinceMs" in props && "from" in props && "to" in props;
+        return "sinceMs" in props || "from" in props || "to" in props;
       })
       .map((t) => t.name);
   }
