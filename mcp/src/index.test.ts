@@ -884,7 +884,15 @@ describe("a stale ring says whose process it belongs to, not the running one's (
   // belong to whatever is connecting now, and this ticket's entire subject
   // is tools telling the truth about their state instead of saying
   // nothing.
-  it("with no known predecessor and no confirmed live session, findings and what_was_happening still say the data is not yet confirmed live", async () => {
+  //
+  // QA round 3: this test originally called only findings and
+  // what_was_happening, so dropping the restored sentence at
+  // porthole_status alone -- a call site this test never exercised -- left
+  // the suite green. The three-tool loop below is the same one the
+  // thirteenth-row test above uses, for the same reason: any tool this
+  // ticket's scope later grows to cover is checked by construction, not
+  // because someone remembered to add a fourth call.
+  it("with no known predecessor and no confirmed live session, all three tools still say the data is not yet confirmed live", async () => {
     const rig = await buildRig({
       connectDevice: false,
       handlers: { hello: () => new Promise(() => {}) },
@@ -895,19 +903,31 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
       expect(rig.device.lastExited).toBeNull();
 
+      const status = await rig.client.callTool("porthole_status", {});
       const findings = await rig.client.callTool("findings", {});
-      expect(findings.json).toMatchObject({ connected: false, exitedProcess: null });
-      expect(findings.text).toContain(
-        "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
-          "confirmed to be live.",
-      );
-
       const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
-      expect(wwh.json).toMatchObject({ connected: false, exitedProcess: null });
-      expect(wwh.text).toContain(
-        "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
-          "confirmed to be live.",
-      );
+
+      for (const [name, result] of [
+        ["porthole_status", status],
+        ["findings", findings],
+        ["what_was_happening", wwh],
+      ] as const) {
+        expect(
+          result.text,
+          `${name} should say nothing has confirmed itself as the running process`,
+        ).toContain(
+          "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
+            "confirmed to be live.",
+        );
+        expect(
+          (result.json as { exitedProcess: unknown }).exitedProcess,
+          `${name}'s payload must carry exitedProcess: null too, not just its prose`,
+        ).toBeNull();
+      }
+
+      expect(status.json).toMatchObject({ state: "handshaking" });
+      expect(findings.json).toMatchObject({ connected: false });
+      expect(wwh.json).toMatchObject({ connected: false });
     } finally {
       await rig.close();
     }
