@@ -117,6 +117,32 @@ describe("every tool that declares a window examines the same span", () => {
       await rig.close();
     }
   });
+
+  it("quotes the window from one tool's own output into another and gets the same span back", async () => {
+    // The literal workflow the shared window exists for: ask `findings`
+    // about a span, quote the `window` it reports back — not the from/to
+    // that was asked for, but what actually came back in the JSON — into a
+    // second tool, and see it examine the same span rather than resolving
+    // its own.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 9_000, data: {} },
+      ]);
+
+      const findings = await rig.client.callTool("findings", { from: 2_000, to: 7_000 });
+      const quoted = (findings.json as { window: { from: number; to: number; ms: number } }).window;
+      expect(quoted).toEqual({ from: 2_000, to: 7_000, ms: 5_000 });
+
+      const timeline = await rig.client.callTool("timeline", { from: quoted.from, to: quoted.to });
+      const examined = (timeline.json as { window: { from: number; to: number; ms: number } })
+        .window;
+      expect(examined).toEqual(quoted);
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 describe("findings", () => {
