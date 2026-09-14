@@ -711,6 +711,13 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       expect((wwh.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject({
         packageName: "com.example.shop",
       });
+      // QA round 2: this test asserted wwh.json but never wwh.text, so the
+      // mutation QA was sent back to prove (dropping exitedProcessNotice()
+      // from what_was_happening's non-empty-ring call site) went undetected
+      // here -- the one branch that mutation targets is the one branch
+      // whose prose nothing checked.
+      expect(wwh.text).toContain("com.example.shop");
+      expect(wwh.text).toContain("not from what is running now");
     } finally {
       await rig.close();
     }
@@ -860,6 +867,47 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       expect(status.json).toMatchObject({ bufferedEvents: 0 });
       expect(findings.json).toMatchObject({ connected: false, findings: [] });
       expect(wwh.json).toMatchObject({ connected: false });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // QA round 2: exitedProcessNotice()'s QA-round-1 rewrite silently dropped
+  // a sentence the original fix had -- "Nothing has confirmed itself as the
+  // running process yet" -- for the one case that has real buffered data
+  // but no known predecessor to name: the very first connection, still
+  // handshaking, with the ring already non-empty (GRA-163's own mechanism
+  // for reproducing the defect without hardware: buildRaceRig(), push one
+  // event before the deferred hello resolves). device.lastExited is null
+  // here -- nothing has ever exited in this server's lifetime -- so
+  // exitedProcess is null too, but the data still cannot be confirmed to
+  // belong to whatever is connecting now, and this ticket's entire subject
+  // is tools telling the truth about their state instead of saying
+  // nothing.
+  it("with no known predecessor and no confirmed live session, findings and what_was_happening still say the data is not yet confirmed live", async () => {
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
+    try {
+      rig.device.start();
+      await waitUntil(() => rig.device.state === "handshaking");
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      expect(rig.device.lastExited).toBeNull();
+
+      const findings = await rig.client.callTool("findings", {});
+      expect(findings.json).toMatchObject({ connected: false, exitedProcess: null });
+      expect(findings.text).toContain(
+        "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
+          "confirmed to be live.",
+      );
+
+      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      expect(wwh.json).toMatchObject({ connected: false, exitedProcess: null });
+      expect(wwh.text).toContain(
+        "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
+          "confirmed to be live.",
+      );
     } finally {
       await rig.close();
     }

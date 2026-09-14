@@ -145,14 +145,40 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
    * particular answer is about genuinely has content — every call site
    * below passes the same fact it already used to choose its branch (the
    * `!span`/`events.length === 0` checks), never a guess.
+   *
+   * `connected` (QA round 2): `exited` is null in two different
+   * situations — a confirmed live session (`connected: true`, nothing to
+   * say), and no confirmed live session *and* nothing has ever exited in
+   * this server's lifetime (the very first connection, still handshaking,
+   * with a ring already non-empty — GRA-163's own race mechanism:
+   * `buildRaceRig()`, push one event before the deferred `hello` resolves).
+   * The second case still has real data with no confirmed owner and needs
+   * its own sentence — the original fix said so ("Nothing has confirmed
+   * itself as the running process yet...") until this function's QA round 1
+   * rewrite silently dropped it while consolidating three call sites into
+   * one. Restored here, gated on there being data to caveat in the first
+   * place: an empty ring with no known predecessor has nothing worth
+   * flagging beyond what `pending`'s own message already says.
    */
-  function exitedProcessNotice(exited: ExitedProcess | null, hasBufferedData: boolean): string {
-    if (!exited) return "";
-    return hasBufferedData
-      ? `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; what ` +
-          "follows is from it, not from what is running now. "
-      : `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; nothing ` +
-          "is currently buffered from it. ";
+  function exitedProcessNotice(
+    exited: ExitedProcess | null,
+    hasBufferedData: boolean,
+    connected: boolean,
+  ): string {
+    if (exited) {
+      return hasBufferedData
+        ? `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; what ` +
+            "follows is from it, not from what is running now. "
+        : `${exited.packageName} on ${exited.device} exited at ${exited.disconnectedAt}; nothing ` +
+            "is currently buffered from it. ";
+    }
+    if (!connected && hasBufferedData) {
+      return (
+        "Nothing has confirmed itself as the running process yet, so what follows is not yet " +
+        "confirmed to be live. "
+      );
+    }
+    return "";
   }
 
   // ---------------------------------------------------------------------------
@@ -282,7 +308,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // matching sentence from `bufferedEvents` above, so it can never claim
       // buffered data this tool is not itself reporting any.
       const exitedProcess = exitedProcessField();
-      const notice = exitedProcessNotice(exitedProcess, bufferedEvents > 0);
+      const notice = exitedProcessNotice(exitedProcess, bufferedEvents > 0, pending === null);
       const payload = {
         state: device.state,
         host: HOST,
@@ -374,7 +400,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // `hasBufferedData: false` because this branch is reached only when
         // the ring is empty — the prose must not claim otherwise.
         const exitedProcess = exitedProcessField();
-        const notice = exitedProcessNotice(exitedProcess, false);
+        // `connected: pending === null` (the strict sense) here, not the
+        // loose `connected` above — inert in practice since
+        // `hasBufferedData: false` short-circuits both of
+        // exitedProcessNotice()'s non-exited cases to "", but kept correct
+        // rather than passing whichever local happens to be in scope.
+        const notice = exitedProcessNotice(exitedProcess, false, pending === null);
         if (pending !== null) {
           return ok(notice + pending, { window: null, findings: [], connected, exitedProcess });
         }
@@ -409,7 +440,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // because this is the non-empty branch — the ring genuinely has
       // events, even if the requested window clips around them.
       const exitedProcess = exitedProcessField();
-      const notice = exitedProcessNotice(exitedProcess, true);
+      const notice = exitedProcessNotice(exitedProcess, true, connected);
 
       // Asking about a moment the ring no longer holds returns nothing, which is
       // indistinguishable from a moment when nothing happened. They are opposite
@@ -840,7 +871,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // disagreement. `hasBufferedData: false`: this branch is reached
         // only when the ring is empty.
         const exitedProcess = exitedProcessField();
-        const notice = exitedProcessNotice(exitedProcess, false);
+        // Inert in practice (see findings' identical comment above) but the
+        // strict sense, correctly, not whichever local is in scope.
+        const notice = exitedProcessNotice(exitedProcess, false, pending === null);
         if (pending !== null) {
           return ok(notice + pending, { moment: null, connected, exitedProcess });
         }
@@ -889,7 +922,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // tools about the same stale window sees the same story — not two
       // hand-written near-duplicates that can drift apart from each other.
       // `hasBufferedData: true`: this is the non-empty branch.
-      const notice = exitedProcessNotice(exitedProcess, true);
+      const notice = exitedProcessNotice(exitedProcess, true, connected);
 
       // Outside the buffer is a different answer from "nothing happened", and
       // conflating them is how an agent concludes the app was idle.
