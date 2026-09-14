@@ -4,8 +4,11 @@
 // exactly as the root build used to. Both halves have to be here.
 //
 // The version is a literal rather than a catalog reference because a settings
-// script's `plugins` block is evaluated before `dependencyResolutionManagement`
-// creates `libs` below. Kept identical to the root's by hand; pin it exactly.
+// script's `plugins` block cannot see `libs` at all, at any position in this
+// file: the type-safe accessor Gradle generates for a version catalog is
+// wired into project build scripts, not into a settings script's own `plugins`
+// block, so moving this block relative to `dependencyResolutionManagement`
+// would not fix it. Kept identical to the root's by hand; pin it exactly.
 plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
