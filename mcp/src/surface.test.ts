@@ -434,12 +434,19 @@ describe("ConnectionState reads (GRA-162)", () => {
     const pattern = /\bstate\s*(?:===|!==)\s*"(?:disconnected|connecting|handshaking|connected)"/;
 
     // Positive control (GRA-166 QA follow-up): without this, a mutation that
-    // makes productionSourceFiles() return [] -- or one that hands this loop
-    // fully-blanked text -- leaves `offenders` empty and the assertion below
-    // passes for exactly the wrong reason: not "I looked and found nothing",
-    // but "I looked at nothing". The two checks below can each only fail
-    // that way, so a future edit that guts what this test actually scans
-    // dies here, by name, before ever reaching the real assertion.
+    // makes productionSourceFiles() return [] -- or one that empties what
+    // stripComments() hands back -- leaves `offenders` empty and the
+    // assertion below passes for exactly the wrong reason: not "I looked
+    // and found nothing", but "I looked at nothing". The checks below can
+    // each only fail that way, so a future edit that guts what this test
+    // actually scans dies here, by name, before ever reaching the real
+    // assertion. The non-empty check on the scanned text has to run on
+    // stripComments()'s *output*, not the raw file read: a control on the
+    // raw read only proves the file on disk has content, not that anything
+    // survived stripComments() into what the pattern below actually sees —
+    // an earlier version of this control checked the raw read and passed
+    // while scanning entirely blank text, which is the exact failure this
+    // control exists to catch.
     const files = productionSourceFiles();
     expect(
       files.length,
@@ -450,11 +457,11 @@ describe("ConnectionState reads (GRA-162)", () => {
     const offenders: string[] = [];
     for (const file of files) {
       const text = readFileSync(new URL(file, import.meta.url), "utf8");
-      expect(
-        text.trim().length,
-        `${file} read as empty or all-whitespace text — this guard would then scan nothing and still pass`,
-      ).toBeGreaterThan(0);
-      const lines = stripComments(text).split("\n");
+      const scanned = stripComments(text);
+      expect(scanned.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
+        0,
+      );
+      const lines = scanned.split("\n");
       lines.forEach((line, index) => {
         if (pattern.test(line)) offenders.push(`${file}:${index + 1}`);
       });
@@ -521,9 +528,14 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     // it asks whether the switch is *wired* to fail loudly if it stops
     // being exhaustive, the same way the real device.ts helpers are.
     // Positive control (GRA-166 QA follow-up) -- same shape and same reason
-    // as the guard above: an empty file list or fully-blanked source both
-    // leave `offenders` empty for the wrong reason. Checked separately from
-    // the guard above because each `describe` owns its own file loop.
+    // as the guard above: an empty file list or an empty result out of
+    // stripComments() both leave `offenders` empty for the wrong reason.
+    // Checked on stripComments()'s *output*, not the raw read, for the same
+    // reason as the guard above: a check on the raw read cannot tell "the
+    // file has content" from "the content survived stripComments()", which
+    // is the only text this loop actually feeds to
+    // switchesOnConnectionState(). Checked separately from the guard above
+    // because each `describe` owns its own file loop.
     const files = productionSourceFiles();
     expect(
       files.length,
@@ -534,11 +546,10 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     const offenders: string[] = [];
     for (const file of files) {
       const raw = readFileSync(new URL(file, import.meta.url), "utf8");
-      expect(
-        raw.trim().length,
-        `${file} read as empty or all-whitespace text — this guard would then scan nothing and still pass`,
-      ).toBeGreaterThan(0);
       const text = stripComments(raw);
+      expect(text.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
+        0,
+      );
       for (const { line, body } of switchesOnConnectionState(text)) {
         const neverGuarded = /default\s*:[\s\S]*?:\s*never\b/.test(body);
         if (!neverGuarded) offenders.push(`${file}:${line}`);
