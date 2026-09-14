@@ -17,6 +17,7 @@ import org.gradle.process.ExecOperations
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.URI
+import java.util.Properties
 import java.util.zip.ZipFile
 import javax.inject.Inject
 
@@ -216,6 +217,22 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * version, a local build — and silently correcting it would be the behaviour
  * the original comment was guarding against. `-Pporthole.overwrite=true`
  * replaces it.
+ *
+ * GRA-119: this used to write only `PORTHOLE_PORT`, leaving the MCP server to
+ * infer its project root and SDK location from `process.cwd()` — set by
+ * whatever launched it, not by us. This task knows both with certainty at
+ * configure time, so it writes `PORTHOLE_PROJECT_ROOT` (the directory
+ * [configFile] lives in — always the Gradle root, since that is where
+ * [PortholePlugin] points it) and `PORTHOLE_SDK_DIR` (resolved the same way
+ * `PortholePlugin`'s adb lookup resolves it: `local.properties`, then
+ * `ANDROID_HOME`/`ANDROID_SDK_ROOT`). `mcp/src/adb.ts` prefers the env var
+ * when present and keeps its own walk as the fallback for a server started
+ * some other way.
+ *
+ * The resolution below duplicates `PortholePlugin.sdkDirectory` rather than
+ * calling it: that method is private to a file outside this task's owned
+ * set (see GRA-119's report). A follow-up should extract one shared
+ * implementation once a change can touch both files.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -237,20 +254,39 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
     @get:Optional
     abstract val overwrite: Property<Boolean>
 
-    private fun entry(): String =
-        """
-        {
-          "command": "npx",
-          "args": ["-y", "$PORTHOLE_UI_PACKAGE"],
-          "env": {
-            "PORTHOLE_PORT": "${port.get()}"
-          }
+    /**
+     * The `env` block for the entry this task wants, built as data rather than
+     * as interpolated JSON text — a Windows SDK path is full of characters
+     * (`C:\`, spaces) that raw string interpolation would emit unescaped.
+     * [JsonOutput] is what actually escapes them, at the point the whole
+     * document is serialized in [write].
+     */
+    private fun entry(projectRoot: File, sdkDir: File?): Map<String, Any?> {
+        val env = linkedMapOf<String, Any?>(
+            "PORTHOLE_PORT" to port.get().toString(),
+            "PORTHOLE_PROJECT_ROOT" to projectRoot.absolutePath,
+        )
+        // Omitted, not written empty, when it can't be resolved: adb.ts's
+        // fallback walk is only correct behaviour if the variable's absence
+        // is what triggers it.
+        if (sdkDir != null) {
+            env["PORTHOLE_SDK_DIR"] = sdkDir.absolutePath
         }
-        """.trimIndent()
+        return linkedMapOf(
+            "command" to "npx",
+            "args" to listOf("-y", PORTHOLE_UI_PACKAGE),
+            "env" to env,
+        )
+    }
 
     @TaskAction
     fun write() {
         val file = configFile.get().asFile
+        // configFile is always set to a path under the Gradle root project
+        // directory (see PortholePlugin.registerTasks), so its parent IS that
+        // directory — no second input needed to say so.
+        val projectRoot = file.parentFile
+        val sdkDir = resolveSdkDir(projectRoot)
         val json = JsonSlurper()
 
         @Suppress("UNCHECKED_CAST")
@@ -266,8 +302,7 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         val servers =
             (root["mcpServers"] as? Map<String, Any?>)?.toMutableMap() ?: mutableMapOf()
 
-        @Suppress("UNCHECKED_CAST")
-        val wanted = json.parseText(entry()) as Map<String, Any?>
+        val wanted = entry(projectRoot, sdkDir)
         val existing = servers["porthole"]
 
         if (existing == wanted) {
@@ -306,7 +341,47 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
             "[porthole] next: ./gradlew portholeConnect, launch the debug build, " +
                 "and the tools go live in ${projectName.get()}.",
         )
+        logger.lifecycle(
+            if (sdkDir != null) {
+                "[porthole] PORTHOLE_SDK_DIR: ${sdkDir.absolutePath}"
+            } else {
+                "[porthole] PORTHOLE_SDK_DIR: not resolved (no sdk.dir in local.properties, " +
+                    "no ANDROID_HOME/ANDROID_SDK_ROOT) — omitted; the MCP server falls back to its own walk."
+            },
+        )
     }
+}
+
+/**
+ * `sdk.dir` from `local.properties` in [projectRoot], falling back to
+ * `ANDROID_HOME` then `ANDROID_SDK_ROOT`. Mirrors `PortholePlugin`'s private
+ * `sdkDirectory`, used to resolve `adb` — see the class doc on
+ * [PortholeMcpConfigTask] for why this is a duplicate rather than a shared
+ * call.
+ *
+ * `Properties.load` is what does the real work here: `local.properties` is
+ * Java-properties-escaped (a Windows path's drive-letter colon and every
+ * backslash come out doubled), and `Properties` un-escapes that on read the
+ * same way it always has.
+ *
+ * A present-but-blank `sdk.dir=` is treated as absent rather than as a path.
+ * `File("")` is not nothing: its `absolutePath` is the current working
+ * directory, so a blank line would have written the Gradle daemon's cwd into
+ * `.mcp.json` as the Android SDK — a confidently wrong answer, and worse than
+ * the omission that lets the MCP server fall back to its own walk.
+ */
+internal fun resolveSdkDir(projectRoot: File): File? {
+    val local = File(projectRoot, "local.properties")
+    if (local.isFile) {
+        val props = Properties()
+        local.inputStream().use(props::load)
+        props.getProperty("sdk.dir")?.takeIf { it.isNotBlank() }?.let { return File(it) }
+    }
+    return sequenceOf("ANDROID_HOME", "ANDROID_SDK_ROOT")
+        .mapNotNull { System.getenv(it) }
+        .filter { it.isNotBlank() }
+        .map(::File)
+        .firstOrNull { it.isDirectory }
 }
 
 /**

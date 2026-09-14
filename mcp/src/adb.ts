@@ -87,6 +87,40 @@ function unescape(raw: string): string {
   return out;
 }
 
+/**
+ * Where PORTHOLE_PROJECT_ROOT and PORTHOLE_SDK_DIR come from: `.mcp.json`,
+ * generated at Gradle configure time by `PortholeMcpConfigTask`. That task
+ * knows both values with certainty — the Gradle root project directory, and
+ * `sdk.dir`/`ANDROID_HOME` resolved the same way `PortholePlugin` resolves
+ * them for `adb` itself — because it is the build, not a process launched by
+ * whatever an MCP client decided to use as `cwd`.
+ */
+const PORTHOLE_PROJECT_ROOT = "PORTHOLE_PROJECT_ROOT";
+const PORTHOLE_SDK_DIR = "PORTHOLE_SDK_DIR";
+
+export type ProjectRootSource = "PORTHOLE_PROJECT_ROOT" | "cwd";
+
+export interface ResolvedProjectRoot {
+  directory: string;
+  source: ProjectRootSource;
+}
+
+/**
+ * The project root anything here should treat as "the build", in order:
+ * `PORTHOLE_PROJECT_ROOT` if the generated config set it, otherwise
+ * `process.cwd()` on the stated assumption GRA-87 already made and this
+ * ticket exists to stop relying on — that an MCP client launches its stdio
+ * server from the workspace root. When a generated `.mcp.json` is what
+ * started this process, that assumption is no longer needed at all.
+ */
+export function resolveProjectRoot(): ResolvedProjectRoot {
+  const declared = process.env[PORTHOLE_PROJECT_ROOT];
+  if (declared && declared.trim()) {
+    return { directory: declared.trim(), source: "PORTHOLE_PROJECT_ROOT" };
+  }
+  return { directory: process.cwd(), source: "cwd" };
+}
+
 /** `sdk.dir` from the nearest local.properties at or above `from`. */
 function sdkDirFromLocalProperties(from: string): string | null {
   let directory = path.resolve(from);
@@ -119,39 +153,67 @@ function isDirectory(candidate: string): boolean {
 }
 
 /**
- * The Android SDK, in the order a developer would look for it.
+ * GRA-119, AC5: `porthole_status` (in `index.ts`, owned by GRA-90 — not
+ * touched here) should name which of these two it used and where the value
+ * came from. Everything needed to answer that is exported: call
+ * `resolveSdkDir()` and `resolveProjectRoot()` and report their `.source`
+ * fields (`"PORTHOLE_SDK_DIR"` / `"local.properties"` / `"ANDROID_HOME"` /
+ * `"ANDROID_SDK_ROOT"` / `"PATH"` for the SDK; `"PORTHOLE_PROJECT_ROOT"` /
+ * `"cwd"` for the project root) alongside the resolved `.directory`.
+ */
+export type SdkDirSource = "PORTHOLE_SDK_DIR" | "local.properties" | "ANDROID_HOME" | "ANDROID_SDK_ROOT" | "PATH";
+
+export interface ResolvedSdkDir {
+  /** Null only when `source` is "PATH" — nothing named an SDK directory at all. */
+  directory: string | null;
+  source: SdkDirSource;
+}
+
+/**
+ * The Android SDK, in the order a developer would look for it — and, ahead
+ * of all of them, the order this ticket adds: an explicit `PORTHOLE_SDK_DIR`
+ * from a generated `.mcp.json` wins outright and short-circuits before any
+ * filesystem access, deliberately. GRA-87's walk up from the project root for
+ * local.properties, and the ANDROID_HOME/ANDROID_SDK_ROOT fallback after it,
+ * both stay exactly as they were for a server that was not started from a
+ * generated config — see [sdkDirFromLocalProperties] and its tests.
  *
- * The order is deliberately the Gradle plugin's — `sdkDirectory` in
- * PortholePlugin.kt — and the two agreeing is the whole point of it. sdk.dir is
- * what Android Studio writes into local.properties, and on a stock install it
- * is the only one of these three that is set: neither environment variable
- * exists, and platform-tools is not on PATH, least of all on Windows. Reading
- * only the environment is why `system_context` used to tell the user to go fix
- * something that `./gradlew portholeConnect`, on the same machine and the same
- * SDK, had no trouble with.
+ * The walk-and-environment order below is deliberately the Gradle plugin's —
+ * `sdkDirectory` in PortholePlugin.kt — and the two agreeing is the whole
+ * point of it. sdk.dir is what Android Studio writes into local.properties,
+ * and on a stock install it is the only one of these that is set: neither
+ * environment variable exists, and platform-tools is not on PATH, least of
+ * all on Windows. Reading only the environment is why `system_context` used
+ * to tell the user to go fix something that `./gradlew portholeConnect`, on
+ * the same machine and the same SDK, had no trouble with.
  *
  * Once local.properties names a directory, that is the answer even if adb
  * turns out not to be beneath it. The plugin stops there too, and one tool
- * quietly falling through to a different SDK than the other is the exact split
- * personality this replaced.
+ * quietly falling through to a different SDK than the other is the exact
+ * split personality this replaced.
  */
-function sdkRoot(): string | null {
-  const declared = sdkDirFromLocalProperties(process.cwd());
-  if (declared) return declared;
-
-  for (const variable of ["ANDROID_HOME", "ANDROID_SDK_ROOT"]) {
-    const root = process.env[variable];
-    if (root && isDirectory(root)) return root;
+export function resolveSdkDir(): ResolvedSdkDir {
+  const declared = process.env[PORTHOLE_SDK_DIR];
+  if (declared && declared.trim()) {
+    return { directory: declared.trim(), source: "PORTHOLE_SDK_DIR" };
   }
-  return null;
+
+  const fromProperties = sdkDirFromLocalProperties(resolveProjectRoot().directory);
+  if (fromProperties) return { directory: fromProperties, source: "local.properties" };
+
+  for (const variable of ["ANDROID_HOME", "ANDROID_SDK_ROOT"] as const) {
+    const root = process.env[variable];
+    if (root && isDirectory(root)) return { directory: root, source: variable };
+  }
+  return { directory: null, source: "PATH" };
 }
 
 /** adb, from the SDK if one can be found, and otherwise left to the PATH. */
 export function findAdb(): string {
   const binary = process.platform === "win32" ? "adb.exe" : "adb";
-  const root = sdkRoot();
-  if (!root) return binary;
-  const candidate = path.join(root, "platform-tools", binary);
+  const { directory } = resolveSdkDir();
+  if (!directory) return binary;
+  const candidate = path.join(directory, "platform-tools", binary);
   return existsSync(candidate) ? candidate : binary;
 }
 
