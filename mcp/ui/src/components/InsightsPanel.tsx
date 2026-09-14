@@ -247,7 +247,20 @@ export function InsightsPanel({ from, to }: { from?: number; to?: number }) {
 
       {error && <p className="font-mono text-[11px] text-[var(--color-danger)]">{error}</p>}
 
-      {payload && findings.length === 0 && !loading && (
+      {/* GRA-173: this used to also require `!loading`, which reads as "don't
+          show a stale empty-state while refreshing" but actually means "take
+          it down and put it back up every refresh cycle" -- `following` mode
+          calls this component's loader every DEBOUNCE_MS with no user action
+          at all, so as long as a window kept coming back empty this paragraph
+          unmounted and remounted on every one of those cycles: the founder's
+          "right pane flashing over and over" before the cart, which has
+          findings and so hits the always-mounted `<ul>` below instead. A
+          refresh must not be able to empty a pane that already has something
+          to say -- this text is that pane's content, same as a finding is --
+          so it now stays keyed to the last-known `payload`, exactly like the
+          list does, and the in-flight state reads only from the "reading…"
+          swap in the header button above, which changes no layout. */}
+      {payload && findings.length === 0 && (
         <p className="text-[12px] leading-relaxed text-[var(--color-muted)]">
           Nothing crossed a threshold in the {Math.round(payload.window.ms / 1000)}s examined.
           That is not the same as the app being fast.
