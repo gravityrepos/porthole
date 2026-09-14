@@ -151,12 +151,26 @@ describe("capture command: refused before device contact", () => {
   const distCli = path.join(mcpRoot, "dist", "cli.js");
   const tscBin = path.join(mcpRoot, "node_modules", "typescript", "bin", "tsc");
 
-  // findAdb() prefers local.properties, then ANDROID_HOME/ANDROID_SDK_ROOT,
-  // and only falls back to a bare "adb"/"adb.exe" resolved off PATH once
-  // neither says anything — so pointing ANDROID_HOME at a directory shaped
-  // like an SDK (a platform-tools/ subfolder holding the binary) wins
-  // regardless of what a real Android SDK is doing on this machine, and
-  // regardless of whether one is installed at all (CI has none).
+  // findAdb()'s order, since GRA-119, is PORTHOLE_SDK_DIR, then
+  // local.properties, then ANDROID_HOME/ANDROID_SDK_ROOT, and only then a
+  // bare "adb"/"adb.exe" off PATH. The shim is therefore pointed at with
+  // PORTHOLE_SDK_DIR: it is the only one of those that outranks a
+  // local.properties this checkout may or may not have.
+  //
+  // ANDROID_HOME alone is not enough, and how that surfaced is worth keeping.
+  // It held in a fresh worktree and failed in the original checkout, because
+  // local.properties is gitignored — `git worktree add` does not copy it, so
+  // a worktree has none and ANDROID_HOME wins there, while the checkout it
+  // came from has one naming the real SDK, which outranks ANDROID_HOME and
+  // sends findAdb() to the real adb. The shim then never runs, and the two
+  // "adb sentinel absent" assertions below pass for the wrong reason: not
+  // because the CLI refused before touching the device, but because the fake
+  // device was unreachable. The positive control at the end of this describe
+  // is what caught it, which is the entire reason it exists.
+  //
+  // The lesson is not about ANDROID_HOME. It is that a test which neutralises
+  // only some inputs to a precedence chain stays hostage to the rest, and an
+  // environment-dependent pass is indistinguishable from a real one.
   const adbSdkRoot = mkdtempSync(path.join(tmpdir(), "porthole-adb-sdk-"));
   const adbPlatformTools = path.join(adbSdkRoot, "platform-tools");
   const adbShimBinary = path.join(adbPlatformTools, process.platform === "win32" ? "adb.exe" : "adb");
@@ -234,6 +248,10 @@ describe("capture command: refused before device contact", () => {
     return spawnSync(process.execPath, [distCli, ...args], {
       env: {
         ...process.env,
+        // Highest precedence, so a real local.properties in the checkout
+        // cannot quietly win and make the shim unreachable — see the note
+        // above this describe's fixtures.
+        PORTHOLE_SDK_DIR: adbSdkRoot,
         ANDROID_HOME: adbSdkRoot,
         ANDROID_SDK_ROOT: adbSdkRoot,
         // NODE_OPTIONS is parsed with shell-like quoting rules: a backslash
