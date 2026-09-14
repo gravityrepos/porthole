@@ -6,7 +6,7 @@
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-5ec8b0?style=flat-square"></a>
   <img alt="Android API 26 and up" src="https://img.shields.io/badge/android-API%2026%2B-56c88c?style=flat-square">
   <img alt="Debug builds only" src="https://img.shields.io/badge/builds-debug%20only-f0883e?style=flat-square">
-  <img alt="Version 0.1.0, unpublished" src="https://img.shields.io/badge/version-0.1.0%20unpublished-9aa6b8?style=flat-square">
+  <img alt="Version 0.1.0, published" src="https://img.shields.io/badge/version-0.1.0%20published-9aa6b8?style=flat-square">
 </p>
 
 # Porthole
@@ -1351,7 +1351,9 @@ Copyright 2026 Gravity Labs.
 
 ## Status
 
-Version 0.1.0, unpublished. Verified end to end on an emulator against
+Version 0.1.0, live on Maven Central and npm; the Gradle Plugin Portal
+submission was pending review at last check (see [Publishing](#publishing)).
+Verified end to end on an emulator against
 `sample/`: the plugin puts `:runtime` on debug and `:runtime-noop` on release,
 the porthole installs itself on process start, and every tool returns real data
 — including request and response bodies captured from a one-shot streaming
