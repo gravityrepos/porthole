@@ -356,6 +356,32 @@ class McpConfigTest : StubAdbFunctionalTest() {
     }
 
     @Test
+    fun `ANDROID_HOME wins over ANDROID_SDK_ROOT when both are set`() {
+        // QA (GRA-150): the two tests around this one each set exactly one of
+        // ANDROID_HOME/ANDROID_SDK_ROOT, which proves each is consulted but
+        // not which one wins — swapping their order in resolveSdkDir's
+        // fallback sequence left the whole suite green. This is the test
+        // that mutation is supposed to break: both variables point at real,
+        // distinct directories, and only ANDROID_HOME's may come back.
+        val fromHome = projectDir.newFolder("sdk-from-android-home")
+        val fromSdkRoot = projectDir.newFolder("sdk-from-android-sdk-root")
+        scratch(registerTask())
+
+        val result = buildWithEnv(
+            mapOf(
+                "PATH" to (System.getenv("PATH") ?: ""),
+                "ANDROID_HOME" to fromHome.absolutePath,
+                "ANDROID_SDK_ROOT" to fromSdkRoot.absolutePath,
+            ),
+            "portholeMcpConfig",
+        )
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals(fromHome.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
     fun `local properties sdk dir wins over ANDROID_HOME`() {
         val fromProperties = projectDir.newFolder("from-properties")
         val fromEnv = projectDir.newFolder("from-env")
