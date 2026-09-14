@@ -1394,11 +1394,14 @@ build types of `runtime` and `runtime-noop` plus the Gradle plugin — 359
 passed, 0 failed, 7 skipped), 451 in the MCP server (`cd mcp && npm test` —
 449 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
-skipped). `tools/check-readme-test-counts.py` and
-`mcp/scripts/check-readme-vitest-counts.mjs` fail CI when any of these four
-numbers per suite drifts from that suite's own JUnit XML — this paragraph is
-the checked claim, not a cached one, and GRA-164 exists because it was wrong
-by hand three times in one day before these existed. The
+skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
+fails CI when the JVM sentence's four numbers disagree with its own JUnit
+XML, and when 951 disagrees with the sum of the three suites' totals stated
+here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
+server and UI sentences against their own JUnit XML. Everything else in this
+paragraph and the next — the skip explanations, the per-platform comparison
+— is prose, not machine-checked. GRA-164 exists because these four numbers
+went wrong by hand three times in one day before the checks existed. The
 runtime's arithmetic is covered where it has been wrong before — a long freeze
 counted in refreshes rather than in relaxed deadlines, and a stalled thread's
 stack ordered so the app's own frames lead. A parity test compares the public
@@ -1414,8 +1417,8 @@ skips cleanly without a version to check — none of the seven is a gap in
 what the suite proves, each is a test that only makes sense on a platform
 this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 (gated on a cached `trace_processor` capture no CI runner has — gitignored
-and per-checkout) and the one Windows-only case GRA-160 added. **The total is
-the same everywhere the split is not**: the primary Windows checkout runs
+and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
+everywhere; the split is not**: the primary Windows checkout runs
 the same 366 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
 pair) and the same 451 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout

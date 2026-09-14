@@ -18,12 +18,21 @@
 //
 // Usage: node mcp/scripts/check-readme-vitest-counts.mjs <server|ui>
 //
+// A missing or empty JUnit XML file is treated as a failure, not a skip: a
+// check that shrugs at "no evidence" and exits 0 is a false green waiting to
+// happen — measured for real, plain `cd mcp && npm test` (the exact command
+// README documents for a human to run) writes no JUnit XML at all, so a
+// version of this script that tolerated a missing file would report "OK"
+// against a suite it never actually looked at.
+//
 // What this does NOT catch (true when run, not aspirational):
 //   - A test renamed or moved without the total changing.
 //   - A test that runs and asserts nothing: the XML says "passed" and this
 //     check has no way to know the assertion inside it was empty.
 //   - Any drift in the JVM suite — see tools/check-readme-test-counts.py,
-//     which the `gradle` job runs against its own JUnit XML instead.
+//     which the `gradle` job runs against its own JUnit XML instead. That
+//     script also verifies the README's headline total against the sum of
+//     all three suites' README figures; this one does not.
 //   - The passed/failed/skipped SPLIT on windows-latest or macos-latest.
 //     README's split figure names ubuntu-latest specifically, because the
 //     skip set is not the same on every platform (perfetto-stdout skips
@@ -31,8 +40,6 @@
 //     Windows-only). On those two legs this checks only the total — the one
 //     number that IS the same everywhere — and says so rather than failing
 //     for a reason that has nothing to do with drift.
-//   - A drift introduced by the merge that lands this PR: this step reads
-//     the branch's own build, not the merge commit's.
 //   - Prose elsewhere in the README (skip reasons, device claims, etc.) —
 //     only the four counted numbers in the suite's own sentence are compared.
 
@@ -86,9 +93,19 @@ function readmeFigure(md, label) {
   // prose, so a run of markdown-editor rewrapping can land a line break
   // wherever a space was — including, as measured, right before the closing
   // number of the sentence.
+  //
+  // (?<![\d,]) before every captured number: without it, a stray
+  // thousands-separated figure like "1,451 in the MCP server" matches
+  // starting at "451" and silently reports 451 — a truncated number parsed
+  // as if it were correct, not a missing one. The lookbehind refuses to
+  // start a match on a digit that follows another digit or a comma, so a
+  // comma-grouped number instead fails the whole pattern and comes back as
+  // "could not find a figure" below — a loud failure, not a plausible wrong
+  // answer.
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
   const re = new RegExp(
-    `(\\d+)\\s+${escaped}\\s*\\([^)]*?(\\d+)\\s+passed,\\s+(\\d+)\\s+failed,\\s+(\\d+)\\s+skipped\\)`,
+    `(?<![\\d,])(\\d+)\\s+${escaped}\\s*\\([^)]*?` +
+      `(?<![\\d,])(\\d+)\\s+passed,\\s+(?<![\\d,])(\\d+)\\s+failed,\\s+(?<![\\d,])(\\d+)\\s+skipped\\)`,
     "s"
   );
   const m = decode(md).match(re);
@@ -110,9 +127,13 @@ function main() {
     return;
   }
   if (!existsSync(suite.xml)) {
-    console.log(
-      `README drift check (${which}): no ${path.relative(ROOT, suite.xml)} — run the suite first. ` +
-        "Not a drift finding; nothing to compare yet."
+    fail(
+      `README drift check (${which}): FAIL — no ${path.relative(ROOT, suite.xml)}. This is not ` +
+        "treated as 'nothing to compare yet': a missing artifact is not evidence the README is " +
+        "correct, and plain 'cd mcp && npm test' (the command README itself documents) writes no " +
+        "JUnit XML at all, so silently passing here would make the by-hand path permanently " +
+        "unchecked. Run the suite with --reporter=junit --outputFile=... first, with real output, " +
+        "before this can say anything."
     );
     return;
   }
