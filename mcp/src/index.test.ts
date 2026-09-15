@@ -1977,23 +1977,71 @@ describe("porthole_status: why the app died (GRA-58)", () => {
     }
   });
 
-  it("rejects an empty exitTrace before the handler ever runs", async () => {
+  // GRA-188: `exitTrace` now accepts a string too (see below), so an empty
+  // or garbage string is no longer refused by zod before the handler runs —
+  // it reaches the handler's own `Date.parse` check and is refused there,
+  // with one line. `isError: true` either way is the property that must
+  // survive; the mechanism moved.
+  it("rejects an empty exitTrace inside the handler, with one line naming why", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("porthole_status", { exitTrace: "" as unknown as number });
+      const result = await rig.client.callTool("porthole_status", { exitTrace: "" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("exitTrace");
+      expect(result.text).toMatch(/not a valid/i);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("rejects a malformed (non-parseable) exitTrace inside the handler, with one line naming why", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", { exitTrace: "not-a-timestamp" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("not-a-timestamp");
+      expect(result.text).toMatch(/not a valid/i);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("rejects a negative exitTrace before the handler ever runs (the number branch is unchanged)", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", { exitTrace: -5 });
       expect(result.isError).toBe(true);
     } finally {
       await rig.close();
     }
   });
 
-  it("rejects a malformed (non-numeric) exitTrace before the handler ever runs", async () => {
-    const rig = await buildRig();
+  it("accepts the ISO `at` string exits.recent prints, and fetches the same trace the epoch timestamp would (GRA-188)", async () => {
+    const rig = await buildRig({
+      handlers: {
+        exit_trace: (params) => ({
+          timestamp: params.timestamp,
+          found: true,
+          text: "\"main\" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)",
+          truncated: false,
+        }),
+      },
+    });
     try {
-      const result = await rig.client.callTool("porthole_status", {
-        exitTrace: "not-a-timestamp" as unknown as number,
-      });
-      expect(result.isError).toBe(true);
+      await rig.pushEvents([{ event: "exit", t: 1000, data: exitData({ timestamp: 1_700_000_000_000 }) }]);
+      const status = await rig.client.callTool("porthole_status", {});
+      const exits = (status.json as { exits: { recent: Array<{ timestamp: number; at: string }> } }).exits;
+      expect(exits.recent[0].timestamp).toBe(1_700_000_000_000);
+      expect(exits.recent[0].at).toBe(new Date(1_700_000_000_000).toISOString());
+
+      // The obvious next move the device pass measured failing: quote `at` back.
+      const traced = await rig.client.callTool("porthole_status", { exitTrace: exits.recent[0].at });
+      expect(traced.isError).toBeFalsy();
+      const exitTrace = (traced.json as { exitTrace: { found: boolean; timestamp: number; text: string } })
+        .exitTrace;
+      expect(exitTrace.found).toBe(true);
+      expect(exitTrace.timestamp).toBe(1_700_000_000_000);
+      expect(exitTrace.text).toContain("com.example.shop.Cart.load");
     } finally {
       await rig.close();
     }

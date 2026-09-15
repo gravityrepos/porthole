@@ -18,7 +18,7 @@ import { TimelineServer } from "./timeline.js";
 import { createPortholeServer } from "./index.js";
 import { FakeDevice, connect, waitUntil, type TestClient } from "./testing/harness.js";
 import { SessionWriter } from "./sessions.js";
-import { buildTrace, TRACE_VERSION, type Trace } from "./trace.js";
+import { buildTrace, resolveProfile, TRACE_VERSION, type Trace } from "./trace.js";
 import { renderReport } from "./report.js";
 import { compare, report } from "./capture.js";
 import { readTrace } from "./args.js";
@@ -51,6 +51,13 @@ import {
 
 const ev = (t: number, name: string, data: Record<string, unknown> = {}): DeviceEvent =>
   ({ t, seq: t, event: name, data }) as DeviceEvent;
+
+// GRA-185: `buildTrace`/`buildSavedTrace` now take the resolved profile as
+// an explicit input rather than deriving it themselves — none of `events`
+// below carries a `device`/`profile` event, and none of these tests are
+// about the device section, so the assumed-60Hz shape stands in wherever
+// the exact profile does not matter to the assertion.
+const ASSUMED_PROFILE = { assumed: true as const, refreshHz: 60 };
 
 // ---------------------------------------------------------------------------
 // pure functions
@@ -100,6 +107,7 @@ describe("buildSavedTrace", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile: ASSUMED_PROFILE,
     });
     expect(saved.driver).toBe(SAVE_DRIVER);
     expect(saved.events).toBeUndefined();
@@ -117,6 +125,7 @@ describe("buildSavedTrace", () => {
       coveredFrom: 1_000, // coverage starts after the window's own start
       coveredTo: 5_000,
       scenario: "checkout",
+      profile: ASSUMED_PROFILE,
     });
     expect(saved.clippedMs).toEqual({ start: 1_000, end: 0 });
   });
@@ -129,6 +138,7 @@ describe("buildSavedTrace", () => {
       coveredFrom: 0,
       coveredTo: 1_000,
       scenario: "checkout",
+      profile: ASSUMED_PROFILE,
     });
     // The full requested span, not one trimmed to what was actually covered.
     expect(saved.durationMs).toBe(6_000);
@@ -143,6 +153,7 @@ describe("buildSavedTrace", () => {
       coveredFrom: null,
       coveredTo: null,
       scenario: "empty",
+      profile: ASSUMED_PROFILE,
     });
     expect(saved.clippedMs).toEqual({ start: 3_000, end: 0 });
   });
@@ -165,6 +176,7 @@ describe("writeSavedTrace", () => {
       coveredFrom: 0,
       coveredTo: 1_000,
       scenario: "checkout",
+      profile: ASSUMED_PROFILE,
     });
     await writeSavedTrace(saved, out);
     const content = JSON.parse(await readFile(out, "utf8"));
@@ -195,6 +207,10 @@ describe("a saved trace works with report/compare unmodified", () => {
     ev(1_200, "frame", { totalMs: 30, missedFrames: 1, worstPhase: "layoutMeasure" }),
   ];
   const hello = { packageName: "com.example.shop", versionName: "1.0.0", device: "Pixel", sdkInt: 34 };
+  // None of `events` above carries a device/profile event, so this is the
+  // same 60Hz-fallback-from-`hello` shape `buildTrace` always produced here
+  // — resolved explicitly now rather than derived inside `buildTrace` itself.
+  const profile = resolveProfile({ liveEvents: events, windowTo: 2_000, sessionProfile: null, hello });
 
   it("AC2: porthole report renders identically to a report from an equivalent capture run", () => {
     const saved = buildSavedTrace({
@@ -204,6 +220,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile,
     });
     // What `capture()` itself would have produced for the same events, hello
     // and scenario, driven with `--driver session` — the "equivalent run"
@@ -216,6 +233,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       hello,
       durationMs: 2_000,
       withEvents: false,
+      profile,
     });
     expect(renderReport(saved)).toBe(renderReport(captured));
   });
@@ -228,6 +246,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile,
     });
     const file = await tmpFile("saved.json");
     await writeSavedTrace(saved, file);
@@ -244,6 +263,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile,
     });
     const file = await tmpFile("saved.json");
     await writeSavedTrace(saved, file);
@@ -265,6 +285,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile,
     });
     const savedFile = await tmpFile("saved.json");
     await writeSavedTrace(saved, savedFile);
@@ -275,6 +296,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       hello,
       durationMs: 2_000,
       withEvents: false,
+      profile,
     });
     const capturedFile = await tmpFile("captured.json");
     await writeFile(capturedFile, JSON.stringify(capturedTrace, null, 2));
@@ -302,6 +324,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       coveredFrom: 0,
       coveredTo: 2_000,
       scenario: "checkout",
+      profile,
     });
     const savedFile = await tmpFile("saved.json");
     await writeSavedTrace(saved, savedFile);
@@ -312,6 +335,7 @@ describe("a saved trace works with report/compare unmodified", () => {
       hello,
       durationMs: 2_000,
       withEvents: false,
+      profile,
     });
     const capturedFile = await tmpFile("captured.json");
     await writeFile(capturedFile, JSON.stringify(capturedTrace, null, 2));

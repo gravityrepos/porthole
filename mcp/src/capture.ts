@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { DeviceClient, isConnected, type ConnectionState, type DeviceEvent } from "./device.js";
 import { renderComparison, renderReport, shouldColor } from "./report.js";
-import { buildTrace, type Trace } from "./trace.js";
+import { buildTrace, resolveProfile, type Trace } from "./trace.js";
 import { parseFailOn, parsePort, readTrace, requiredValue, type FailOn } from "./args.js";
 
 /**
@@ -113,6 +113,11 @@ export async function capture(options: CaptureOptions): Promise<number> {
   const hello = device.hello as Record<string, unknown> | null;
   device.stop();
 
+  // GRA-185: `capture` has no window narrower than the whole run, so
+  // `windowTo: Infinity` — a profile emitted anywhere in `events` (in
+  // practice, `DeviceCollector`'s one startup event) counts, exactly as it
+  // always has here.
+  const profile = resolveProfile({ liveEvents: events, windowTo: Number.POSITIVE_INFINITY, sessionProfile: null, hello });
   const trace = buildTrace({
     scenario: options.scenario,
     driver: options.driver,
@@ -120,6 +125,7 @@ export async function capture(options: CaptureOptions): Promise<number> {
     hello,
     durationMs,
     withEvents: options.withEvents,
+    profile,
   });
 
   await writeFile(options.out, JSON.stringify(trace, null, 2));

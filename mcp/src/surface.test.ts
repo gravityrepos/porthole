@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { buildTrace, type Finding } from "./trace.js";
+import { buildTrace, resolveProfile, type Finding } from "./trace.js";
 import type { DeviceEvent } from "./device.js";
 import { buildRig } from "./testing/harness.js";
 import { stripComments } from "./testing/stripComments.js";
@@ -112,6 +112,10 @@ describe("findings", () => {
     event(1000, "db", { phase: "end", sql: "SELECT 1", thread: "main", durationMs: 12 }),
     event(1100, "blocked", { durationMs: 420, stack: "com.app.Thing.work(Thing.kt:10)" }),
   ];
+  // GRA-185: `buildTrace` now takes the resolved profile explicitly; none of
+  // `events` above carries a device/profile event, so this resolves to the
+  // same 60Hz fallback it always used internally.
+  const profile = resolveProfile({ liveEvents: events, windowTo: 1000, sessionProfile: null, hello: null });
 
   it("runs the same analyser the headless capture runs", () => {
     // One analyser, so a finding means the same thing in CI as in an editor.
@@ -122,6 +126,7 @@ describe("findings", () => {
       hello: null,
       durationMs: 1000,
       withEvents: false,
+      profile,
     });
     expect(trace.findings.length).toBeGreaterThan(0);
     expect(trace.findings.every((f: Finding) => f.confidence)).toBe(true);
@@ -134,6 +139,7 @@ describe("findings", () => {
       hello: null,
       durationMs: 1000,
       withEvents: false,
+      profile,
     });
     for (const finding of trace.findings) {
       expect(["observed", "correlated"]).toContain(finding.confidence);
@@ -245,7 +251,7 @@ describe("the entry point", () => {
 // the schema-level half of that; index.test.ts exercises the handler itself
 // against a FakeDevice.
 describe("porthole_status's exitTrace parameter", () => {
-  it("declares exitTrace as an optional positive integer, not a hand-rolled copy of the window shape", async () => {
+  it("declares exitTrace as optional, accepting either a positive integer or a string (GRA-188), not a hand-rolled copy of the window shape", async () => {
     const rig = await buildRig();
     try {
       const tools = await rig.client.listTools();
@@ -257,8 +263,19 @@ describe("porthole_status's exitTrace parameter", () => {
       expect(props.exitTrace, "porthole_status has no exitTrace parameter").toBeDefined();
       expect(required, "exitTrace must be optional").not.toContain("exitTrace");
 
-      const exitTrace = props.exitTrace as { type?: string };
-      expect(exitTrace.type).toBe("integer");
+      // GRA-188: a union now, not a bare `z.number()` — the JSON schema
+      // carries both branches rather than one `type`. Checked structurally
+      // (both an integer variant and a string variant exist somewhere in
+      // the schema) rather than pinned to zod's exact `anyOf`/`oneOf`
+      // encoding, which is an implementation detail of the conversion, not
+      // of this ticket.
+      const exitTrace = props.exitTrace as Record<string, unknown>;
+      const branches = (exitTrace.anyOf ?? exitTrace.oneOf) as Array<{ type?: string }> | undefined;
+      expect(branches, `exitTrace schema has no anyOf/oneOf: ${JSON.stringify(exitTrace)}`).toBeDefined();
+      const types = branches!.map((b) => b.type);
+      expect(types).toContain("integer");
+      expect(types).toContain("string");
+      expect(exitTrace.type, "exitTrace must no longer be a bare number type").not.toBe("integer");
     } finally {
       await rig.close();
     }

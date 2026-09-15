@@ -3,7 +3,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DeviceEvent } from "./device.js";
-import { buildTrace, type Trace } from "./trace.js";
+import { buildTrace, resolveProfile, type ResolvedProfile, type Trace } from "./trace.js";
 import {
   clippedMsOf,
   fillWindowFromDisk,
@@ -114,6 +114,8 @@ export interface BuildSavedTraceOptions {
   coveredFrom: number | null;
   coveredTo: number | null;
   scenario: string;
+  /** GRA-185: resolved by the caller through `resolveProfile` — see that function's own doc comment for why every caller resolves it the same way rather than this module doing it a second time. */
+  profile: ResolvedProfile;
 }
 
 /**
@@ -136,6 +138,7 @@ export function buildSavedTrace(options: BuildSavedTraceOptions): SavedTrace {
     hello: options.hello,
     durationMs: Math.max(0, options.window.to - options.window.from),
     withEvents: false,
+    profile: options.profile,
   });
   return {
     ...trace,
@@ -245,6 +248,16 @@ export async function saveFromSessions(options: SaveFromSessionsOptions): Promis
     device: latest.device,
     sdkInt: latest.sdkInt,
   };
+  // GRA-185: no live buffer here — this is the CLI's disk-only path — so the
+  // only source `resolveProfile` has beyond the 60Hz fallback is whatever
+  // `latest`'s own `meta.json` recorded (`SessionWriter.append` captured it
+  // when the session was written, if it was written after that existed).
+  const profile = resolveProfile({
+    liveEvents: [],
+    windowTo: to,
+    sessionProfile: latest.profile ?? null,
+    hello,
+  });
   const trace = buildSavedTrace({
     events: merged.events as unknown as DeviceEvent[],
     hello,
@@ -252,6 +265,7 @@ export async function saveFromSessions(options: SaveFromSessionsOptions): Promis
     coveredFrom: merged.coveredFrom,
     coveredTo: merged.coveredTo,
     scenario,
+    profile,
   });
   await writeSavedTrace(trace, outPath);
 

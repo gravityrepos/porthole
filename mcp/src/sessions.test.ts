@@ -32,8 +32,8 @@ const HELLO = {
   deviceId: "abc123",
 };
 
-function event(seq: number, t: number, name = "recompose"): SessionEvent {
-  return { event: name, t, seq, data: { n: seq } };
+function event(seq: number, t: number, name = "recompose", data?: Record<string, unknown>): SessionEvent {
+  return { event: name, t, seq, data: data ?? { n: seq } };
 }
 
 const roots: string[] = [];
@@ -135,6 +135,64 @@ describe("SessionWriter", () => {
     expect(meta.firstT).toBe(1_000);
     expect(meta.lastT).toBe(2_500);
     expect(meta.eventCounts).toEqual({ recompose: 2, http_start: 1 });
+  });
+
+  // GRA-185: `resolveProfile` (trace.ts) reads `meta.json`'s own `profile`
+  // field once the live ring has rolled the one startup profile event out —
+  // `SessionWriter.append` is where that field gets captured, off the wire,
+  // as it flows past.
+  it("captures a device/profile event into meta.json's profile field as it flows past append()", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 5);
+    await writer.open(HELLO);
+    writer.append(
+      event(0, 500, "device", {
+        kind: "profile",
+        model: "Pixel 9 Pro Fold",
+        sdkInt: 37,
+        abi: "arm64-v8a",
+        cores: 8,
+        deviceRamMb: 12_288,
+        refreshHz: 120,
+        lowRamDevice: "false",
+      }),
+    );
+    writer.append(event(1, 1_000, "recompose"));
+    await writer.flush();
+
+    const meta = JSON.parse(await readFile(path.join(writer.currentDir()!, "meta.json"), "utf8"));
+    expect(meta.profile).toEqual({
+      model: "Pixel 9 Pro Fold",
+      sdkInt: 37,
+      abi: "arm64-v8a",
+      cores: 8,
+      deviceRamMb: 12_288,
+      refreshHz: 120,
+      lowRamDevice: false,
+    });
+  });
+
+  it("a session with no profile event simply lacks the field, rather than inventing one (older-session shape)", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 5);
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000, "recompose"));
+    await writer.flush();
+
+    const meta = JSON.parse(await readFile(path.join(writer.currentDir()!, "meta.json"), "utf8"));
+    expect(meta.profile).toBeUndefined();
+  });
+
+  it("a non-profile device event does not overwrite an already-captured profile (mutation-obvious: a constant 'always capture' would fail this)", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 5);
+    await writer.open(HELLO);
+    writer.append(event(0, 500, "device", { kind: "profile", model: "Pixel", sdkInt: 37, refreshHz: 120 }));
+    writer.append(event(1, 900, "device", { kind: "trimMemory", level: "moderate" }));
+    await writer.flush();
+
+    const meta = JSON.parse(await readFile(path.join(writer.currentDir()!, "meta.json"), "utf8"));
+    expect(meta.profile.refreshHz).toBe(120);
   });
 
   it("resumes the same session across two writer instances sharing an identity — 'append, do not fork'", async () => {

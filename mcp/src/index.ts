@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { buildTrace, num, str, type Finding } from "./trace.js";
+import { buildTrace, describeBudget, num, resolveProfile, str, type Finding } from "./trace.js";
 import {
   UNKNOWN_DEVICE_ID,
   clippedMsOf,
@@ -332,8 +332,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
   interface ExitSummary {
     reason: string;
-    /** ISO wall-clock — this is `ApplicationExitInfo.getTimestamp()`'s own unit, not the device-uptime clock every other timestamp in this surface uses. */
-    timestamp: string;
+    /**
+     * GRA-188: epoch milliseconds — `ApplicationExitInfo.getTimestamp()`'s
+     * own unit, not the device-uptime clock every other timestamp in this
+     * surface uses — and exactly the value `exitTrace` below accepts:
+     * quoting this field back works with no conversion, which used to
+     * require a `Date.parse` an agent had to think to reach for on its own.
+     */
+    timestamp: number;
+    /** The same instant as `timestamp`, spelled ISO-8601 for a human or a log line. `exitTrace` accepts this too (GRA-188) since it is the form most likely to get copied first. */
+    at: string;
     versionName: string | null;
     versionAssumed: boolean;
     topAppFrame: string | null;
@@ -365,7 +373,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .map(
         (e): ExitSummary => ({
           reason: str(e.data.reason),
-          timestamp: new Date(num(e.data.timestamp)).toISOString(),
+          timestamp: num(e.data.timestamp),
+          at: new Date(num(e.data.timestamp)).toISOString(),
           versionName: e.data.versionName != null ? str(e.data.versionName) : null,
           versionAssumed: e.data.versionAssumed === true,
           topAppFrame: str(e.data.mainStack).split("\n")[0] || null,
@@ -385,14 +394,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   function exitDeathNotice(recent: ExitSummary[], stronglyConnected: boolean): string {
     if (stronglyConnected || recent.length === 0) return "";
     const latest = recent[0];
-    const ageMs = Date.now() - new Date(latest.timestamp).getTime();
+    const ageMs = Date.now() - latest.timestamp;
     if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > RECENT_EXIT_MS) return "";
     const build = latest.versionName
       ? `${latest.versionName}${latest.versionAssumed ? " (assumed)" : ""}`
       : "an unknown build";
     const frame = latest.topAppFrame ? ` Top app frame: ${latest.topAppFrame}.` : "";
     return (
-      `Not connected because the app died: ${latest.reason} (${build}) at ${latest.timestamp}.` + frame + " "
+      `Not connected because the app died: ${latest.reason} (${build}) at ${latest.at}.` + frame + " "
     );
   }
 
@@ -591,6 +600,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     sinceLast: boolean;
     /** AC5: true only for a since:"last" call with no watermark yet — "behaves exactly as today's default and says so in the summary line" is this flag reaching the caller. */
     firstEver: boolean;
+    /**
+     * GRA-189: true only for the "nothing new, and nothing to fall back to"
+     * shape at the very end of `resolveWindowSince` below — a genuinely
+     * empty `since: "last"` window with no previous `findings` digest to
+     * re-ask. Deliberately distinct from an ordinary zero-width *digest*
+     * re-ask (GRA-55 AC1's "two calls back to back with nothing between
+     * them," which can also land on `from === to`): that shape still has a
+     * real previous window to reclassify against and must keep doing so, so
+     * only this one carries the flag. `findings` uses it to skip running the
+     * analysis at all and say "nothing new" instead of "0s examined."
+     */
+    nothingNew: boolean;
   }
 
   /**
@@ -623,7 +644,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     if (w.sinceMs !== undefined || w.from !== undefined || w.to !== undefined) {
       const span = resolveWindow(w);
       if (span) await watermark.recordExamined(span.to);
-      return span ? { ...span, sinceLast: false, firstEver: false } : null;
+      return span ? { ...span, sinceLast: false, firstEver: false, nothingNew: false } : null;
     }
 
     const since = w.since ?? "last";
@@ -631,7 +652,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       await watermark.reset();
       const span = resolveWindow({});
       if (span) await watermark.recordExamined(span.to);
-      return span ? { ...span, sinceLast: false, firstEver: false } : null;
+      return span ? { ...span, sinceLast: false, firstEver: false, nothingNew: false } : null;
     }
 
     const state = watermark.get();
@@ -644,7 +665,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // whichever tool made this call — not narrated per tool, so the six
       // other window-taking tools cannot each forget it.
       if (span) pendingFirstEverNote = FIRST_EVER_NOTE;
-      return span ? { ...span, sinceLast: true, firstEver: true } : null;
+      return span ? { ...span, sinceLast: true, firstEver: true, nothingNew: false } : null;
     }
 
     const buffered = timeline.buffer();
@@ -661,18 +682,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const from = state.lastExaminedT + 1;
       const span = { from, to: liveNewest, ms: Math.max(0, liveNewest - from) };
       await watermark.recordExamined(span.to);
-      return { ...span, sinceLast: true, firstEver: false };
+      return { ...span, sinceLast: true, firstEver: false, nothingNew: false };
     }
 
     if (state.digest) {
       const { from, to } = state.digest.window;
-      return { from, to, ms: Math.max(0, to - from), sinceLast: true, firstEver: false };
+      return { from, to, ms: Math.max(0, to - from), sinceLast: true, firstEver: false, nothingNew: false };
     }
 
-    // Nothing new, and nothing to fall back to (a window-taking tool other
-    // than `findings` was the only thing ever called) — an honest
-    // zero-width window rather than a guess.
-    return { from: state.lastExaminedT, to: state.lastExaminedT, ms: 0, sinceLast: true, firstEver: false };
+    // GRA-189: nothing new, and nothing to fall back to (a window-taking
+    // tool other than `findings` was the only thing ever called before this
+    // — or, the device case, before an earlier MCP process this one's
+    // watermark.json survived). An honest zero-width window rather than a
+    // guess, and `nothingNew: true` so the caller skips analysing it and
+    // says so plainly instead of reporting "0s examined."
+    return {
+      from: state.lastExaminedT,
+      to: state.lastExaminedT,
+      ms: 0,
+      sinceLast: true,
+      firstEver: false,
+      nothingNew: true,
+    };
   }
 
   /** The structured half of the banner (ruling 5's "an agent that has to regex a sentence to know whether to act is a worse agent"). */
@@ -723,12 +754,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       return { banner: null, sinceLast: null };
     }
 
+    const profile = resolveProfile({
+      liveEvents: buffered,
+      windowTo: liveNewest,
+      sessionProfile: device.sessions?.currentMeta()?.profile ?? null,
+      hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+    });
     const trace = buildTrace({
       scenario: "since-last-banner",
       events,
       hello: (device.hello as unknown as Record<string, unknown>) ?? null,
       durationMs: liveNewest - from,
       withEvents: false,
+      profile,
     });
     const errorFindings = trace.findings.filter((f) => f.severity === "error");
     await watermark.recordReportedErrorT(liveNewest);
@@ -824,15 +862,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "'why did it just die' is answerable on the first call after a crash, not a tool an agent " +
         "has to know to reach for.",
       inputSchema: {
+        // GRA-188: `exits.recent` prints both an epoch-milliseconds
+        // `timestamp` and an ISO-8601 `at` for the same instant (device
+        // pass, 2026-09-15 — an agent's obvious next move, quoting the
+        // printed timestamp straight back, used to fail validation whenever
+        // it reached for `at`). Both forms are accepted here now; either
+        // one round-trips with no conversion the caller has to think of.
         exitTrace: z
-          .number()
-          .int()
-          .positive()
+          .union([z.number().int().positive(), z.string()])
           .optional()
           .describe(
-            "Fetch the full redacted ANR/native-crash trace for one entry in `exits` — pass its " +
-              "`timestamp` verbatim. Capped at 256 KB by the runtime, with a note in the text if it " +
-              "was truncated. Omit this to just see the `exits` summary.",
+            "Fetch the full redacted ANR/native-crash trace for one entry in `exits` — pass either " +
+              "that entry's `timestamp` (epoch milliseconds) or its `at` (ISO-8601) verbatim; both " +
+              "are accepted and converted. Capped at 256 KB by the runtime, with a note in the text " +
+              "if it was truncated. Omit this to just see the `exits` summary.",
           ),
       },
       annotations: { readOnlyHint: true },
@@ -864,19 +907,41 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const exits = exitsSection();
       const deathNotice = exitDeathNotice(exits.recent, pending === null);
 
-      // GRA-58: missing, empty and malformed all fail zod validation before
-      // the handler ever runs (`exitTrace` is `z.number().int().positive()`),
-      // so the only two shapes reaching here are "omitted" (skip the call
-      // entirely, `exitTrace: null`) and "a real number" — which may still
-      // name a timestamp the runtime has never heard of, hence the `found`
-      // field in what comes back rather than a thrown error.
+      // GRA-58: a missing `exitTrace` fails zod validation before the
+      // handler ever runs when it is a negative or non-integer number
+      // (`exitTrace` is `z.union([z.number().int().positive(), z.string()])`);
+      // a numeric shape reaching here may still name a timestamp the
+      // runtime has never heard of, hence the `found` field in what comes
+      // back rather than a thrown error.
+      //
+      // GRA-188: a *string* shape is new — `exits.recent` prints both an
+      // epoch-milliseconds `timestamp` and an ISO-8601 `at` for the same
+      // instant, and an agent quoting either back should work. `Date.parse`
+      // covers `at`'s own format and every other syntax that reasonably
+      // names an instant; a string that parses to nothing (empty, garbage)
+      // is refused right here, with one line, rather than reaching
+      // `device.request` with `NaN`.
+      let exitTraceMs: number | null = null;
+      if (typeof exitTrace === "string") {
+        const parsed = Date.parse(exitTrace);
+        if (!Number.isFinite(parsed)) {
+          return fail(
+            `exitTrace: ${JSON.stringify(exitTrace)} is not a valid epoch-milliseconds number or an ` +
+              "ISO-8601 timestamp.",
+          );
+        }
+        exitTraceMs = parsed;
+      } else if (exitTrace !== undefined) {
+        exitTraceMs = exitTrace;
+      }
+
       let exitTraceResult: unknown = null;
-      if (exitTrace !== undefined) {
+      if (exitTraceMs !== null) {
         try {
-          exitTraceResult = await device.request("exit_trace", { timestamp: exitTrace });
+          exitTraceResult = await device.request("exit_trace", { timestamp: exitTraceMs });
         } catch (error) {
           exitTraceResult = {
-            timestamp: exitTrace,
+            timestamp: exitTraceMs,
             found: false,
             error: error instanceof Error ? error.message : String(error),
           };
@@ -991,6 +1056,38 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       const buffered = timeline.buffer();
+
+      // GRA-189: `since: "last"` resolved to a genuinely empty window — the
+      // watermark this call would advance from has nothing newer past it,
+      // and no previous `findings` digest to re-ask (see `nothingNew`'s own
+      // comment on `resolveWindowSince`). Running the analyser over that
+      // reports "0s examined," the least useful possible answer to exactly
+      // the question `since: "last"` exists to shortcut — so this skips the
+      // analysis entirely rather than dressing up an empty result. This is
+      // also the device case: a fresh MCP process that loads a watermark an
+      // earlier process left on disk lands here whenever nothing has
+      // arrived since, and the prose must say "nothing new," not "first
+      // call" — `firstEver` is false, because the watermark was not empty,
+      // it simply has nothing new past it.
+      if (span.nothingNew) {
+        const pending = device.pendingMessage();
+        const connected = pending === null;
+        const exitedProcess = exitedProcessField();
+        const notice = exitedProcessNotice(exitedProcess, buffered.length > 0, connected);
+        return ok(
+          notice +
+            `Nothing new has arrived since the last call, which examined up to t=${span.to}. ` +
+            'Use since: "all", or an explicit window, for the whole picture.',
+          {
+            window: { from: span.from, to: span.to, ms: 0 },
+            eventsExamined: 0,
+            findings: [],
+            connected,
+            exitedProcess,
+          },
+        );
+      }
+
       // GRA-53: merges the live buffer with whatever sessions on disk
       // overlap the window, deduplicated and sorted — see
       // `fillWindowFromDisk`'s own doc comment in sessions.ts. `events` here
@@ -1047,6 +1144,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // copies of this formula eventually would (see clippedMsOf's own
       // comment in sessions.ts).
       const clipped = clippedMsOf(span.from, span.to, merged.coveredFrom, merged.coveredTo);
+      // GRA-185: searched over the live ring (`buffered`), not `events`
+      // (which is windowed to `span`) — a profile event before `span.from`
+      // must still count. See `resolveProfile`'s own doc comment.
+      const profile = resolveProfile({
+        liveEvents: buffered,
+        windowTo: span.to,
+        sessionProfile: device.sessions?.currentMeta()?.profile ?? null,
+        hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+      });
       const trace = buildTrace({
         // The same analyser the headless capture runs, pointed at the live
         // buffer instead of a recorded scenario. One analyser, so a finding
@@ -1056,6 +1162,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         hello: (device.hello as unknown as Record<string, unknown>) ?? null,
         durationMs: span.ms,
         withEvents: false,
+        profile,
       });
 
       const findings = trace.findings.map(withFollowUp);
@@ -1494,6 +1601,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         throw error;
       }
 
+      // GRA-185: same resolution `findings` uses — searched over the live
+      // ring, not `events` (windowed to `span`), so a profile before
+      // `span.from` still counts.
+      const profile = resolveProfile({
+        liveEvents: timeline.buffer(),
+        windowTo: span.to,
+        sessionProfile: device.sessions?.currentMeta()?.profile ?? null,
+        hello,
+      });
       const trace = buildSavedTrace({
         events,
         hello,
@@ -1501,6 +1617,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         coveredFrom: merged.coveredFrom,
         coveredTo: merged.coveredTo,
         scenario: resolvedScenario,
+        profile,
       });
       await writeSavedTrace(trace, outPath);
 
@@ -1946,6 +2063,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     async ({ sinceMs, from, to, limit, since }): Promise<ToolResult> => {
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
       const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      // GRA-185's "second, smaller thing": `frames` used to print its own
+      // truncated `frameIntervalMs` with no Hz named at all ("budget 8ms"),
+      // while `findings` — resolving the same profile through
+      // `resolveProfile` — said "8.3ms at 120Hz" for the identical panel.
+      // The prose below now goes through `describeBudget`, the same
+      // function `findingsOf`'s `frames-dropped` title uses, so the two
+      // cannot drift apart again. `frameIntervalMs` itself, in the payload
+      // below, stays exactly as the runtime sends it — only the prose
+      // changes.
+      const profile = resolveProfile({
+        liveEvents: timeline.buffer(),
+        windowTo: resolved?.to ?? Number.POSITIVE_INFINITY,
+        sessionProfile: device.sessions?.currentMeta()?.profile ?? null,
+        hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+      });
       return call<{
         totalFrames: number;
         jankyFrames: number;
@@ -1970,7 +2102,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .join(", ");
         return (
           `${report.jankyFrames} of ${report.totalFrames} frames janky (${rate}%), ` +
-          `budget ${report.frameIntervalMs}ms.` +
+          `budget ${describeBudget(profile)}.` +
           (worst
             ? ` Worst ${worst.totalMs}ms, ${worst.missedFrames} refresh(es) missed, mostly ` +
               `${worst.worstPhase}. Across the worst frames: ${phases}.`
