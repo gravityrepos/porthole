@@ -1,0 +1,46 @@
+{
+  // GRA-172: tsconfig.json's `exclude` keeps src/testing/** and *.test.ts
+  // out of the build on purpose — see that file's own comment — which means
+  // "tsc --noEmit clean" has only ever been a claim about src/ minus those.
+  // src/testing/ is not scaffolding any more: stripComments.ts is the shared
+  // engine the ConnectionState guard (surface.test.ts) and the
+  // PROTOCOL_VERSION drift scan (device.test.ts) both depend on, and neither
+  // guard's own type checker sees it.
+  //
+  // This is a second, standalone project, not a patch to tsconfig.json, and
+  // it does NOT cover "everything": it type-checks 15 of the 31 .ts files
+  // under src/ — the build project's 13 non-test files plus the 2 under
+  // src/testing/ (harness.ts, stripComments.ts) — with noEmit, so it can
+  // never write to dist/ and can never change what `npm run build` or
+  // `npm pack` produce. tsconfig.json keeps its existing exclusions
+  // unchanged; the published package is unaffected by this file existing
+  // at all. Confirm the boundary with `npx tsc -p tsconfig.typecheck.json
+  // --listFilesOnly` rather than trusting this count as it drifts.
+  //
+  // *.test.ts (16 files) stays excluded here too, matching the build
+  // project — not because it's out of scope in principle, but because this
+  // ticket's own Owns line is mcp/tsconfig*.json, mcp/package.json and
+  // .github/workflows/**, not the test files themselves. The first run of
+  // this project (before this exclusion was added back) found 7 pre-existing
+  // type errors, all vitest mock-typing mismatches in capture.test.ts and
+  // cli.test.ts, none in src/testing/. Those are real and vitest's esbuild
+  // transform has never caught them either — but fixing them is a separate,
+  // wider change to files this ticket cannot touch. See GRA-172's Linear
+  // comment for the full first-run output; flagged there for a follow-up
+  // ticket rather than silently absorbed here.
+  //
+  // Naming note: the npm script for this is `typecheck:src`, not
+  // `typecheck:all` — an earlier draft used "all" and a QA caught that a
+  // type error appended to surface.test.ts (one of the 16 excluded files)
+  // left it at exit 0 printing nothing. A name claiming full coverage it
+  // doesn't have is exactly the defect class this ticket exists to fix one
+  // level up; do not rename this back to "all" without actually covering
+  // all 31 files (which reopens the capture.test.ts/cli.test.ts errors
+  // above).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
