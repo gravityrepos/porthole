@@ -87,6 +87,14 @@ def suite_totals_from_junit(paths):
     return total, passed, failed, skipped
 
 
+def parse_count(digits):
+    # A test count has no decimal reading, unlike a general number — so
+    # unlike most "comma in a number" ambiguity, there is no locale in
+    # which stripping it is wrong. Parses "1,451" as 1451, not 451 and not
+    # a rejection.
+    return int(digits.replace(",", ""))
+
+
 def readme_suite_figure(md, label_regex):
     # Matches e.g. "366 on the JVM (...— 359 passed, 0 failed, 7 skipped)".
     # The parenthetical in README's own prose never nests parens, so a
@@ -98,35 +106,47 @@ def readme_suite_figure(md, label_regex):
     # prose, so a rewrap can land a line break wherever a space was —
     # measured for real, right before the closing number of this sentence.
     #
-    # (?<![\d,]) before every captured number: without it, a stray
-    # thousands-separated figure like "1,451 in the MCP server" matches
-    # starting at "451" and silently reports 451 — a truncated number
-    # parsed as if it were correct, not a missing one. The lookbehind
-    # refuses to start a match on a digit that follows another digit or a
-    # comma, so a comma-grouped number instead fails the whole pattern and
-    # is reported as "could not find a figure", which is the loud failure
-    # a bad parse should produce, not a plausible-looking wrong answer.
+    # [\d,]+ instead of \d+, parsed through parse_count: this used to be
+    # \d+ with a (?<![\d,]) lookbehind that REJECTED a thousands-separated
+    # figure like "1,451" (it matched starting at "451" without the guard,
+    # silently truncating it). Rejecting was wrong, not just less friendly:
+    # once the total crosses 1,000, "1,451" is the correct way to write it,
+    # and a check that fails a correct edit teaches people to stop trusting
+    # or to delete the check. [\d,]+ greedily captures the WHOLE run
+    # including its commas from the leftmost possible start — regex search
+    # tries the earliest starting position first, and starting at "1"
+    # already yields a full match ("1,451" then whitespace then the label),
+    # so the engine never falls back to the later, truncated starting
+    # position the old bug depended on. parse_count then strips the commas
+    # and parses the real number.
     pat = re.compile(
-        r"(?<![\d,])(\d+)\s+" + label_regex + r"\s*\("
-        r"[^)]*?(?<![\d,])(\d+)\s+passed,\s+(?<![\d,])(\d+)\s+failed,\s+(?<![\d,])(\d+)\s+skipped\)",
+        r"([\d,]+)\s+" + label_regex + r"\s*\("
+        r"[^)]*?([\d,]+)\s+passed,\s+([\d,]+)\s+failed,\s+([\d,]+)\s+skipped\)",
         re.DOTALL,
     )
     m = pat.search(md)
     if not m:
         return None
-    return tuple(int(g) for g in m.groups())
+    return tuple(parse_count(g) for g in m.groups())
 
 
 def readme_headline_total(md):
     # Matches "**951 tests, measured on ubuntu-latest CI**". Same
-    # anti-truncation guard as readme_suite_figure, for the same reason.
+    # accept-and-strip parsing as readme_suite_figure, for the same reason
+    # — see there for why [\d,]+ + parse_count replaced a rejecting
+    # lookbehind. Unlike the suite figure, the literal "**" immediately
+    # before the digits already anchors the match to one position, so
+    # there was never a truncation *hazard* here the way there was in
+    # readme_suite_figure's free-standing prose — this just parses the
+    # comma correctly instead of leaving it as a number the "**" anchor
+    # happened to protect from truncation but not from being int()'d wrong.
     pat = re.compile(
-        r"\*\*(?<![\d,])(\d+)\s+tests,\s+measured\s+on\s+ubuntu-latest\s+CI\*\*"
+        r"\*\*([\d,]+)\s+tests,\s+measured\s+on\s+ubuntu-latest\s+CI\*\*"
     )
     m = pat.search(md)
     if not m:
         return None
-    return int(m.group(1))
+    return parse_count(m.group(1))
 
 
 def main():

@@ -20,23 +20,26 @@ test("readmeFigure parses a plain integer figure", () => {
 });
 
 // The bug QA found: this regex used to match "1,451 in the MCP server (...)"
-// starting at "451", silently reporting 451 as the total instead of failing
-// to find a figure at all. The chosen fix is REJECTION, not correct parsing
-// of the comma — a comma-grouped number has never appeared in this
-// paragraph, so there is no real case to parse correctly, only a wrong
-// answer to stop returning. readmeFigure must come back null here, the same
-// as if the number were missing outright, so the caller reports "could not
-// find a figure" (a loud failure) instead of a wrong count.
-test("readmeFigure rejects a thousands-separated figure instead of truncating it", () => {
+// starting at "451", silently reporting 451 as the total instead of the
+// real 1451. The founder's call, overriding this file's first fix: reject
+// the input, or the good error message it needs, was worse than making it
+// correct — the total crosses 1,000 the day GRA-174 lands, "1,451" becomes
+// the natural way to write it, and a check that fails a correct edit is a
+// check people learn to route around. A test count has no decimal reading,
+// so unlike most "comma in a number" ambiguity there is no locale where
+// stripping it is the wrong call. This pins the CORRECT VALUE, not a
+// refusal — a stronger assertion than "returns null", because a check that
+// only tests for null would also pass a checker that rejects everything.
+test("readmeFigure parses a thousands-separated figure as its real value, not a truncation", () => {
   const md = "1,451 in the MCP server (`cd mcp && npm test` — 449 passed, 0 failed, 2 skipped)";
-  assert.equal(readmeFigure(md, LABEL), null);
+  assert.deepEqual(readmeFigure(md, LABEL), { total: 1451, passed: 449, failed: 0, skipped: 2 });
 });
 
-// Same failure mode, inside the parenthetical rather than the headline
-// number: must not silently drop the leading digit group there either.
-test("readmeFigure rejects a thousands-separated passed count", () => {
+// Same case, inside the parenthetical rather than the headline number: must
+// parse the real value there too, not silently drop the leading digit group.
+test("readmeFigure parses a thousands-separated passed count as its real value", () => {
   const md = "451 in the MCP server (`cd mcp && npm test` — 1,449 passed, 0 failed, 2 skipped)";
-  assert.equal(readmeFigure(md, LABEL), null);
+  assert.deepEqual(readmeFigure(md, LABEL), { total: 451, passed: 1449, failed: 0, skipped: 2 });
 });
 
 test("readmeFigure tolerates README's own line-wrapping between the numbers and words", () => {

@@ -31,19 +31,24 @@ class ReadmeSuiteFigureTest(unittest.TestCase):
         self.assertEqual(readme_suite_figure(md, LABEL), (366, 359, 0, 7))
 
     # The bug QA found: this regex used to match "1,366 on the JVM (...)"
-    # starting at "366", silently reporting 366 instead of failing to find
-    # a figure at all. The chosen fix is REJECTION, not comma-aware parsing
-    # — no comma-grouped number has ever appeared in this paragraph, so
-    # there is no real case to parse correctly, only a wrong answer to stop
-    # returning. Must come back None here, same as a missing figure, so the
-    # caller reports "could not find a figure" instead of a wrong count.
-    def test_rejects_a_thousands_separated_figure_instead_of_truncating_it(self):
+    # starting at "366", silently reporting 366 instead of the real 1366.
+    # The founder's call, overriding this file's first fix: rejecting the
+    # input, or the good error message it needs, was worse than making it
+    # correct — the total crosses 1,000 the day GRA-174 lands, "1,366"
+    # becomes the natural way to write it, and a check that fails a correct
+    # edit is a check people learn to route around. A test count has no
+    # decimal reading, so unlike most "comma in a number" ambiguity there
+    # is no locale where stripping it is the wrong call. This pins the
+    # CORRECT VALUE, not a refusal — stronger than "returns None", because
+    # a check that only tested for None would also pass a checker that
+    # rejects everything.
+    def test_parses_a_thousands_separated_figure_as_its_real_value(self):
         md = "1,366 on the JVM (`./gradlew test` — 359 passed, 0 failed, 7 skipped)"
-        self.assertIsNone(readme_suite_figure(md, LABEL))
+        self.assertEqual(readme_suite_figure(md, LABEL), (1366, 359, 0, 7))
 
-    def test_rejects_a_thousands_separated_passed_count(self):
+    def test_parses_a_thousands_separated_passed_count_as_its_real_value(self):
         md = "366 on the JVM (`./gradlew test` — 1,359 passed, 0 failed, 7 skipped)"
-        self.assertIsNone(readme_suite_figure(md, LABEL))
+        self.assertEqual(readme_suite_figure(md, LABEL), (366, 1359, 0, 7))
 
     def test_tolerates_readmes_own_line_wrapping(self):
         md = "366 on the JVM (`./gradlew\ntest` — 359 passed, 0 failed, 7\nskipped)"
@@ -58,9 +63,9 @@ class ReadmeHeadlineTotalTest(unittest.TestCase):
         md = "**951 tests, measured on ubuntu-latest CI** (details...)"
         self.assertEqual(readme_headline_total(md), 951)
 
-    def test_rejects_a_thousands_separated_headline(self):
+    def test_parses_a_thousands_separated_headline_as_its_real_value(self):
         md = "**1,951 tests, measured on ubuntu-latest CI** (details...)"
-        self.assertIsNone(readme_headline_total(md))
+        self.assertEqual(readme_headline_total(md), 1951)
 
 
 if __name__ == "__main__":

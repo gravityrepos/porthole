@@ -84,6 +84,13 @@ function countsFromJunit(xmlPath) {
   return { total, passed, failed, skipped };
 }
 
+// A test count has no decimal reading, unlike a general number — so unlike
+// most "comma in a number" ambiguity, there is no locale in which stripping
+// it is wrong. Parses "1,451" as 1451, not 451 and not a rejection.
+function parseCount(digits) {
+  return Number.parseInt(digits.replace(/,/g, ""), 10);
+}
+
 function readmeFigure(md, label) {
   // e.g. "451 in the MCP server (...— 449 passed, 0 failed, 2 skipped)".
   // The parenthetical in README's own prose never nests parens, so a
@@ -94,23 +101,33 @@ function readmeFigure(md, label) {
   // wherever a space was — including, as measured, right before the closing
   // number of the sentence.
   //
-  // (?<![\d,]) before every captured number: without it, a stray
-  // thousands-separated figure like "1,451 in the MCP server" matches
-  // starting at "451" and silently reports 451 — a truncated number parsed
-  // as if it were correct, not a missing one. The lookbehind refuses to
-  // start a match on a digit that follows another digit or a comma, so a
-  // comma-grouped number instead fails the whole pattern and comes back as
-  // "could not find a figure" below — a loud failure, not a plausible wrong
-  // answer.
+  // [\d,]+ instead of \d+, parsed through parseCount: this used to be \d+
+  // with a (?<![\d,]) lookbehind that REJECTED a thousands-separated figure
+  // like "1,451" (it matched starting at "451" without the guard, silently
+  // truncating it). Rejecting was wrong, not just less friendly: once the
+  // total crosses 1,000, "1,451" is the correct way to write it, and a
+  // check that fails a correct edit teaches people to stop trusting or to
+  // delete the check. [\d,]+ greedily captures the WHOLE run including its
+  // commas from the leftmost possible start — regex search tries the
+  // earliest starting position first, and starting at "1" already yields a
+  // full match ("1,451" then whitespace then the label), so the engine
+  // never falls back to the later, truncated starting position the old bug
+  // depended on. parseCount then strips the commas and parses the real
+  // number.
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
   const re = new RegExp(
-    `(?<![\\d,])(\\d+)\\s+${escaped}\\s*\\([^)]*?` +
-      `(?<![\\d,])(\\d+)\\s+passed,\\s+(?<![\\d,])(\\d+)\\s+failed,\\s+(?<![\\d,])(\\d+)\\s+skipped\\)`,
+    `([\\d,]+)\\s+${escaped}\\s*\\([^)]*?` +
+      `([\\d,]+)\\s+passed,\\s+([\\d,]+)\\s+failed,\\s+([\\d,]+)\\s+skipped\\)`,
     "s"
   );
   const m = decode(md).match(re);
   if (!m) return null;
-  return { total: +m[1], passed: +m[2], failed: +m[3], skipped: +m[4] };
+  return {
+    total: parseCount(m[1]),
+    passed: parseCount(m[2]),
+    failed: parseCount(m[3]),
+    skipped: parseCount(m[4]),
+  };
 }
 
 function fail(message) {
