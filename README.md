@@ -1562,16 +1562,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1100 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1134 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 404 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 396
-passed, 0 failed, 8 skipped), 562 in the MCP server (`cd mcp && npm test` —
-560 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 596 in the MCP server (`cd mcp && npm test` —
+594 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1100 disagrees with the sum of the three suites' totals stated
+XML, and when 1134 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1595,9 +1595,9 @@ this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 404 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 562 server tests with 0 skipped, because it has the
+set) and the same 596 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 562/561/1, missing only that capture. The timeline UI is the one suite
+sees 596/595/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
