@@ -70,7 +70,7 @@ answered yes for this one.
 read off a real device. It is **not** Navigation 3: the sample uses
 `androidx.navigation.compose`'s `NavHost` with `Porthole.registerNavController`,
 and `PortholeBackStack` — the Navigation 3 entry point — has no caller anywhere
-outside the runtime and its no-op twin. See GRA-186.
+outside the runtime and its no-op twin. See GRA-187.
 
 **Cold start and warm start.** `am start -W` after a reinstall reported
 `LaunchState: COLD, TotalTime: 451, WaitTime: 453`; a later relaunch after the
@@ -100,7 +100,7 @@ failed against it: a 30-tap device-side loop, 25 parallel `input tap` calls
 down`), and `monkey --throttle 0 -v 400` (400 events injected in 181 ms, no
 stall). The ANR above was obtained by raising that one sleep to 9000 ms,
 rebuilding, and reinstalling; **that edit was reverted before commit and is not
-in the tree.** See GRA-185.
+in the tree.** See GRA-187.
 
 **Exit reporting (GRA-58).** After relaunching, `porthole_status` carried:
 
@@ -119,7 +119,7 @@ characters, beginning `Subject: Input dispatching timed out ... Timeout: 5005`
 with the build fingerprint and the full thread dump. The `exitTrace` argument
 takes a **number**, while `exits.recent[].timestamp` is an ISO **string**;
 quoting the reported timestamp straight back is a validation error. See
-GRA-187.
+GRA-188.
 
 **The watermark banner across unrelated tools (GRA-55).** One server process,
 no timeline UI open (port 8678 unbound, checked). `nav_state` first — no
@@ -170,7 +170,7 @@ containing the serial is the driving script this pass wrote itself.
    `porthole report` headed the saved moment
    `Google Pixel 9 Pro Fold (60Hz)`. This is GRA-67's own acceptance criterion
    "at least one device at 90Hz or above, with frame findings using the right
-   budget", and it fails. See GRA-188.
+   budget", and it fails. See GRA-185.
 
 2. **A Perfetto capture on this device carried no Porthole labels.** Two
    ten-second captures while driving the app, one with the package defaulted
@@ -185,14 +185,14 @@ containing the serial is the driving script this pass wrote itself.
    section names at all. The connected collector list also contains no atrace
    or span collector. This contradicts the 2026-09-14 Pixel 10 Pro XL result
    and fails GRA-67's "a Perfetto capture with Porthole labels present, on both
-   devices". See GRA-189.
+   devices". See GRA-186.
 
 3. **`frames` and `findings` print the same quantity differently.** `frames`
    reports `frameIntervalMs: 8` and says "budget 8ms"; `findings` says
    "8.3ms at 120Hz". The runtime keeps full precision internally
    (`frameIntervalNanos`, used for `missedFrames`) and truncates only for
    display, so classification is unaffected — but two tools describing one
-   panel disagree in print. Folded into GRA-188.
+   panel disagree in print. Folded into GRA-185.
 
 4. **The first `findings` call of a session examines a zero-length window.**
    On the first call `frames` says "First call this session: `since: last` has
@@ -200,7 +200,7 @@ containing the serial is the driving script this pass wrote itself.
    of it; `findings` instead resolved `{from: 9632051, to: 9632051, ms: 0}` and
    answered "Nothing crossed a threshold in the 0s examined (1 events)" while
    92 events sat in the buffer. It does disclose the window, so it is not
-   dishonest, but the two tools' first-call defaults differ. See GRA-190.
+   dishonest, but the two tools' first-call defaults differ. See GRA-189.
 
 ### What was not reached, and why
 
@@ -259,7 +259,7 @@ were deliberately never invoked in that session.
 **What that device contributed to the shared facts:** `perfetto --app <pkg>`
 works on Android 17 / API 37 and a capture there carried `porthole: http`,
 `recompose` and `screen` slices with real durations — which is precisely what
-the Pixel 9 Pro Fold failed to reproduce on 2026-09-15 (see GRA-189). The
+the Pixel 9 Pro Fold failed to reproduce on 2026-09-15 (see GRA-186). The
 CLOCK_MONOTONIC ↔ CLOCK_BOOTTIME offset was measured at 12,272.83 s and held
 to 183 ns across nine minutes, so one `clock_snapshot` per capture is enough.
 
