@@ -1126,8 +1126,19 @@ describe("POST /api/save (GRA-116)", () => {
   });
 
   it("400s a scenario that would escape .porthole/traces, and writes nothing (QA round 1)", async () => {
-    const escaped = resolve(tracesDir, "..", "..", "..", "..", "tmp", "evil.json");
-    for (const scenario of ["../../../../tmp/evil", "..\\..\\evil", "a/b", "a\\b", "..", "."]) {
+    // Every escape below stays inside the throwaway project root's parent
+    // chain only as far as `.porthole/` and the root itself, so "nothing
+    // written" is checked as "these two listings did not change" rather than
+    // as the absence of a fixed path outside anything this test owns — a
+    // mutation run once left such a file behind on the developer's machine,
+    // and a stale artifact must not be able to fail a later run.
+    const dotPorthole = resolve(tracesDir, "..");
+    const before = [
+      existsSync(tracesDir) ? readdirSync(tracesDir).sort() : null,
+      readdirSync(dotPorthole).sort(),
+      readdirSync(PROJECT_ROOT).sort(),
+    ];
+    for (const scenario of ["../evil", "..\\evil", "a/b", "a\\b", "..", "."]) {
       const response = await timeline.send("/api/save", {
         method: "POST",
         body: JSON.stringify({ from: 0, to: 1_000, scenario }),
@@ -1135,8 +1146,12 @@ describe("POST /api/save (GRA-116)", () => {
       expect(response.status, scenario).toBe(400);
       expect(JSON.parse(response.body).error, scenario).toMatch(/scenario/);
     }
-    expect(existsSync(escaped)).toBe(false);
-    expect(existsSync(resolve(tracesDir, "..", "evil.json"))).toBe(false);
+    const after = [
+      existsSync(tracesDir) ? readdirSync(tracesDir).sort() : null,
+      readdirSync(dotPorthole).sort(),
+      readdirSync(PROJECT_ROOT).sort(),
+    ];
+    expect(after).toEqual(before);
   });
 
   it("400s a well-formed JSON body that is not an object (an array, a bare number)", async () => {
