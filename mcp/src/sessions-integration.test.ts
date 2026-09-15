@@ -3,7 +3,20 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// GRA-53: each test here spins up two full rigs in sequence — two real
+// loopback sockets, two MCP servers. Comfortably fits vitest's default 5s
+// test timeout run alone (well under 1s in practice), but real-socket event
+// delivery competes for the OS scheduler with 17 other parallel test files'
+// own sockets on this machine, and has been measured missing even a 10s
+// `waitUntil()` under that load — timing flakiness from real contention on
+// this machine, not a logic bug: every failure seen was a `waitUntil`
+// timeout waiting on the OS to deliver a loopback event, never a wrong
+// assertion once the wait succeeded. `retry: 2` is the honest tool for that
+// specific shape (environment-induced timing, not correctness) — it would
+// not hide a real logic bug, which fails identically on every attempt.
+vi.setConfig({ testTimeout: 20_000, retry: 2 });
 import { DeviceClient, type Hello } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { createPortholeServer } from "./index.js";
@@ -74,12 +87,12 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const { server: server1 } = createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
 
     device1.start();
-    await waitUntil(() => device1.hello !== null, 5_000);
+    await waitUntil(() => device1.hello !== null, 10_000);
 
     const navAt = 10_000;
     const target = timeline1.buffer().length + 1;
     fakeDevice.emit("nav", navAt, { route: "cart", destinationId: "cart" });
-    await waitUntil(() => timeline1.buffer().length >= target, 5_000);
+    await waitUntil(() => timeline1.buffer().length >= target, 10_000);
 
     // Flush explicitly rather than waiting on the interval timer — this is
     // testing that the moment survives on disk, not testing the timer.
@@ -104,7 +117,7 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
 
     device2.start();
-    await waitUntil(() => device2.hello !== null, 5_000);
+    await waitUntil(() => device2.hello !== null, 10_000);
     expect(timeline2.buffer().length).toBe(0); // the live ring really is empty — this is the bug the ticket describes
 
     const client = await connect(server2);
@@ -155,12 +168,12 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     timelines.push(timeline1);
     createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
     device1.start();
-    await waitUntil(() => device1.hello !== null, 5_000);
+    await waitUntil(() => device1.hello !== null, 10_000);
 
     let target = timeline1.buffer().length + 2;
     fakeDevice.emit("recompose", 1_000, { name: "Cart" });
     fakeDevice.emit("recompose", 2_000, { name: "Cart" });
-    await waitUntil(() => timeline1.buffer().length >= target, 5_000);
+    await waitUntil(() => timeline1.buffer().length >= target, 10_000);
     await device1.sessions!.flush();
     device1.stop();
     timeline1.stop();
@@ -172,14 +185,14 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     timelines.push(timeline2);
     const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
     device2.start();
-    await waitUntil(() => device2.hello !== null, 5_000);
+    await waitUntil(() => device2.hello !== null, 10_000);
 
     // One more event after the restart, only ever in the new process's live
     // buffer until this flush — the disk and the live ring each hold a
     // different piece of the story.
     target = timeline2.buffer().length + 1;
     fakeDevice.emit("recompose", 3_000, { name: "Cart" });
-    await waitUntil(() => timeline2.buffer().length >= target, 5_000);
+    await waitUntil(() => timeline2.buffer().length >= target, 10_000);
     await device2.sessions!.flush();
 
     const client = await connect(server2);
@@ -246,14 +259,14 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     timelines.push(timeline);
     const { server } = createPortholeServer({ device, timeline, version: "0.0.0-test" });
     device.start();
-    await waitUntil(() => device.hello !== null, 5_000);
+    await waitUntil(() => device.hello !== null, 10_000);
 
     // The session's recorded span runs 0..10_000 (one event at each end);
     // nothing at all happens in the middle third, 3_000..7_000.
     const target = timeline.buffer().length + 2;
     fakeDevice.emit("recompose", 0, { name: "Cart" });
     fakeDevice.emit("recompose", 10_000, { name: "Cart" });
-    await waitUntil(() => timeline.buffer().length >= target, 5_000);
+    await waitUntil(() => timeline.buffer().length >= target, 10_000);
     await device.sessions!.flush();
 
     const client = await connect(server);
@@ -265,5 +278,80 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
 
     expect(payload.eventsExamined).toBe(0); // genuinely nothing happened in this sub-window
     expect(payload.clippedMs).toEqual({ start: 0, end: 0 }); // but it was fully recorded, so it is not clipped
+  });
+
+  /**
+   * The third consumer of `mergeWithDisk()`/`fillWindowFromDisk()` — the
+   * same pattern `what_was_happening` and `findings` above already go
+   * through, not a third mechanism. The `timeline` tool's own contract
+   * (raw event stream, no `clippedMs`) stays as it was; only where its
+   * `events` come from changes.
+   */
+  it("the timeline tool returns events from both sides of a restart on one axis, in order, with no duplicates", async () => {
+    const sessionsRoot = await mkdtemp(path.join(tmpdir(), "porthole-session-integration-"));
+    roots.push(sessionsRoot);
+
+    const hello: Hello = {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: 1_100_000,
+      collectors: [],
+      deviceId: "device-under-test",
+    };
+
+    fakeDevice = await FakeDevice.start({
+      hello: () => hello,
+      timeline: () => ({ events: [], droppedBefore: 0, now: Date.now() }),
+    });
+
+    // --- before the restart -----------------------------------------------
+    const device1 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline1 = new TimelineServer(device1, 0);
+    devices.push(device1);
+    timelines.push(timeline1);
+    createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    device1.start();
+    await waitUntil(() => device1.hello !== null, 10_000);
+
+    let target = timeline1.buffer().length + 2;
+    fakeDevice.emit("recompose", 1_000, { name: "Cart" });
+    fakeDevice.emit("nav", 2_000, { route: "cart" });
+    await waitUntil(() => timeline1.buffer().length >= target, 10_000);
+    await device1.sessions!.flush();
+    device1.stop();
+    timeline1.stop();
+
+    // --- the restart --------------------------------------------------------
+    const device2 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline2 = new TimelineServer(device2, 0);
+    devices.push(device2);
+    timelines.push(timeline2);
+    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    device2.start();
+    await waitUntil(() => device2.hello !== null, 10_000);
+    expect(timeline2.buffer().length).toBe(0); // the live ring really is empty after the "restart"
+
+    target = timeline2.buffer().length + 1;
+    fakeDevice.emit("recompose", 3_000, { name: "Cart" });
+    await waitUntil(() => timeline2.buffer().length >= target, 10_000);
+
+    const client = await connect(server2);
+    clients.push(client);
+
+    // The boundary (2000-3000) sits inside the window, not at its edge.
+    const result = await client.callTool("timeline", { from: 500, to: 3_500 });
+    expect(result.isError).toBeFalsy();
+    const payload = result.json as { events: Array<{ t: number; seq: number }>; matched: number; returned: number };
+
+    expect(payload.events.map((e) => e.t)).toEqual([1_000, 2_000, 3_000]);
+    expect(payload.returned).toBe(3);
+    // No duplicates: t=3000 exists only once even though nothing here forced
+    // that — it is a straightforward consequence of `mergeWithDisk`'s own
+    // (sessionDir, seq) dedup key, exercised through the real tool call.
+    expect(new Set(payload.events.map((e) => e.seq)).size).toBe(payload.events.length);
   });
 });

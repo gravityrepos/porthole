@@ -1575,21 +1575,32 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to, kinds, limit }): Promise<ToolResult> => {
       try {
-        // Prefer the local buffer: it holds more history than the device ring and
-        // survives the app being restarted underneath us.
-        let events: DeviceEvent[] = timeline.buffer();
-        if (events.length === 0) {
-          const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
-            limit: limit ?? 500,
-          });
-          events = page.events;
-        }
-
         // Absolute bounds first, so a window quoted from another tool selects the
         // same span here. sinceMs stays as the convenience for "recently".
         const span = resolveWindow({ sinceMs, from, to });
+
+        // GRA-53: the third consumer of the same merge `findings` and
+        // `what_was_happening` already use — deliberately not a third
+        // mechanism. A resolved span (the ordinary case, or an explicit
+        // `{from, to}` quoted from an earlier answer) goes through
+        // `mergeWithDisk`, which already returns events filtered to the
+        // window; the un-resolved case (no span at all — nothing to bound
+        // a disk lookup by) keeps the previous behaviour of asking the
+        // device's own much-smaller ring directly.
+        let events: DeviceEvent[];
         if (span) {
-          events = events.filter((event) => event.t >= span.from && event.t <= span.to);
+          const merged = await mergeWithDisk(span.from, span.to);
+          events = merged.events as unknown as DeviceEvent[];
+        } else {
+          // Prefer the local buffer: it holds more history than the device
+          // ring and survives the app being restarted underneath us.
+          events = timeline.buffer();
+          if (events.length === 0) {
+            const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
+              limit: limit ?? 500,
+            });
+            events = page.events;
+          }
         }
         if (kinds?.length) {
           const wanted = new Set(kinds);
