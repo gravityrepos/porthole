@@ -44,6 +44,7 @@ them they cover:
 | `system_context` | thermal state, CPU governor, busiest processes, memory pressure — the half Porthole cannot see |
 | `capture_system_trace` | records a Perfetto trace, annotated with the app's own spans |
 | `ask_system_trace` | puts a fixed set of questions to a captured trace, to rule causes in or out |
+| `save_moment` | turns a window of what already happened into a named trace file, no recording required |
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device |
 
@@ -582,6 +583,48 @@ is. Defaults: 500MB total, 7 days. `PORTHOLE_SESSIONS_MAX_BYTES` and
 variable table above). `PORTHOLE_SESSIONS=0` is the off switch: set it and
 nothing is written to disk at all — the window-taking tools answer only from
 the live buffer, the same as before this feature existed.
+
+### Saving a moment after it happened
+
+Every other way Porthole produces a durable trace requires deciding to record
+*before* the interesting thing happens — `capture` wraps a command,
+`capture_system_trace` blocks for a fixed duration. Sessions on disk mean that
+decision no longer has to come first: poke the app, watch something break,
+*then* keep it.
+
+`save_moment` (MCP) and `porthole save` (CLI) turn a window into a trace file
+in exactly the format `capture` writes, so `porthole report` and
+`porthole compare` work on it with no changes:
+
+```bash
+porthole save --scenario checkout --since 10m
+porthole save --from 2057010 --to 2075089 --out trace.json   # quote a finding's window directly
+```
+
+`--since` accepts `10m`, `90s`, `2h`, or a bare millisecond count.
+`--scenario` defaults to `moment-<from>-<to>` on the uptime clock when
+omitted, and `--out` defaults to `.porthole/traces/<scenario>.json`, the same
+directory `capture_system_trace` writes under. The CLI has no running MCP
+server's live buffer to ask "what counts as now", so it resolves both against
+whichever session on disk was most recently written to — with more than one
+app or device recording at once, that is the busiest one, not necessarily the
+one you meant; pass `--from`/`--to` explicitly to sidestep the ambiguity.
+
+The result — from either entry point — carries `clippedMs`, the same
+vocabulary `findings` reports coverage in: a window reaching earlier than
+anything ever recorded says so rather than silently writing a shorter trace.
+`--with-events` does not exist here; a saved moment sits right next to the
+session file it came from, so a copy of the same events inside the trace
+would only double the bytes to hand back something already on disk.
+
+`porthole sessions` lists what is recorded, across every app and device,
+newest-started first, with the most recently active one marked:
+
+```
+$ porthole sessions
+* com.example.shop device-under-test started 2026-09-15T18:04:02.000Z t=[0,842011] events=15234 3.8MB .porthole/sessions/com.example.shop_device-under-test_500000
+  com.example.shop emulator-5554     started 2026-09-14T09:11:40.000Z t=[0,190442] events=4120  980.1KB .porthole/sessions/com.example.shop_emulator-5554_10000
+```
 
 ## System traces
 
@@ -1458,16 +1501,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1030 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1100 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 404 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 396
-passed, 0 failed, 8 skipped), 492 in the MCP server (`cd mcp && npm test` —
-490 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 562 in the MCP server (`cd mcp && npm test` —
+560 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1030 disagrees with the sum of the three suites' totals stated
+XML, and when 1100 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1491,9 +1534,9 @@ this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 404 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 492 server tests with 0 skipped, because it has the
+set) and the same 562 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 492/491/1, missing only that capture. The timeline UI is the one suite
+sees 562/561/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager

@@ -8,13 +8,16 @@ import {
   DEFAULT_RETENTION,
   SessionWriter,
   UNKNOWN_DEVICE_ID,
+  clippedMsOf,
   enforceRetention,
   fillWindowFromDisk,
   findSessionsForIdentity,
+  listAllSessions,
   readSessionWindow,
   retentionOptionsFromEnv,
   sessionDirName,
   sessionIdentity,
+  sessionSizeBytes,
   sessionsEnabled,
   sessionsRoot,
   type SessionEvent,
@@ -646,4 +649,105 @@ describe("sessionsRoot", () => {
   it("lives under .porthole/sessions of the project root", () => {
     expect(sessionsRoot("/home/dev/app")).toBe(path.join("/home/dev/app", ".porthole", "sessions"));
   });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-54: listAllSessions, sessionSizeBytes, clippedMsOf
+// ---------------------------------------------------------------------------
+
+describe("listAllSessions", () => {
+  it("returns [] for a root that does not exist yet (missing-input case, BRIEFING self-check a)", async () => {
+    const root = path.join(await tmpRoot(), "does-not-exist");
+    expect(await listAllSessions(root)).toEqual([]);
+  });
+
+  it("returns [] for a root that exists but is empty", async () => {
+    const root = await tmpRoot();
+    expect(await listAllSessions(root)).toEqual([]);
+  });
+
+  it("finds sessions across different apps and devices, not scoped to one identity", async () => {
+    const root = await tmpRoot();
+    const shop = new SessionWriter(root, 60_000);
+    await shop.open(HELLO);
+    shop.append(event(0, 1_000));
+    await shop.flush();
+
+    const otherHello = { ...HELLO, packageName: "com.example.other", deviceId: "xyz789", startedAt: 5_000 };
+    const other = new SessionWriter(root, 60_000);
+    await other.open(otherHello);
+    other.append(event(0, 2_000));
+    await other.flush();
+
+    const all = await listAllSessions(root);
+    expect(all.map((s) => s.packageName).sort()).toEqual(["com.example.other", "com.example.shop"]);
+  });
+
+  it("sorts newest-started first", async () => {
+    const root = await tmpRoot();
+    const older = new SessionWriter(root, 60_000);
+    await older.open({ ...HELLO, startedAt: 1_000 });
+    older.append(event(0, 1_000));
+    await older.flush();
+
+    const newer = new SessionWriter(root, 60_000);
+    await newer.open({ ...HELLO, packageName: "com.example.other", startedAt: 99_000 });
+    newer.append(event(0, 1_000));
+    await newer.flush();
+
+    const all = await listAllSessions(root);
+    expect(all.map((s) => s.startedAt)).toEqual([99_000, 1_000]);
+  });
+});
+
+describe("sessionSizeBytes", () => {
+  it("is 0 for a directory with neither file (missing-input case)", async () => {
+    const root = await tmpRoot();
+    const dir = path.join(root, "nothing-here");
+    expect(await sessionSizeBytes(dir)).toBe(0);
+  });
+
+  it("sums events.ndjson and meta.json, and grows as more is appended", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    const before = await sessionSizeBytes(dir);
+    expect(before).toBeGreaterThan(0); // meta.json alone already has bytes
+
+    writer.append(event(0, 1_000));
+    await writer.flush();
+    const after = await sessionSizeBytes(dir);
+    expect(after).toBeGreaterThan(before);
+  });
+});
+
+describe("clippedMsOf", () => {
+  it("reports the whole window clipped when nothing is covered at all", () => {
+    expect(clippedMsOf(1_000, 5_000, null, null)).toEqual({ start: 4_000, end: 0 });
+  });
+
+  it("is zero on both ends when coverage exactly matches the window", () => {
+    expect(clippedMsOf(1_000, 5_000, 1_000, 5_000)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("is zero when coverage extends past the window on both sides (a quiet stretch inside a recorded session)", () => {
+    expect(clippedMsOf(3_000, 7_000, 0, 10_000)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("reports only the start as clipped when the window reaches before what is covered", () => {
+    expect(clippedMsOf(0, 5_000, 2_000, 5_000)).toEqual({ start: 2_000, end: 0 });
+  });
+
+  it("reports only the end as clipped when the window reaches after what is covered", () => {
+    expect(clippedMsOf(1_000, 8_000, 1_000, 5_000)).toEqual({ start: 0, end: 3_000 });
+  });
+
+  it("reports both ends clipped when coverage is a strict sub-range of the window", () => {
+    expect(clippedMsOf(0, 10_000, 3_000, 7_000)).toEqual({ start: 3_000, end: 3_000 });
+  });
+
+  // Vacuous-assertion check (self-check c): a constant `() => ({ start: 0, end: 0 })`
+  // would satisfy the exact-match test above but fails every test here, since
+  // each one asserts a *non-trivial* value on at least one field.
 });

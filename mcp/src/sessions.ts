@@ -435,6 +435,92 @@ export async function findSessionsForIdentity(
   return out;
 }
 
+/**
+ * GRA-54: every session on disk, for every app and every device — not
+ * scoped to one identity the way `findSessionsForIdentity` is, because
+ * `porthole sessions` exists to answer "which of yesterday's runs was the
+ * one on the Pixel" for someone who does not already know the id scheme,
+ * and `save_moment`/`porthole save` need to pick a session to act on before
+ * an identity is known at all. Newest-started first, matching the CLI's own
+ * "newest first" requirement — a separate question from *which* session is
+ * "current" (the caller's job: this only reads what is on disk).
+ */
+export async function listAllSessions(root: string): Promise<SessionMetaWithDir[]> {
+  let names: string[];
+  try {
+    names = await readdir(root);
+  } catch {
+    return [];
+  }
+  const out: SessionMetaWithDir[] = [];
+  for (const name of names) {
+    const dir = path.join(root, name);
+    const meta = await readMeta(dir);
+    if (meta) out.push({ ...meta, dir });
+  }
+  out.sort((a, b) => b.startedAt - a.startedAt);
+  return out;
+}
+
+/**
+ * Bytes on disk for one session directory: `events.ndjson` plus `meta.json`.
+ * Shared with `enforceRetention`'s own sizing (`sessionDirInfo` below) only
+ * in spirit, not in code — that function also needs `updatedAt` and treats a
+ * missing `events.ndjson` as "not a session directory at all" (returns
+ * null), a distinction retention cares about and `porthole sessions` does
+ * not: a session `open()`ed but never yet flushed is still a real row in
+ * that listing, just a 0-or-small-byte one.
+ */
+export async function sessionSizeBytes(dir: string): Promise<number> {
+  let bytes = 0;
+  try {
+    bytes += (await stat(eventsPath(dir))).size;
+  } catch {
+    // No events flushed yet — a real, if small, state for a just-opened session.
+  }
+  try {
+    bytes += (await stat(metaPath(dir))).size;
+  } catch {
+    // Missing meta.json is odd but not fatal for sizing.
+  }
+  return bytes;
+}
+
+// ---------------------------------------------------------------------------
+// coverage — shared by `findings` (index.ts) and `save_moment`/`porthole save`
+// ---------------------------------------------------------------------------
+
+export interface ClippedMs {
+  start: number;
+  end: number;
+}
+
+/**
+ * How much of `[from, to]` fell outside what a merged view (`WindowFill`'s
+ * `coveredFrom`/`coveredTo`) actually covers — the same `clippedMs`
+ * vocabulary `findings` has always reported, now the one function both
+ * `findings` (index.ts) and `save_moment`/`porthole save` (save.ts) call,
+ * rather than two hand-rolled copies that agree until the day one of them
+ * changes and the disagreement is silent (GRA-163's history, repeatedly).
+ *
+ * Deliberately not derived from which events matched — see
+ * `fillWindowFromDisk`'s own doc comment above on why a quiet stretch inside
+ * a fully-recorded session must read as covered, not clipped.
+ */
+export function clippedMsOf(
+  from: number,
+  to: number,
+  coveredFrom: number | null,
+  coveredTo: number | null,
+): ClippedMs {
+  const ms = Math.max(0, to - from);
+  if (coveredFrom === null || coveredTo === null) return { start: ms, end: 0 };
+  return {
+    start: from < coveredFrom ? coveredFrom - from : 0,
+    end: to > coveredTo ? to - coveredTo : 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // merging memory and disk for one window — GRA-53's restart-boundary AC
 // ---------------------------------------------------------------------------

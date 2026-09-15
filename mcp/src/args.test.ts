@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseFailOn, parsePort, readTrace, requiredValue, TraceReadError } from "./args.js";
+import { parseDuration, parseFailOn, parseMillis, parsePort, readTrace, requiredValue, TraceReadError } from "./args.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
 
 /**
@@ -292,5 +292,93 @@ describe("readTrace", () => {
   it("refuses an empty JSON object the same way as a missing field", async () => {
     const file = write("empty.json", "{}");
     await expect(readTrace(file)).rejects.toThrow('missing "porthole" version field');
+  });
+});
+
+/** GRA-54: `porthole save --from`/`--to`. */
+describe("parseMillis", () => {
+  it("names the option when the value is missing", () => {
+    expect(parseMillis(undefined, "--from")).toEqual({ message: "--from needs a millisecond value" });
+  });
+
+  it("names the option when the value is empty", () => {
+    expect(parseMillis("", "--to")).toEqual({ message: "--to needs a millisecond value" });
+  });
+
+  it("rejects a non-numeric value", () => {
+    expect(parseMillis("soon", "--from")).toEqual({ message: '--from "soon" is not a number' });
+  });
+
+  it("rejects a fractional value", () => {
+    expect(parseMillis("100.5", "--from")).toEqual({ message: "--from 100.5 must be a whole number" });
+  });
+
+  it("rejects a negative value (no leading minus in the accepted shape)", () => {
+    expect(parseMillis("-5", "--from")).toEqual({ message: '--from "-5" is not a number' });
+  });
+
+  it("accepts 0 — the very start of the uptime clock, not a missing value", () => {
+    expect(parseMillis("0", "--from")).toBe(0);
+  });
+
+  it("accepts an ordinary uptime millisecond value", () => {
+    expect(parseMillis("2057010", "--to")).toBe(2_057_010);
+  });
+
+  it("rejects scientific notation and hex, which Number() would otherwise accept", () => {
+    expect(parseMillis("1e4", "--from")).toEqual({ message: '--from "1e4" is not a number' });
+    expect(parseMillis("0x10", "--from")).toEqual({ message: '--from "0x10" is not a number' });
+  });
+});
+
+/** GRA-54: `porthole save --since`. */
+describe("parseDuration", () => {
+  it("names the option when the value is missing", () => {
+    expect(parseDuration(undefined, "--since")).toEqual({
+      message: "--since needs a duration (e.g. 10m, 90s, 2h, or a millisecond count)",
+    });
+  });
+
+  it("names the option when the value is empty", () => {
+    expect(parseDuration("", "--since")).toEqual({
+      message: "--since needs a duration (e.g. 10m, 90s, 2h, or a millisecond count)",
+    });
+  });
+
+  it("rejects a malformed unit", () => {
+    expect(parseDuration("10x", "--since")).toEqual({
+      message: '--since "10x" is not a duration (use 10m, 90s, 2h, or a millisecond count)',
+    });
+  });
+
+  it("rejects a compound duration like 1h30m — one unit only", () => {
+    expect(parseDuration("1h30m", "--since")).toEqual({
+      message: '--since "1h30m" is not a duration (use 10m, 90s, 2h, or a millisecond count)',
+    });
+  });
+
+  it("rejects zero — a lookback of nothing is not a window", () => {
+    expect(parseDuration("0", "--since")).toEqual({ message: "--since 0 must be positive" });
+    expect(parseDuration("0m", "--since")).toEqual({ message: "--since 0m must be positive" });
+  });
+
+  it("accepts a bare millisecond count", () => {
+    expect(parseDuration("1500", "--since")).toBe(1_500);
+  });
+
+  it("converts minutes to milliseconds", () => {
+    expect(parseDuration("10m", "--since")).toBe(600_000);
+  });
+
+  it("converts seconds to milliseconds", () => {
+    expect(parseDuration("90s", "--since")).toBe(90_000);
+  });
+
+  it("converts hours to milliseconds", () => {
+    expect(parseDuration("2h", "--since")).toBe(7_200_000);
+  });
+
+  it("accepts an explicit ms suffix", () => {
+    expect(parseDuration("250ms", "--since")).toBe(250);
   });
 });
