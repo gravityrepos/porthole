@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { findAdb, parseProperties, resolveProjectRoot, resolveSdkDir } from "./adb.js";
+import { findAdb, parseProperties, resolveProjectRoot, resolveSdkDir, runAdbAsync } from "./adb.js";
 
 // Wraps the real readFileSync in a spy rather than replacing it: every
 // existing GRA-87 test still gets real file contents back, but GRA-119's
@@ -741,4 +741,85 @@ describe("a relative sdk.dir (GRA-160)", () => {
       expect(findAdb()).toBe(path.join(sdk, "platform-tools", BINARY));
     });
   });
+});
+
+/**
+ * `runAdbAsync` itself, against a real spawned process rather than a fake —
+ * the same technique perfetto.test.ts's "runScript, against a real process"
+ * describe block uses, and for the same reason: proving the timeout kills a
+ * real child and that the event loop stays free while it waits needs an OS
+ * process on the other end, and `cmd.exe` / `/bin/sh` are real,
+ * always-present executables that can be told to succeed, fail or hang on
+ * demand. `binary` is the seam that makes this possible without a real adb
+ * or a real device — see `runAdbAsync`'s own doc comment.
+ */
+describe("runAdbAsync — an async, awaited spawn standing in for spawnSync (GRA-89)", () => {
+  const isWindows = process.platform === "win32";
+  const shell = isWindows ? "cmd.exe" : "/bin/sh";
+  const shellArgs = (command: string) => (isWindows ? ["/d", "/s", "/c", command] : ["-c", command]);
+  // Same trap perfetto.test.ts's own comment documents: cmd.exe running an
+  // infinite loop itself, rather than handing it to a child ping.exe that
+  // would go on holding the output pipe open after cmd.exe is killed.
+  const hang = isWindows ? "for /l %i in () do @rem" : "exec sleep 30";
+  const short = isWindows ? "ping -n 2 127.0.0.1 >nul" : "exec sleep 1";
+
+  it("says exactly this when the adb binary itself cannot be run", async () => {
+    const missing = path.join(tmpdir(), `definitely-not-a-real-adb-binary-${Date.now()}`);
+    const result = await runAdbAsync(["devices"], { binary: missing });
+    expect(result.ok).toBe(false);
+    expect(result.output).toMatch(/^Could not run adb \(.+\)\. Set ANDROID_HOME, or put adb on your PATH\.$/);
+  });
+
+  it("reports a nonzero exit as 'adb exited N' when adb said nothing on either stream", async () => {
+    const result = await runAdbAsync(shellArgs("exit 7"), { binary: shell });
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("adb exited 7");
+  });
+
+  it("kills a wedged adb and says exactly how long it waited and what it ran", async () => {
+    const timeoutMs = 200;
+    const args = shellArgs(hang);
+    const started = Date.now();
+    const result = await runAdbAsync(args, { binary: shell, timeoutMs });
+    const elapsed = Date.now() - started;
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe(
+      `adb did not finish within ${timeoutMs}ms running '${args.join(" ")}'; ` +
+        "it may be wedged, so it was killed rather than left to hang.",
+    );
+    // The real proof this was killed rather than left running the real 30s.
+    expect(elapsed).toBeLessThan(10_000);
+  }, 15_000);
+
+  it("keeps the event loop free while the child runs — GRA-89's whole point", async () => {
+    const order: string[] = [];
+    const running = runAdbAsync(shellArgs(short), { binary: shell }).then(() => order.push("adb"));
+    const timer = new Promise<void>((resolve) => setTimeout(resolve, 30)).then(() => order.push("timer"));
+    await Promise.all([running, timer]);
+    // `short` runs for roughly a second; a 30ms timer firing first is only
+    // possible if the child is not blocking the thread it runs on.
+    expect(order[0]).toBe("timer");
+  }, 15_000);
+
+  it("reports progress on stderr while a slow call is still running, on a tick a caller controls", async () => {
+    const ticks: number[] = [];
+    const stillRunning = isWindows ? "ping -n 4 127.0.0.1 >nul" : "exec sleep 2";
+    const result = await runAdbAsync(shellArgs(stillRunning), {
+      binary: shell,
+      tickMs: 50,
+      onProgress: (elapsedMs) => ticks.push(elapsedMs),
+    });
+    expect(result.ok).toBe(true);
+    // A ~2s command ticking every 50ms should fire on the order of dozens of
+    // times. >0 alone would also pass a broken implementation that calls
+    // onProgress exactly once, immediately, instead of on an interval — >5
+    // does not: it fails a single-shot call, and a real periodic ticker over
+    // this duration clears it many times over.
+    expect(ticks.length).toBeGreaterThan(5);
+    // And it should actually be periodic, not one big element followed by
+    // silence: consecutive ticks should be roughly tickMs apart, not the
+    // whole elapsed duration apart.
+    const gaps = ticks.slice(1).map((t, i) => t - ticks[i]);
+    expect(Math.max(...gaps)).toBeLessThan(500);
+  }, 15_000);
 });
