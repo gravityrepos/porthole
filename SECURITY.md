@@ -82,6 +82,18 @@ for — treat it like a screenshot: it stays on your machine, with the rest of
 the device's activity in it, until you choose to open it or hand it to
 someone.
 
+Sessions on disk (`.porthole/sessions/`, see the README) are the same shift
+from "held in memory until the process dies" to "on your machine for a
+while", made explicit for the event stream itself rather than for a trace you
+asked for. What is written there is exactly the event stream already
+described below — starred, redacted and body-capture-gated in-process before
+this or any other consumer sees it, not a second capture path with its own
+rules. It is on disk by default (for `what_was_happening`, `findings` and
+`timeline` to survive a restart), owner-only permissions on POSIX, retained
+for 7 days or 500MB by default and pruned automatically past that, and can be
+turned off entirely with `PORTHOLE_SESSIONS=0` if you would rather nothing
+outlive the process that recorded it.
+
 ## What is redacted, before anything leaves the process
 
 - **Query-string values** are replaced with `*`, keeping the parameter names.

@@ -67,6 +67,17 @@ PR that makes the change, not after the fact.
   (GRA-149).
 - A README for the npm package, with source maps that resolve to sources
   actually in the tarball (GRA-97).
+- Sessions on disk: `findings`, `what_was_happening` and `timeline` now fall
+  back to a session recorded at `.porthole/sessions/<id>/` whenever the
+  in-memory buffer cannot cover the window asked for, so a moment from
+  before an MCP server restart is still answerable. Exactly the redacted
+  event stream that already crosses the socket, nothing new captured;
+  retained 500MB/7 days by default, both configurable via
+  `PORTHOLE_SESSIONS_MAX_BYTES`/`PORTHOLE_SESSIONS_MAX_AGE_DAYS`, and
+  `PORTHOLE_SESSIONS=0` turns writing off entirely. The device also sends an
+  optional `deviceId` (`Settings.Secure.ANDROID_ID`) in `hello`, and the ring
+  buffer's capacity is now configurable via `porthole { ringCapacity.set(…) }`
+  (GRA-53).
 
 ### Fixed
 

@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import kotlinx.serialization.SerializationStrategy
@@ -140,7 +141,7 @@ object Porthole {
         synchronized(this) {
             if (session != null) return
 
-            val ring = EventRing()
+            val ring = EventRing(capacity = ringCapacityFromResources(app))
             val appPackages = appPackagesOf(app)
             val snapshots = SnapshotWatcher(ring, appPackages)
             val recompositions = RecompositionCollector(ring, snapshots)
@@ -397,6 +398,7 @@ object Porthole {
                     sdkInt = Build.VERSION.SDK_INT,
                     startedAt = s.startedAt,
                     collectors = s.collectors,
+                    deviceId = androidId(s.app),
                 ),
             )
         }
@@ -605,6 +607,31 @@ object Porthole {
         if (id != 0) context.resources.getInteger(id) else DEFAULT_PORT
     }.getOrDefault(DEFAULT_PORT).let { if (it in 1024..65535) it else DEFAULT_PORT }
 
+    /**
+     * The Gradle plugin's `ringCapacity` DSL setting, written the same way as
+     * the port: a generated integer resource ([RES_RING_CAPACITY]), not a
+     * second plugin-to-runtime mechanism. Without the plugin, or with the
+     * resource absent or out of a sane range, this is
+     * [EventRing.DEFAULT_CAPACITY] — the same fallback shape
+     * [portFromResources] uses for the port.
+     */
+    private fun ringCapacityFromResources(context: Context): Int = sanitizeRingCapacity(
+        runCatching {
+            val id = context.resources.getIdentifier(RES_RING_CAPACITY, "integer", context.packageName)
+            if (id != 0) context.resources.getInteger(id) else null
+        }.getOrNull(),
+    )
+
+    /**
+     * The clamp behind [ringCapacityFromResources], separated so it can be
+     * tested without a `Context`. It is load-bearing: `EventRing` indexes
+     * `slots[n % capacity]`, so a configured capacity of 0 (or below) that
+     * reached the constructor would throw on the first event. `null` means
+     * "no resource", which is the same case as an unusable value.
+     */
+    internal fun sanitizeRingCapacity(configured: Int?): Int =
+        if (configured != null && configured > 0) configured else EventRing.DEFAULT_CAPACITY
+
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
@@ -613,6 +640,17 @@ object Porthole {
             File("/proc/self/cmdline").readText().takeWhile { it > ' ' }
         }
     }.getOrDefault(context.packageName)
+
+    /**
+     * [Hello.deviceId]'s source — see that field's KDoc for why this is
+     * `Settings.Secure.ANDROID_ID` and specifically not adb's serial. No
+     * permission is required to read it. Null on the rare device where it is
+     * genuinely absent, rather than a synthesised value the reading side
+     * would mistake for a real one.
+     */
+    private fun androidId(context: Context): String? = runCatching {
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }.getOrNull()?.takeIf { it.isNotBlank() }
 
     /**
      * Drops a marker in the app's files dir naming the port the runtime actually
@@ -635,6 +673,7 @@ object Porthole {
     }
 
     private const val RES_PORT = "porthole_port"
+    private const val RES_RING_CAPACITY = "porthole_ring_capacity"
 }
 
 /**

@@ -71,7 +71,7 @@ class PortholeAgpCompatibilityTest {
         return null
     }
 
-    private fun androidProject(sdk: String, agp: String) {
+    private fun androidProject(sdk: String, agp: String, extensionBlock: String = "") {
         write("local.properties", "sdk.dir=${sdk.replace('\\', '/')}\n")
         write(
             "settings.gradle.kts",
@@ -103,6 +103,8 @@ class PortholeAgpCompatibilityTest {
                 compileSdk = 36
                 defaultConfig { minSdk = 23 }
             }
+
+            $extensionBlock
             """.trimIndent(),
         )
         write("app/src/main/AndroidManifest.xml", "<manifest />\n")
@@ -115,12 +117,12 @@ class PortholeAgpCompatibilityTest {
             .apply { gradleVersion?.let(::withGradleVersion) }
             .build()
 
-    private fun prepare(): Boolean {
+    private fun prepare(extensionBlock: String = ""): Boolean {
         val agp = agpVersion ?: return false
         assumeTrue("no plugin version; the build did not publish one", pluginVersion.isNotBlank())
         val sdk = sdkDirectory()
         assumeTrue("no Android SDK; set ANDROID_HOME", sdk != null)
-        androidProject(sdk!!, agp)
+        androidProject(sdk!!, agp, extensionBlock)
         return true
     }
 
@@ -156,5 +158,47 @@ class PortholeAgpCompatibilityTest {
             "expected the configuration cache to be stored, got:\n$output",
             output.contains("Configuration cache entry stored"),
         )
+    }
+
+    /**
+     * GRA-53: `ringCapacity` reaches the runtime the same way `port` always
+     * has — a generated `resValue`, wired in [AndroidWiring.wire] right next
+     * to `porthole_port` — so this is the same proof this file already gives
+     * the port, extended to cover the second resource. Both are configured to
+     * non-default values so a test that accidentally asserted the *default*
+     * instead of the *configured* value would fail.
+     *
+     * The generated file's exact path has moved between AGP versions, so
+     * this walks the whole build output for it rather than hard-coding one —
+     * the claim under test is "the value reaches a real generated resource
+     * somewhere", not "at this specific path this AGP version happens to use".
+     */
+    @Test
+    fun `emits the ring capacity resValue with the configured value, beside the port`() {
+        assumeTrue(
+            "set -Pporthole.agpVersion to run",
+            prepare(
+                """
+                porthole {
+                    port.set(9234)
+                    ringCapacity.set(6000)
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        run(":app:generateDebugResValues")
+
+        val generated = File(projectDir.root, "app/build").walkTopDown()
+            .filter { it.isFile && it.extension == "xml" }
+            .firstOrNull { it.readText().contains("porthole_ring_capacity") }
+        assertTrue(
+            "expected a generated resValues XML naming porthole_ring_capacity under app/build",
+            generated != null,
+        )
+        val text = generated!!.readText()
+        assertTrue("expected the configured ring capacity (6000) in:\n$text", text.contains("6000"))
+        assertTrue("expected porthole_port beside it, same mechanism, in:\n$text", text.contains("porthole_port"))
+        assertTrue("expected the configured port (9234) in:\n$text", text.contains("9234"))
     }
 }

@@ -375,6 +375,9 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
 | `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for [system traces](#system-traces) |
 | `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |
+| `PORTHOLE_SESSIONS` | on | set to `0` to turn off [sessions on disk](#sessions-on-disk) entirely |
+| `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
+| `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
 and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by
@@ -540,6 +543,45 @@ Start with recompositions {"from": 2057010, "to": 2075089} and logs
 Paste that at your assistant. `recompositions`, `logs` and `timeline` all take
 absolute `from`/`to`, so it asks about the moment you actually saw instead of
 guessing a lookback and hoping the windows overlap.
+
+## Sessions on disk
+
+The MCP server's own memory is a process, and that process restarts more
+often than you would like — it is usually owned by your MCP client, not by
+you. Everything the in-memory buffer holds is gone the moment it does, which
+used to mean a moment `findings` told you about eight minutes ago was simply
+no longer answerable: "not that nothing was happening — it is no longer
+held."
+
+`findings`, `what_was_happening` and `timeline` now fall back to a session
+recorded on disk whenever the live buffer cannot cover the window you asked
+for, so a restart, a crash, or reinstalling the app mid-session no longer
+loses the evidence. This is not a new capture mode and nothing you have to
+turn on — it is what the socket was already carrying, written down as it
+arrives.
+
+What's written is **exactly** the event stream that already crosses the
+socket: the same one [Payloads](#payloads-what-gets-captured-and-what-does-not)
+and [Security](#security) describe — already starred, redacted and
+body-capture-gated in-process, before any of this module ever sees it.
+Nothing new is captured for this feature; it records the wire, verbatim.
+
+A session is one contiguous run of one app process, identified by
+`(packageName, deviceId, startedAt)` — the same triple the timeline already
+uses to know when to start a fresh in-memory buffer. It lives at
+`<project root>/.porthole/sessions/<id>/`: `events.ndjson` (one JSON object
+per line, appended off the socket thread on an interval, never inline, so
+persistence cannot slow down what the socket is doing) plus `meta.json`
+(device profile, first/last recorded time, event counts by kind).
+`.porthole/` is already gitignored.
+
+Retention prunes by total size and by age, oldest session first, and never
+touches the session currently being written no matter how old or large it
+is. Defaults: 500MB total, 7 days. `PORTHOLE_SESSIONS_MAX_BYTES` and
+`PORTHOLE_SESSIONS_MAX_AGE_DAYS` override those (see the environment
+variable table above). `PORTHOLE_SESSIONS=0` is the off switch: set it and
+nothing is written to disk at all — the window-taking tools answer only from
+the live buffer, the same as before this feature existed.
 
 ## System traces
 
@@ -1416,16 +1458,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**971 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1030 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 386 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 379
-passed, 0 failed, 7 skipped), 451 in the MCP server (`cd mcp && npm test` —
-449 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+[Testing](#testing)): 404 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 396
+passed, 0 failed, 8 skipped), 492 in the MCP server (`cd mcp && npm test` —
+490 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 971 disagrees with the sum of the three suites' totals stated
+XML, and when 1030 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1438,20 +1480,20 @@ surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
 integration.
 
-The JVM's 7 skips on ubuntu are four Windows-shaped `McpConfigTest` cases
+The JVM's 8 skips on ubuntu are four Windows-shaped `McpConfigTest` cases
 (drive-relative, POSIX-shaped-on-Windows, the committed capture's
 resolution, UNC), the machine-local `local.properties` cross-check, and the
-two-test AGP compatibility pair, which needs an SDK and the network and
-skips cleanly without a version to check — none of the seven is a gap in
+three-test AGP compatibility set, which needs an SDK and the network and
+skips cleanly without a version to check — none of the eight is a gap in
 what the suite proves, each is a test that only makes sense on a platform
 this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 (gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 386 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
-pair) and the same 451 server tests with 0 skipped, because it has the
+the same 404 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
+set) and the same 492 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 451/450/1, missing only that capture. The timeline UI is the one suite
+sees 492/491/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager

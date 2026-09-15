@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import net from "node:net";
 import { EventEmitter } from "node:events";
+import { SessionWriter, type SessionEvent } from "./sessions.js";
 
 /**
  * One frame per line, UTF-8. A frame carrying `id` is a response to a request
@@ -31,6 +32,18 @@ export interface Hello {
   sdkInt: number;
   startedAt: number;
   collectors: string[];
+  /**
+   * GRA-53: the third leg of on-disk session identity, `(packageName,
+   * startedAt, deviceId)` — see `sessions.ts`'s module doc comment.
+   * Deliberately optional and deliberately not named `serial`: it is not
+   * adb's own device serial (that is known host-side, in the Gradle
+   * plugin's connection file — a different mechanism entirely, GRA-119's
+   * territory) and a build that has not sent one yet must degrade session
+   * identity, not break it. `sessions.ts`'s `UNKNOWN_DEVICE_ID` is the
+   * fallback every existing `hello` fixture in this test suite exercises,
+   * since none of them set this field.
+   */
+  deviceId?: string;
 }
 
 /**
@@ -162,11 +175,24 @@ export class DeviceClient extends EventEmitter {
    */
   protocolMismatch: string | null = null;
 
+  /**
+   * GRA-53 `#session-writer`: null (persistence off) unless a sessions root
+   * is given. `undefined`/omitted is the default on purpose — every existing
+   * test in `device.test.ts` constructs a `DeviceClient` with two arguments
+   * and auto-answers `hello`, so leaving this off must not start writing
+   * real files into whatever directory the test happened to run from. The
+   * real MCP server boot path (`index.ts`'s `createPortholeServer`) passes
+   * one explicitly.
+   */
+  readonly sessions: SessionWriter | null;
+
   constructor(
     private readonly host: string,
     readonly port: number,
+    sessionsRoot?: string,
   ) {
     super();
+    this.sessions = sessionsRoot ? new SessionWriter(sessionsRoot) : null;
   }
 
   start(): void {
@@ -208,7 +234,7 @@ export class DeviceClient extends EventEmitter {
       this.setState("handshaking");
       // hello doubles as a liveness check and as the timeline's origin.
       this.request<Hello>("hello")
-        .then((hello) => {
+        .then(async (hello) => {
           // Order matters: hello is set before the state change that
           // announces it, so anything reacting to the "state" event (or
           // reading `.hello` right after seeing state flip to "connected")
@@ -216,6 +242,15 @@ export class DeviceClient extends EventEmitter {
           // also asserts this itself, so a future edit that reordered these
           // two lines would fail loudly instead of reintroducing the race.
           this.hello = hello;
+          // GRA-53 `#session-writer`: opens (or resumes) the on-disk session
+          // for this identity. Awaited, not fire-and-forget, so that
+          // "connected" — and the events a caller might start sending the
+          // instant it sees that state — never arrive before there is
+          // somewhere for `append()` below to put them; `append()` silently
+          // drops anything received while `sessions.currentDir()` is still
+          // null, by design, the same way it silently no-ops when
+          // persistence is off entirely.
+          if (this.sessions) await this.sessions.open(hello);
           // GRA-96: computed right where `hello` is set, not deferred to
           // whichever tool asks later — a caller reading `protocolMismatch`
           // right after the "hello" event below always sees the answer for
@@ -255,6 +290,16 @@ export class DeviceClient extends EventEmitter {
 
     socket.on("close", () => {
       this.socket = null;
+      // GRA-53: flush promptly on disconnect rather than waiting for the
+      // interval timer — a killed app or a dropped socket is exactly the
+      // moment nothing else will prompt a flush for a while, and the whole
+      // point of writing to disk is that this data survives the socket
+      // going away. Deliberately NOT sessions.close()/finalize: a reconnect
+      // that gets the same hello back (open()'s idempotent-by-identity
+      // check) resumes appending to this same file, so the session directory
+      // itself is left exactly as GRA-163 leaves the ring — kept, not
+      // cleared, until a genuinely new hello says otherwise.
+      void this.sessions?.flush();
       // GRA-163: captured before `hello` is cleared below, and only when
       // there was one — a socket that closes mid-handshake (this.hello
       // still null) never had a confirmed session to record, and recording
@@ -303,6 +348,12 @@ export class DeviceClient extends EventEmitter {
     }
 
     if ("event" in frame) {
+      // GRA-53: queued, not written — SessionWriter.append() only ever
+      // pushes to its own in-memory array and arms a flush timer, so this
+      // line does not touch the filesystem and cannot be the reason a frame
+      // is processed late. `append()` is itself a no-op with no open session
+      // (persistence off, or hello has not landed/finished opening yet).
+      this.sessions?.append(frame as SessionEvent);
       this.emit("event", frame);
       return;
     }

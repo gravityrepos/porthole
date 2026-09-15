@@ -68,6 +68,27 @@ internal data class Hello(
     val startedAt: Long,
     /** Which collectors actually found their dependency on the classpath. */
     val collectors: List<String>,
+    /**
+     * Identifies *this device*, distinct from another device running the same
+     * app at the same [startedAt] — GRA-53's on-disk session identity is
+     * `(packageName, deviceId, startedAt)`, and two physical devices are the
+     * one case that triple cannot otherwise tell apart. Sourced from
+     * `Settings.Secure.ANDROID_ID` in [Porthole]'s `hello` method — **not**
+     * adb's serial number. Those are two different concepts: the adb serial
+     * is host-side, known to the plugin as `deviceSerial`
+     * (`PortholeConnectTask.connectionFile`'s `deviceSerial` key) and never
+     * seen by the app; `ANDROID_ID` is device-side, needs no permission, and
+     * is stable per device+signing-key. `mcp/src/sessions.ts`'s `HelloLike`
+     * carries the identical name and doc comment for the same reason.
+     *
+     * Optional and defaulted so this is additive under
+     * `ignoreUnknownKeys=true`/`explicitNulls=false` — no [PROTOCOL_VERSION]
+     * bump. Null when `ANDROID_ID` could not be read, or when talking to a
+     * runtime built before this field existed; the reading side falls back to
+     * a named sentinel (`sessions.ts`'s `UNKNOWN_DEVICE_ID`) rather than
+     * treating absence as a crash.
+     */
+    val deviceId: String? = null,
 )
 
 /**

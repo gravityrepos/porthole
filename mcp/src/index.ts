@@ -25,6 +25,12 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildTrace, type Finding } from "./trace.js";
+import {
+  UNKNOWN_DEVICE_ID,
+  fillWindowFromDisk,
+  sessionsRoot as sessionsRootPath,
+  type SessionEvent,
+} from "./sessions.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -137,7 +143,11 @@ export function joinSummaryAndPayload(summary: string, ...payload: [unknown] | [
 }
 
 export function createPortholeServer(options: PortholeServerOptions = {}): PortholeServer {
-  const device = options.device ?? new DeviceClient(HOST, PORT);
+  // GRA-53 `#window-fallback`: the real boot path gets on-disk session
+  // persistence; a test that injects its own `options.device` (the harness
+  // in `testing/harness.ts`, or a hand-built fake) is unaffected — this
+  // branch only runs when nothing was injected.
+  const device = options.device ?? new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory));
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
 
   const server = new McpServer({
@@ -326,12 +336,60 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   /** The span actually examined, resolved against the buffer so it can be quoted back. */
   function resolveWindow(w: Window): { from: number; to: number; ms: number } | null {
     const events = timeline.buffer();
-    if (events.length === 0) return null;
+    if (events.length === 0) {
+      // GRA-53: an empty *live* buffer used to mean "no window at all" —
+      // right when the only source was memory. It no longer is: an agent
+      // quoting a `window` from an earlier answer (the pattern every tool
+      // description here recommends) is asking about a moment on the device
+      // uptime clock, which is exactly as answerable from disk after the MCP
+      // server restarts as it was from the ring before. Only the explicit
+      // case is widened — `sinceMs`-relative-to-"now" still has no "now"
+      // without a live buffer to take it from, so that shape still returns
+      // null exactly as before.
+      if (w.from !== undefined && w.to !== undefined) {
+        return { from: w.from, to: w.to, ms: Math.max(0, w.to - w.from) };
+      }
+      return null;
+    }
     const newest = events[events.length - 1].t;
     const oldest = events[0].t;
     const to = w.to ?? newest;
     const from = w.from ?? (w.sinceMs !== undefined ? to - w.sinceMs : oldest);
     return { from, to, ms: Math.max(0, to - from) };
+  }
+
+  /**
+   * The identity `fillWindowFromDisk` should look up sessions under: the
+   * currently-connected process's `hello`, or — the post-mortem case this
+   * whole ticket is about — the last one `device.ts` saw exit. Null only
+   * when neither has ever existed (never connected, this process's whole
+   * life).
+   */
+  function currentIdentity(): { packageName: string; deviceId: string } | null {
+    const hello = device.hello ?? device.lastExited?.hello ?? null;
+    if (!hello) return null;
+    return {
+      packageName: hello.packageName,
+      deviceId: (hello as { deviceId?: string }).deviceId ?? UNKNOWN_DEVICE_ID,
+    };
+  }
+
+  /**
+   * `findings`/`what_was_happening`/`timeline`'s one shared call into
+   * `sessions.ts` — see that module's `fillWindowFromDisk` doc comment for
+   * why routing all three through the same function is the point, not an
+   * incidental convenience (GRA-163's history is full of what happens when
+   * three tools each hand-roll the same merge).
+   */
+  async function mergeWithDisk(from: number, to: number) {
+    return fillWindowFromDisk({
+      root: device.sessions?.root ?? sessionsRootPath(resolveProjectRoot().directory),
+      identity: currentIdentity(),
+      buffered: timeline.buffer() as unknown as SessionEvent[],
+      currentSessionDir: device.sessions?.currentDir() ?? null,
+      from,
+      to,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -516,7 +574,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       const buffered = timeline.buffer();
-      const events = buffered.filter((e) => e.t >= span.from && e.t <= span.to);
+      // GRA-53: merges the live buffer with whatever sessions on disk
+      // overlap the window, deduplicated and sorted — see
+      // `fillWindowFromDisk`'s own doc comment in sessions.ts. `events` here
+      // used to be the live ring alone; it is now the same merge
+      // `what_was_happening` already uses, so a finding can be produced from
+      // a window that spans an MCP-server restart, not only from whatever
+      // survived in memory.
+      const merged = await mergeWithDisk(span.from, span.to);
+      const events = merged.events as unknown as DeviceEvent[];
 
       // GRA-163: a non-empty ring is not, on its own, proof the events in it
       // are from what is running now — the ring only clears on a new hello
@@ -547,12 +613,25 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // Asking about a moment the ring no longer holds returns nothing, which is
       // indistinguishable from a moment when nothing happened. They are opposite
       // answers and only one of them is about the app.
-      const oldest = buffered[0]?.t ?? span.from;
-      const newest = buffered[buffered.length - 1]?.t ?? span.to;
-      const clipped = {
-        start: span.from < oldest ? oldest - span.from : 0,
-        end: span.to > newest ? span.to - newest : 0,
-      };
+      const liveOldest = buffered[0]?.t ?? span.from;
+      const liveNewest = buffered[buffered.length - 1]?.t ?? span.to;
+      // GRA-53: `clippedMs` is now a coverage question, answered against
+      // `merged.coveredFrom`/`coveredTo` (live buffer bounds unioned with
+      // every overlapping session's own recorded extent) rather than against
+      // the live buffer's bounds alone — see `fillWindowFromDisk`'s doc
+      // comment on why this must NOT be derived from which events actually
+      // matched: a quiet stretch inside a recorded session must read as
+      // covered, not as clipped, just because nothing happened in it. When
+      // neither the buffer nor any session on disk overlaps the window at
+      // all, `coveredFrom`/`coveredTo` are null and the whole window is
+      // honestly unrecorded.
+      const clipped =
+        merged.coveredFrom === null || merged.coveredTo === null
+          ? { start: span.ms, end: 0 }
+          : {
+              start: span.from < merged.coveredFrom ? merged.coveredFrom - span.from : 0,
+              end: span.to > merged.coveredTo ? span.to - merged.coveredTo : 0,
+            };
       const trace = buildTrace({
         // The same analyser the headless capture runs, pointed at the live
         // buffer instead of a recorded scenario. One analyser, so a finding
@@ -567,8 +646,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const findings = trace.findings.map(withFollowUp);
       const payload = {
         window: { from: span.from, to: span.to, ms: span.ms },
-        examined: { from: Math.max(span.from, oldest), to: Math.min(span.to, newest) },
-        buffered: { from: oldest, to: newest, events: buffered.length },
+        // The merged (disk + memory) recorded extent, clipped to the window
+        // — distinct from `buffered` below, which stays the live ring's own
+        // account of itself.
+        examined: { from: merged.coveredFrom ?? span.from, to: merged.coveredTo ?? span.from },
+        buffered: { from: liveOldest, to: liveNewest, events: buffered.length },
         clippedMs: clipped,
         eventsExamined: events.length,
         metrics: trace.metrics,
@@ -976,6 +1058,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // Inert in practice (see findings' identical comment above) but the
         // strict sense, correctly, not whichever local is in scope.
         const notice = exitedProcessNotice(exitedProcess, false, pending === null);
+
+        // GRA-53: this is AC1's exact shape — the MCP server was just
+        // (re)started, so the live ring is empty by construction, but the
+        // moment being asked about may still be sitting on disk from before
+        // the restart. Tried before falling back to either "not connected"
+        // or "nothing buffered yet", since a real answer beats both.
+        if (at !== undefined) {
+          const merged = await mergeWithDisk(0, at + (spreadMs ?? 2_000));
+          if (merged.coveredFrom !== null && merged.coveredTo !== null && at >= merged.coveredFrom && at <= merged.coveredTo) {
+            const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], at, spreadMs ?? 2_000), clock: null };
+            return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
+          }
+        }
+
         if (pending !== null) {
           return ok(notice + pending, { moment: null, connected, exitedProcess });
         }
@@ -1031,6 +1127,23 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const oldest = events[0].t;
       const newest = events[events.length - 1].t;
       if (moment_at < oldest || moment_at > newest) {
+        // GRA-53: the ticket's headline scenario — the buffer rolled or the
+        // process restarted since, but the moment may still be on disk.
+        // `from: 0` rather than `oldest`: momentOf() needs the full nav
+        // history up to `moment_at` to say which screen was current (the
+        // last nav at-or-before the moment, not merely one inside the
+        // spread window), so the merge has to reach back further than the
+        // window actually returned.
+        const merged = await mergeWithDisk(0, moment_at + (spreadMs ?? 2_000));
+        if (
+          merged.coveredFrom !== null &&
+          merged.coveredTo !== null &&
+          moment_at >= merged.coveredFrom &&
+          moment_at <= merged.coveredTo
+        ) {
+          const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], moment_at, spreadMs ?? 2_000), clock };
+          return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
+        }
         return ok(
           notice +
             `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +
@@ -1462,21 +1575,32 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
     async ({ sinceMs, from, to, kinds, limit }): Promise<ToolResult> => {
       try {
-        // Prefer the local buffer: it holds more history than the device ring and
-        // survives the app being restarted underneath us.
-        let events: DeviceEvent[] = timeline.buffer();
-        if (events.length === 0) {
-          const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
-            limit: limit ?? 500,
-          });
-          events = page.events;
-        }
-
         // Absolute bounds first, so a window quoted from another tool selects the
         // same span here. sinceMs stays as the convenience for "recently".
         const span = resolveWindow({ sinceMs, from, to });
+
+        // GRA-53: the third consumer of the same merge `findings` and
+        // `what_was_happening` already use — deliberately not a third
+        // mechanism. A resolved span (the ordinary case, or an explicit
+        // `{from, to}` quoted from an earlier answer) goes through
+        // `mergeWithDisk`, which already returns events filtered to the
+        // window; the un-resolved case (no span at all — nothing to bound
+        // a disk lookup by) keeps the previous behaviour of asking the
+        // device's own much-smaller ring directly.
+        let events: DeviceEvent[];
         if (span) {
-          events = events.filter((event) => event.t >= span.from && event.t <= span.to);
+          const merged = await mergeWithDisk(span.from, span.to);
+          events = merged.events as unknown as DeviceEvent[];
+        } else {
+          // Prefer the local buffer: it holds more history than the device
+          // ring and survives the app being restarted underneath us.
+          events = timeline.buffer();
+          if (events.length === 0) {
+            const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
+              limit: limit ?? 500,
+            });
+            events = page.events;
+          }
         }
         if (kinds?.length) {
           const wanted = new Set(kinds);

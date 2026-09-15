@@ -87,6 +87,7 @@ internal object AndroidWiring {
 
         val debugTypes = extension.debugBuildTypes.get().toSet()
         val port = extension.port.get()
+        val ringCapacity = extension.ringCapacity.get()
 
         if (buildTypes.any { it.name in debugTypes }) {
             // AGP 9 ships resValues off by default, and calling resValue with
@@ -108,6 +109,7 @@ internal object AndroidWiring {
                 // placeholders have to be declared by the consuming app or the
                 // merge fails, and nobody wants that surprise.
                 buildType.resValue("integer", "porthole_port", port.toString())
+                buildType.resValue("integer", "porthole_ring_capacity", ringCapacity.toString())
             }
         }
     }

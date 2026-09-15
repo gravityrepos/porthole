@@ -27,6 +27,7 @@ class PortholePlugin : Plugin<Project> {
     override fun apply(target: Project) {
         val extension = target.extensions.create("porthole", PortholeExtension::class.java).apply {
             port.convention(DEFAULT_PORT)
+            ringCapacity.convention(DEFAULT_RING_CAPACITY)
             debugBuildTypes.convention(listOf("debug"))
             runtimeVersion.convention(PLUGIN_VERSION)
             useProjectDependencies.convention(false)
@@ -164,6 +165,9 @@ class PortholePlugin : Plugin<Project> {
     companion object {
         const val GROUP = "compose porthole"
         const val DEFAULT_PORT = 8677
+
+        /** See [PortholeExtension.ringCapacity]'s KDoc for the arithmetic behind this number. */
+        const val DEFAULT_RING_CAPACITY = 2048
 
         /**
          * The runtime version handed to consumers, and the npm version

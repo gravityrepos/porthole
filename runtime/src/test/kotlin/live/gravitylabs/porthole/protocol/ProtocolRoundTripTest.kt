@@ -101,4 +101,51 @@ class ProtocolRoundTripTest {
         val decoded = PortholeJson.decodeFromString(Hello.serializer(), encoded)
         assertEquals(99, decoded.protocol)
     }
+
+    /**
+     * GRA-53: [Hello.deviceId] is the wire source for the on-disk session
+     * identity's device component (`mcp/src/sessions.ts`'s `HelloLike`).
+     * Additive and optional, so — like `protocol` before it — it needs the
+     * same three shapes proven: a real value survives the round trip, the
+     * constructor default is null rather than some synthesised placeholder,
+     * and a frame from a runtime built before this field existed (no
+     * `deviceId` key at all) still decodes instead of failing closed.
+     */
+    @Test
+    fun `Hello round-trips through PortholeJson with deviceId intact`() {
+        val hello = sampleHello().copy(deviceId = "abc123def456")
+        val encoded = PortholeJson.encodeToString(Hello.serializer(), hello)
+        val decoded = PortholeJson.decodeFromString(Hello.serializer(), encoded)
+        assertEquals(hello, decoded)
+        assertEquals("abc123def456", decoded.deviceId)
+    }
+
+    @Test
+    fun `a Hello constructed without naming deviceId defaults it to null, not a placeholder`() {
+        val hello = sampleHello()
+        assertEquals(null, hello.deviceId)
+    }
+
+    @Test
+    fun `a hello frame with no deviceId key at all still decodes, deviceId null`() {
+        // The shape a runtime built before GRA-53 would send: every other
+        // field present, `deviceId` simply absent. The reading side
+        // (sessions.ts) is what turns a null deviceId into its own named
+        // sentinel (UNKNOWN_DEVICE_ID) -- this test only proves decoding
+        // itself does not choke on the missing key.
+        val legacyFrame = """
+            {
+              "packageName": "com.example.shop",
+              "processName": "com.example.shop",
+              "versionName": "0.9.0",
+              "debuggable": true,
+              "device": "Pixel 10 Pro XL",
+              "sdkInt": 37,
+              "startedAt": 0,
+              "collectors": []
+            }
+        """.trimIndent()
+        val decoded = PortholeJson.decodeFromString(Hello.serializer(), legacyFrame)
+        assertEquals(null, decoded.deviceId)
+    }
 }

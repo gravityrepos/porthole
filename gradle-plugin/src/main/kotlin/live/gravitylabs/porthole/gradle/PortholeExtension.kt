@@ -52,6 +52,23 @@ abstract class PortholeExtension {
      */
     abstract val uiCommand: ListProperty<String>
 
+    /**
+     * How many events the in-process ring on the device holds before the
+     * oldest ones are overwritten — see `EventRing.kt`. Sized in **events**,
+     * not seconds: the ring is a fixed-size array, not a time-bounded buffer,
+     * so there is no clock to hand it. The default, 2048, is a translation of
+     * that into a duration you can actually reason about, using the same
+     * assumption `EventRing`'s own default comment makes — a busy screen
+     * produces on the order of 4096 events in "a couple of minutes", call it
+     * 120s, which is ~34 events/s. At that rate 2048 events is roughly
+     * **60 seconds** of a busy screen. A quieter screen buys proportionally
+     * more wall-clock time for the same capacity; a busier one, less. Raise
+     * it if `findings` or `what_was_happening` keep reporting a buffer that
+     * rolled before the moment you wanted; the cost is memory on the device,
+     * a few hundred KB per thousand events per `EventRing`'s own note.
+     */
+    abstract val ringCapacity: Property<Int>
+
     /** `-s` argument for adb. Leave unset when exactly one device is attached. */
     abstract val deviceSerial: Property<String>
 
