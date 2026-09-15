@@ -100,6 +100,50 @@ describe("SessionWriter", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
+  // GRA-191 self-check (a): append() after close().
+  it("does nothing after close() — the same 'nowhere to put this' shape as before open() ever ran", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    writer.close();
+    expect(() => writer.append(event(0, 1_000))).not.toThrow();
+    await writer.flush();
+    const content = await readFile(path.join(dir, "events.ndjson"), "utf8").catch(() => "");
+    expect(content).toBe("");
+  });
+
+  // GRA-191 self-check (a): close() must not be a one-way door — a reconnect
+  // has to be able to resume appending, even to the same identity.
+  it("a reconnect's open() un-closes the writer, including for the same identity, so appending resumes after close()", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    writer.close();
+    await writer.open(HELLO); // same identity: the idempotent early-return path
+    writer.append(event(0, 1_000));
+    await writer.flush();
+    const content = await readFile(path.join(dir, "events.ndjson"), "utf8");
+    expect(content.trim().split("\n")).toHaveLength(1);
+  });
+
+  // GRA-191 self-check (a): open() on a root that cannot be created.
+  it("open() rejects, cleanly, when its directory cannot be created (a file occupies the path)", async () => {
+    const parent = await tmpRoot();
+    const blockedRoot = path.join(parent, "blocked");
+    await writeFile(blockedRoot, "not a directory"); // occupies the path open() needs to mkdir
+    const writer = new SessionWriter(blockedRoot, 60_000);
+    await expect(writer.open(HELLO)).rejects.toThrow();
+    // Documented, not silently wrong: `dir` is set (optimistically, before
+    // the mkdir that failed) and `opening` is already false again (the
+    // `finally` in open() ran), so append() takes the "dir is set" branch
+    // and queues rather than drops -- a caller that retries open() (or a
+    // real reconnect that gets a working root next time) still has
+    // somewhere for these to land once mkdir actually succeeds.
+    expect(() => writer.append(event(0, 1_000))).not.toThrow();
+  });
+
   it("queues on append() and only writes on flush() — never inline (AC4's premise)", async () => {
     const root = await tmpRoot();
     const writer = new SessionWriter(root, 60_000); // long interval: nothing should fire on its own during this test
