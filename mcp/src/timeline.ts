@@ -11,6 +11,8 @@ import { isConnected, isHandshaking, type ConnectionState, type DeviceClient, ty
 import { askTrace, findTraceProcessor, parseRows, runScript, why, QUESTIONS, type RunResult } from "./perfetto.js";
 import { buildTrace } from "./trace.js";
 import { fromBootMs, fromTraceClockSnapshot, toBootNs } from "./moment.js";
+import { UNKNOWN_DEVICE_ID, fillWindowFromDisk, sessionsRoot, type SessionEvent } from "./sessions.js";
+import { buildSavedTrace, defaultOutPath, defaultScenarioName, writeSavedTrace } from "./save.js";
 
 const UI_DIR = fileURLToPath(new URL("../ui/dist/", import.meta.url));
 
@@ -401,6 +403,25 @@ export class TimelineServer {
     return null;
   }
 
+  /**
+   * GRA-116: the identity `fillWindowFromDisk` should look up sessions
+   * under, mirroring `index.ts`'s own `currentIdentity()` (the function this
+   * one is a deliberate copy of, not an import of — `TimelineServer` has no
+   * dependency on `index.ts` today and one new route is not reason enough to
+   * start one). Falls back to `lastExited`'s own `hello` so a save can still
+   * find the right session after the app has already exited — the same
+   * post-mortem case `save_moment` exists for. Null only when neither has
+   * ever existed.
+   */
+  private currentIdentity(): { packageName: string; deviceId: string } | null {
+    const hello = this.device.hello ?? this.device.lastExited?.hello ?? null;
+    if (!hello) return null;
+    return {
+      packageName: hello.packageName,
+      deviceId: (hello as { deviceId?: string }).deviceId ?? UNKNOWN_DEVICE_ID,
+    };
+  }
+
   /** A refusal, as a response. */
   private refused(res: http.ServerResponse, reason: string): void {
     // The reason names the rule and never the header that broke it. Everything
@@ -673,6 +694,106 @@ export class TimelineServer {
         return;
       }
 
+      // GRA-116: "keep the last N seconds, from where you are already
+      // looking" — the timeline UI's own save gesture, POST and
+      // state-changing exactly like /api/tools/*, hardened the same way
+      // (GRA-78's origin/host check already ran above, before routing; this
+      // adds the POST-only refusal that route also carries). Deliberately
+      // not nested under /api/tools/: that prefix's own comment defers a
+      // session token to whichever ticket owns cli.ts and the UI's token
+      // plumbing, and this route has no more business waiting on that than
+      // /api/findings or /api/traces do.
+      if (path === "/api/save") {
+        if (req.method !== "POST") {
+          res.writeHead(405, { "content-type": "application/json", allow: "POST" });
+          res.end(JSON.stringify({ error: "This endpoint takes POST." }));
+          return;
+        }
+
+        let raw: string;
+        try {
+          raw = await readRequestBody(req);
+        } catch (error) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: `Could not read the request body: ${(error as Error).message}` }));
+          return;
+        }
+
+        let parsed: unknown;
+        try {
+          // An empty body is not malformed JSON — it is the shape a caller
+          // sends when it means "just from/to", so this reads the same as
+          // `{}` rather than failing the JSON.parse a literal empty string
+          // would.
+          parsed = raw.trim() === "" ? {} : JSON.parse(raw);
+        } catch {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "Malformed JSON body." }));
+          return;
+        }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "The request body must be a JSON object with `from` and `to`." }));
+          return;
+        }
+
+        const body = parsed as { from?: unknown; to?: unknown; scenario?: unknown };
+        const from = Number(body.from);
+        const to = Number(body.to);
+        if (body.from === undefined || body.to === undefined || !Number.isFinite(from) || !Number.isFinite(to)) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "`from` and `to` are required and must be numbers (device uptime ms)." }));
+          return;
+        }
+        if (from >= to) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "`from` must be less than `to`." }));
+          return;
+        }
+        const scenarioInput =
+          typeof body.scenario === "string" && body.scenario.trim() !== "" ? body.scenario.trim() : undefined;
+
+        // The same merged view every window-taking tool reads (GRA-53's
+        // `fillWindowFromDisk`) and the same trace builder `save_moment`
+        // calls (GRA-54's `buildSavedTrace`) — no second implementation of
+        // either, per this ticket's own ruling.
+        const merged = await fillWindowFromDisk({
+          root: this.device.sessions?.root ?? sessionsRoot(resolveProjectRoot().directory),
+          identity: this.currentIdentity(),
+          buffered: this.events as unknown as SessionEvent[],
+          currentSessionDir: this.device.sessions?.currentDir() ?? null,
+          from,
+          to,
+        });
+        const events = merged.events as unknown as DeviceEvent[];
+        const helloLike = this.device.hello ?? this.device.lastExited?.hello ?? null;
+        const hello = (helloLike as unknown as Record<string, unknown>) ?? null;
+
+        const scenario = scenarioInput ?? defaultScenarioName(from, to);
+        const outPath = defaultOutPath(resolveProjectRoot().directory, scenario);
+
+        const trace = buildSavedTrace({
+          events,
+          hello,
+          window: { from, to },
+          coveredFrom: merged.coveredFrom,
+          coveredTo: merged.coveredTo,
+          scenario,
+        });
+        await writeSavedTrace(trace, outPath);
+
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            out: outPath,
+            scenario,
+            clippedMs: trace.clippedMs,
+            findings: trace.findings.length,
+          }),
+        );
+        return;
+      }
+
       // What the app wired up, and what it has on its classpath but did not.
       // The UI uses it to tell an empty lane apart from a missing integration.
       if (path === "/api/setup") {
@@ -868,4 +989,14 @@ function numberParam(value: string | null): number | undefined {
   if (value === null) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** The raw request body, as text. A request with no body at all resolves to `""`, not a rejection. */
+function readRequestBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }
