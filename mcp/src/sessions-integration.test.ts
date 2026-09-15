@@ -79,7 +79,7 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const navAt = 10_000;
     const target = timeline1.buffer().length + 1;
     fakeDevice.emit("nav", navAt, { route: "cart", destinationId: "cart" });
-    await waitUntil(() => timeline1.buffer().length >= target);
+    await waitUntil(() => timeline1.buffer().length >= target, 5_000);
 
     // Flush explicitly rather than waiting on the interval timer — this is
     // testing that the moment survives on disk, not testing the timer.
@@ -124,5 +124,146 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const payload = result.json as { at?: number; window?: { from: number; to: number } };
     expect(payload.at).toBe(navAt);
     expect(payload.window).toBeDefined();
+  });
+
+  it("findings' clippedMs shrinks for the part now on disk and stays honest for time never recorded", async () => {
+    const sessionsRoot = await mkdtemp(path.join(tmpdir(), "porthole-session-integration-"));
+    roots.push(sessionsRoot);
+
+    const FIXED_STARTED_AT = 700_000;
+    const hello: Hello = {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: FIXED_STARTED_AT,
+      collectors: [],
+      deviceId: "device-under-test",
+    };
+
+    fakeDevice = await FakeDevice.start({
+      hello: () => hello,
+      timeline: () => ({ events: [], droppedBefore: 0, now: Date.now() }),
+    });
+
+    // --- before the restart: two events land and get flushed to disk -----
+    const device1 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline1 = new TimelineServer(device1, 0);
+    devices.push(device1);
+    timelines.push(timeline1);
+    createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    device1.start();
+    await waitUntil(() => device1.hello !== null, 5_000);
+
+    let target = timeline1.buffer().length + 2;
+    fakeDevice.emit("recompose", 1_000, { name: "Cart" });
+    fakeDevice.emit("recompose", 2_000, { name: "Cart" });
+    await waitUntil(() => timeline1.buffer().length >= target, 5_000);
+    await device1.sessions!.flush();
+    device1.stop();
+    timeline1.stop();
+
+    // --- restart: a fresh rig, same identity, same sessions root ---------
+    const device2 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline2 = new TimelineServer(device2, 0);
+    devices.push(device2);
+    timelines.push(timeline2);
+    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    device2.start();
+    await waitUntil(() => device2.hello !== null, 5_000);
+
+    // One more event after the restart, only ever in the new process's live
+    // buffer until this flush — the disk and the live ring each hold a
+    // different piece of the story.
+    target = timeline2.buffer().length + 1;
+    fakeDevice.emit("recompose", 3_000, { name: "Cart" });
+    await waitUntil(() => timeline2.buffer().length >= target, 5_000);
+    await device2.sessions!.flush();
+
+    const client = await connect(server2);
+    clients.push(client);
+
+    // A window that reaches earlier than anything ever recorded (0) and
+    // later than anything recorded so far (4000), straddling the restart at
+    // 2000-3000 in the middle.
+    const result = await client.callTool("findings", { from: 0, to: 4_000 });
+    expect(result.isError).toBeFalsy();
+    const payload = result.json as {
+      clippedMs: { start: number; end: number };
+      eventsExamined: number;
+    };
+
+    // The middle (1000-2000, on disk from before the restart; 3000, live
+    // after it) is not clipped at all -- this is the part the ticket's own
+    // wording ("clippedMs must shrink to zero for what is on disk") is
+    // about, and it only shrinks because the disk fallback is doing real
+    // work here: the live buffer alone, post-restart, only ever held the
+    // one event at t=3000.
+    expect(payload.clippedMs.start).toBe(1_000); // 0..1000 genuinely never recorded
+    expect(payload.clippedMs.end).toBe(1_000); // 3000..4000 genuinely never recorded (yet)
+    expect(payload.eventsExamined).toBe(3); // all three events, from both sides of the restart, once each
+  });
+
+  /**
+   * The case the coordinator asked to be pinned explicitly, because it is
+   * the one a future refactor is most likely to get wrong: "not that
+   * nothing was happening, it is no longer held" cuts both ways.
+   * `clippedMs` answers a coverage question, not a did-anything-happen
+   * question — a five-second stretch with real silence inside a session
+   * that plainly recorded it must read as `clippedMs: 0`, exactly like a
+   * five-second stretch full of events. Getting this wrong the *other*
+   * direction (deriving coverage from which events matched) would make a
+   * quiet moment look identical to a moment nobody was ever watching, which
+   * is precisely the conflation `findings`' own tool description already
+   * warns against for the ordinary empty-findings case.
+   */
+  it("a genuinely quiet stretch inside a recorded session reports clippedMs zero, not clipped", async () => {
+    const sessionsRoot = await mkdtemp(path.join(tmpdir(), "porthole-session-integration-"));
+    roots.push(sessionsRoot);
+
+    const hello: Hello = {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: 900_000,
+      collectors: [],
+      deviceId: "device-under-test",
+    };
+
+    fakeDevice = await FakeDevice.start({
+      hello: () => hello,
+      timeline: () => ({ events: [], droppedBefore: 0, now: Date.now() }),
+    });
+
+    const device = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline = new TimelineServer(device, 0);
+    devices.push(device);
+    timelines.push(timeline);
+    const { server } = createPortholeServer({ device, timeline, version: "0.0.0-test" });
+    device.start();
+    await waitUntil(() => device.hello !== null, 5_000);
+
+    // The session's recorded span runs 0..10_000 (one event at each end);
+    // nothing at all happens in the middle third, 3_000..7_000.
+    const target = timeline.buffer().length + 2;
+    fakeDevice.emit("recompose", 0, { name: "Cart" });
+    fakeDevice.emit("recompose", 10_000, { name: "Cart" });
+    await waitUntil(() => timeline.buffer().length >= target, 5_000);
+    await device.sessions!.flush();
+
+    const client = await connect(server);
+    clients.push(client);
+
+    const result = await client.callTool("findings", { from: 3_000, to: 7_000 });
+    expect(result.isError).toBeFalsy();
+    const payload = result.json as { clippedMs: { start: number; end: number }; eventsExamined: number };
+
+    expect(payload.eventsExamined).toBe(0); // genuinely nothing happened in this sub-window
+    expect(payload.clippedMs).toEqual({ start: 0, end: 0 }); // but it was fully recorded, so it is not clipped
   });
 });

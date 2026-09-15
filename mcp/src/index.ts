@@ -574,7 +574,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       const buffered = timeline.buffer();
-      const events = buffered.filter((e) => e.t >= span.from && e.t <= span.to);
+      // GRA-53: merges the live buffer with whatever sessions on disk
+      // overlap the window, deduplicated and sorted — see
+      // `fillWindowFromDisk`'s own doc comment in sessions.ts. `events` here
+      // used to be the live ring alone; it is now the same merge
+      // `what_was_happening` already uses, so a finding can be produced from
+      // a window that spans an MCP-server restart, not only from whatever
+      // survived in memory.
+      const merged = await mergeWithDisk(span.from, span.to);
+      const events = merged.events as unknown as DeviceEvent[];
 
       // GRA-163: a non-empty ring is not, on its own, proof the events in it
       // are from what is running now — the ring only clears on a new hello
@@ -605,12 +613,25 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // Asking about a moment the ring no longer holds returns nothing, which is
       // indistinguishable from a moment when nothing happened. They are opposite
       // answers and only one of them is about the app.
-      const oldest = buffered[0]?.t ?? span.from;
-      const newest = buffered[buffered.length - 1]?.t ?? span.to;
-      const clipped = {
-        start: span.from < oldest ? oldest - span.from : 0,
-        end: span.to > newest ? span.to - newest : 0,
-      };
+      const liveOldest = buffered[0]?.t ?? span.from;
+      const liveNewest = buffered[buffered.length - 1]?.t ?? span.to;
+      // GRA-53: `clippedMs` is now a coverage question, answered against
+      // `merged.coveredFrom`/`coveredTo` (live buffer bounds unioned with
+      // every overlapping session's own recorded extent) rather than against
+      // the live buffer's bounds alone — see `fillWindowFromDisk`'s doc
+      // comment on why this must NOT be derived from which events actually
+      // matched: a quiet stretch inside a recorded session must read as
+      // covered, not as clipped, just because nothing happened in it. When
+      // neither the buffer nor any session on disk overlaps the window at
+      // all, `coveredFrom`/`coveredTo` are null and the whole window is
+      // honestly unrecorded.
+      const clipped =
+        merged.coveredFrom === null || merged.coveredTo === null
+          ? { start: span.ms, end: 0 }
+          : {
+              start: span.from < merged.coveredFrom ? merged.coveredFrom - span.from : 0,
+              end: span.to > merged.coveredTo ? span.to - merged.coveredTo : 0,
+            };
       const trace = buildTrace({
         // The same analyser the headless capture runs, pointed at the live
         // buffer instead of a recorded scenario. One analyser, so a finding
@@ -625,8 +646,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const findings = trace.findings.map(withFollowUp);
       const payload = {
         window: { from: span.from, to: span.to, ms: span.ms },
-        examined: { from: Math.max(span.from, oldest), to: Math.min(span.to, newest) },
-        buffered: { from: oldest, to: newest, events: buffered.length },
+        // The merged (disk + memory) recorded extent, clipped to the window
+        // — distinct from `buffered` below, which stays the live ring's own
+        // account of itself.
+        examined: { from: merged.coveredFrom ?? span.from, to: merged.coveredTo ?? span.from },
+        buffered: { from: liveOldest, to: liveNewest, events: buffered.length },
         clippedMs: clipped,
         eventsExamined: events.length,
         metrics: trace.metrics,
