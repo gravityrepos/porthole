@@ -407,6 +407,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
    * the one tool that could not be asked about a moment the others had just
    * named. An agent that cannot carry a window between calls compares two
    * different windows and does not notice.
+   *
+   * GRA-120: `sinceMs` anchors to `to` (explicit, or this host's own estimate
+   * of "now" below) rather than to a true "now" the way the runtime's own
+   * `Window.resolve` does — this host has no device clock, only the
+   * timestamps events arrive stamped with, so "now" here can only ever be
+   * "the newest thing we have seen", never the actual current instant. See
+   * `resolveWindow` below for exactly what that means and why it is the
+   * honest choice rather than an alignment gap.
    */
   const windowShape = {
     sinceMs: z
@@ -414,7 +422,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .int()
       .positive()
       .optional()
-      .describe("Look back this many milliseconds from now. Ignored if `from` is given."),
+      .describe(
+        "Look back this many milliseconds from `to`. If `to` is omitted, from this host's best " +
+          "estimate of the device's current time (see `to`'s description), or from the device's " +
+          "own current time when nothing is buffered here yet. Ignored if `from` is given.",
+      ),
     from: z
       .number()
       .int()
@@ -427,7 +439,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .number()
       .int()
       .optional()
-      .describe("Absolute end, same clock. Defaults to the latest event."),
+      .describe(
+        "Absolute end, same clock. Defaults to this host's best estimate of the device's current " +
+          "time: the newest event currently buffered, since the host has no clock of the device's " +
+          "own to read.",
+      ),
     // GRA-55: only consulted when none of sinceMs/from/to above are given —
     // same precedence sinceMs already has against from/to. "last" is the
     // default rather than a value someone has to ask for, because the whole
@@ -452,7 +468,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     since?: "last" | "all";
   }
 
-  /** The span actually examined, resolved against the buffer so it can be quoted back. */
+  /**
+   * The span actually examined, resolved against the buffer so it can be
+   * quoted back.
+   *
+   * GRA-120: brought into line with the runtime's `Window.resolve` on the
+   * two points that were outright bugs — a negative `from` used to reach
+   * back before the device existed instead of clamping at 0 (`Window.kt`'s
+   * own words: "not `Long.MIN_VALUE`: a timestamp on this clock cannot be
+   * negative"), and an inverted window (`from` after `to`, or a `to` in the
+   * past that `sinceMs` does not reach) used to hand a tool a backwards span
+   * instead of being refused the way the tool already refuses "no window at
+   * all". Both are fixed here, once, rather than in every caller.
+   *
+   * `sinceMs` anchoring to `to` (explicit or defaulted) rather than to a
+   * true "now" is deliberately *not* changed to match the runtime bit for
+   * bit: the runtime reads its own clock, and this host cannot — its only
+   * source for "now" is the timestamp on the newest event it has seen,
+   * which is what `to` already defaults to below. So "anchor `sinceMs` to
+   * `to`" and "anchor it to the device's actual now" are the same rule
+   * here, applied with the one clock this process actually has access to.
+   * In the normal case this never surfaces as a disagreement anyway: every
+   * caller that resolves a window here (`resolveWindowSince`) sends the
+   * device *only* the resolved `from`/`to`, never a raw `sinceMs` — the
+   * device's own `sinceMs` handling in `Window.resolve` is exercised by a
+   * request that reaches it directly, not by anything this function
+   * produces.
+   */
   function resolveWindow(w: Window): { from: number; to: number; ms: number } | null {
     const events = timeline.buffer();
     if (events.length === 0) {
@@ -466,14 +508,34 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // without a live buffer to take it from, so that shape still returns
       // null exactly as before.
       if (w.from !== undefined && w.to !== undefined) {
-        return { from: w.from, to: w.to, ms: Math.max(0, w.to - w.from) };
+        const from = Math.max(0, w.from);
+        const to = w.to;
+        // Refused the same way the tool already refuses a bad window:
+        // `resolveWindow` returning null, which every caller already treats
+        // as "nothing to answer from" rather than a distinct error path.
+        if (from > to) return null;
+        return { from, to, ms: Math.max(0, to - from) };
+      }
+      // GRA-120 QA round 1: `sinceMs` with an explicit `to` needs no "now"
+      // at all — the rule is `(to - sinceMs)..to` on both halves — so it is
+      // resolved here even on a cold buffer. Forwarding it raw would let the
+      // device anchor the lookback to its own clock instead, which is the
+      // disagreement this ticket exists to remove. Only `sinceMs` alone (no
+      // `to`) still returns null: that shape genuinely needs a "now", and the
+      // device's is the right one when this host has nothing buffered.
+      if (w.sinceMs !== undefined && w.to !== undefined) {
+        const to = w.to;
+        const from = Math.max(0, to - w.sinceMs);
+        if (from > to) return null;
+        return { from, to, ms: Math.max(0, to - from) };
       }
       return null;
     }
     const newest = events[events.length - 1].t;
     const oldest = events[0].t;
     const to = w.to ?? newest;
-    const from = w.from ?? (w.sinceMs !== undefined ? to - w.sinceMs : oldest);
+    const from = Math.max(0, w.from ?? (w.sinceMs !== undefined ? to - w.sinceMs : oldest));
+    if (from > to) return null;
     return { from, to, ms: Math.max(0, to - from) };
   }
 

@@ -314,6 +314,332 @@ describe("every tool that declares a window examines the same span", () => {
       await rig.close();
     }
   });
+
+  // -- GRA-120: the host and the device agree ------------------------------
+
+  it(
+    "findings' sinceMs+to window, quoted into timeline and frames, examines the identical span " +
+      "on both (GRA-120)",
+    async () => {
+      // The load-bearing case from GRA-120: `timeline(sinceMs=5000, to=8000)`
+      // used to silently drop `sinceMs` and answer a different, wider window
+      // than `frames(sinceMs=5000, to=8000)` did — same two arguments, two
+      // different answers, in exactly the workflow (correlate a `findings`
+      // window against the raw timeline) the tools exist for. Proven here by
+      // actually calling the tools, not by reading `resolveWindow` and
+      // `Window.resolve` side by side and asserting they look similar.
+      const rig = await buildRig();
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: {} },
+          { event: "recompose", t: 4_000, data: {} },
+          { event: "recompose", t: 6_000, data: {} },
+          { event: "recompose", t: 8_000, data: {} },
+        ]);
+
+        const findings = await rig.client.callTool("findings", { sinceMs: 5_000, to: 8_000 });
+        const quoted = (findings.json as { window: { from: number; to: number; ms: number } })
+          .window;
+        // This host has no device clock, so `sinceMs` anchors to `to`
+        // (8_000) rather than a true "now" — see `resolveWindow`'s own doc
+        // comment for why that is the honest choice, not a gap. Floor is
+        // 8_000 - 5_000 = 3_000.
+        expect(quoted).toEqual({ from: 3_000, to: 8_000, ms: 5_000 });
+
+        // `timeline` resolves the window locally (merged live buffer + disk,
+        // per the comment on `windowedTools` above) rather than round-
+        // tripping to the device for it, so "the device received it" is
+        // proven here by `timeline`'s own reported `window` — the exact
+        // field an agent reads to know what span its answer covers.
+        const timeline = await rig.client.callTool("timeline", {
+          from: quoted.from,
+          to: quoted.to,
+        });
+        const timelineWindow = (
+          timeline.json as { window: { from: number; to: number; ms: number } }
+        ).window;
+        expect(timelineWindow).toEqual(quoted);
+
+        // `frames` forwards its resolved window straight to the device —
+        // `askedWindow` is the fake device's own echo of the params it
+        // actually received on the wire (see `defaultHandlers` in
+        // `testing/harness.ts`), so this is the real end-to-end proof that
+        // the device was asked about the same span `findings` reported.
+        const frames = await rig.client.callTool("frames", { from: quoted.from, to: quoted.to });
+        const framesAsked = (frames.json as { askedWindow: { from?: number; to?: number } })
+          .askedWindow;
+        expect(framesAsked.from, "frames asked the device for a different 'from'").toBe(
+          quoted.from,
+        );
+        expect(framesAsked.to, "frames asked the device for a different 'to'").toBe(quoted.to);
+      } finally {
+        await rig.close();
+      }
+    },
+  );
+
+  it("sinceMs anchors to `to`, not to the newest buffered event, when the two differ (QA round 1 on GRA-120)", async () => {
+    // The first test above happens to use `to` equal to the newest event, so
+    // a host that anchored the lookback to `newest` instead of `to` passed it
+    // — QA's mutation survived. Here `to` is 4_000 with events out to 8_000:
+    // anchored to `to` the floor is 3_700; anchored to newest it would be
+    // 7_700, and the device would be asked about a window this call never
+    // named.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 4_000, data: {} },
+        { event: "recompose", t: 8_000, data: {} },
+      ]);
+      const frames = await rig.client.callTool("frames", { sinceMs: 300, to: 4_000 });
+      const asked = (frames.json as { askedWindow: { from?: number; to?: number } }).askedWindow;
+      expect(asked.from).toBe(3_700);
+      expect(asked.to).toBe(4_000);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("sinceMs with an explicit `to` is resolved on the host even with nothing buffered, so the device is never asked to anchor it to its own clock (QA round 1 on GRA-120)", async () => {
+    // A fresh or just-reconnected host has an empty live buffer. Before this
+    // fix that path forwarded `{ sinceMs, to }` raw, and the device's own
+    // resolver anchored the lookback to device-now — contradicting the
+    // description that promises `(to - sinceMs)..to`. The bounds the device
+    // receives must be absolute here.
+    const rig = await buildRig();
+    try {
+      const frames = await rig.client.callTool("frames", { sinceMs: 5_000, to: 1_000_000 });
+      const asked = (frames.json as { askedWindow: { from?: number; to?: number; sinceMs?: number } })
+        .askedWindow;
+      expect(asked.sinceMs).toBeUndefined();
+      expect(asked.from).toBe(995_000);
+      expect(asked.to).toBe(1_000_000);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("timeline(sinceMs, to) and frames(sinceMs, to) resolve to the same window on the host, for all three shapes (AC1)", async () => {
+    // The MCP-side half of AC1 — the runtime-side half (that `timelineEvents`
+    // and `FrameCollector.report` resolve identically) is
+    // `TimelineWindowTest.kt`. Both tools route through the same
+    // `resolveWindowSince`/`resolveWindow` call here, so agreement is
+    // structural, but the point of a test is proving it stayed that way, not
+    // trusting that it did.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 4_000, data: {} },
+        { event: "recompose", t: 6_000, data: {} },
+        { event: "recompose", t: 8_000, data: {} },
+      ]);
+
+      const shapes: Array<Record<string, number>> = [
+        { sinceMs: 3_000 },
+        { to: 6_000 },
+        { sinceMs: 3_000, to: 6_000 },
+      ];
+
+      for (const args of shapes) {
+        const timeline = await rig.client.callTool("timeline", args);
+        const timelineWindow = (
+          timeline.json as { window: { from: number; to: number; ms: number } }
+        ).window;
+
+        const frames = await rig.client.callTool("frames", args);
+        const framesAsked = (frames.json as { askedWindow: { from?: number; to?: number } })
+          .askedWindow;
+
+        expect(
+          { from: framesAsked.from, to: framesAsked.to },
+          `shape ${JSON.stringify(args)} disagreed`,
+        ).toEqual({ from: timelineWindow.from, to: timelineWindow.to });
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("resolveWindow's edge cases (GRA-120)", () => {
+  // Exercised through `findings`, which reports `window: null` whenever
+  // `resolveWindow`/`resolveWindowSince` refuses, and the resolved `window`
+  // it examined otherwise — the same public surface every one of these
+  // arguments actually reaches.
+
+  it("rejects sinceMs of 0 at the schema, before resolveWindow ever sees it", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("findings", { sinceMs: 0 });
+      expect(result.isError).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("rejects a negative sinceMs at the schema", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("findings", { sinceMs: -1 });
+      expect(result.isError).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("clamps a negative explicit from to 0, live buffer non-empty", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 9_000, data: {} },
+      ]);
+      const result = await rig.client.callTool("findings", { from: -500, to: 9_000 });
+      expect(result.isError).toBeFalsy();
+      const window = (result.json as { window: { from: number; to: number; ms: number } }).window;
+      // Not -500: a timestamp on the device's uptime clock cannot be
+      // negative, exactly as the runtime's own Window.resolve already
+      // insists — this host used to hand a negative `from` straight
+      // through uncorrected.
+      expect(window).toEqual({ from: 0, to: 9_000, ms: 9_000 });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("clamps a negative explicit from to 0, live buffer empty (disk-only fallback)", async () => {
+    const rig = await buildRig();
+    try {
+      // No pushEvents at all — the live buffer is empty, so this exercises
+      // resolveWindow's other branch: the one that widens an explicit
+      // {from, to} to work from disk alone (GRA-53).
+      const result = await rig.client.callTool("findings", { from: -500, to: 1_000 });
+      expect(result.isError).toBeFalsy();
+      const window = (result.json as { window: { from: number; to: number; ms: number } | null })
+        .window;
+      expect(window).toEqual({ from: 0, to: 1_000, ms: 1_000 });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("refuses an explicit from after to instead of handing back an inverted window", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 5_000, data: {} }]);
+      const result = await rig.client.callTool("findings", { from: 9_000, to: 2_000 });
+      expect(result.isError).toBeFalsy();
+      const window = (result.json as { window: unknown }).window;
+      // Refused the way the tool already refuses "no window at all" — not a
+      // {from: 9_000, to: 2_000, ms: 0} object a caller could misread as a
+      // valid, if oddly-shaped, answer.
+      expect(window).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("refuses an explicit from after to with an empty live buffer too", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("findings", { from: 9_000, to: 2_000 });
+      expect(result.isError).toBeFalsy();
+      const window = (result.json as { window: unknown }).window;
+      expect(window).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("refuses a to before the oldest buffered event when from is left to default", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 5_000, data: {} },
+        { event: "recompose", t: 6_000, data: {} },
+      ]);
+      // No `from`: it defaults to the oldest buffered event (5_000), which is
+      // after this `to` — an inverted window with nothing explicit to blame,
+      // refused the same way as the fully-explicit case above.
+      const result = await rig.client.callTool("findings", { to: 1_000 });
+      expect(result.isError).toBeFalsy();
+      const window = (result.json as { window: unknown }).window;
+      expect(window).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("windowShape's descriptions cannot drift on one tool (GRA-120 AC5)", () => {
+  // `sinceMs`/`from`/`to` used to differ per tool before `windowShape`
+  // existed, and even after it exists nothing stops a future edit from
+  // spreading `windowShape` and then overriding one field's `.describe()`
+  // locally on a single tool, which is exactly as silent as five hand-rolled
+  // resolvers were. This walks the tools' *registered, live* JSON schemas —
+  // what an agent actually reads — not the `windowShape` source object, so a
+  // tool that stops spreading it (or shadows a field) fails here.
+
+  const sharedWindowTools = [
+    "findings",
+    "save_moment",
+    "recompositions",
+    "frames",
+    "blocking",
+    "logs",
+    "timeline",
+  ];
+
+  it("every tool that shares the windowShape uses the exact same sinceMs/from/to wording", async () => {
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const byName = new Map(tools.map((t) => [t.name, t]));
+      const reference = byName.get("findings");
+      expect(reference, "findings is not registered").toBeTruthy();
+      const refProps = reference!.inputSchema.properties as Record<string, { description?: string }>;
+      for (const field of ["sinceMs", "from", "to"] as const) {
+        expect(refProps[field]?.description, `findings.${field} has no description`).toBeTruthy();
+      }
+
+      for (const name of sharedWindowTools) {
+        const tool = byName.get(name);
+        expect(tool, `${name} is not registered`).toBeTruthy();
+        const props = tool!.inputSchema.properties as Record<string, { description?: string }>;
+        for (const field of ["sinceMs", "from", "to"] as const) {
+          expect(props[field]?.description, `${name}.${field} drifted from findings.${field}`).toBe(
+            refProps[field]?.description,
+          );
+        }
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("`to`'s description names the default the code actually uses, not a stale 'latest event' claim", async () => {
+    // GRA-120's third fault: after GRA-84 the runtime defaults `to` to `now`,
+    // and this host — which has no device clock of its own — defaults it to
+    // the newest buffered event as its best estimate of `now`. "Defaults to
+    // the latest event" (the old wording) described neither honestly: it
+    // named a fact about the buffer, not about what "now" means here.
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const findings = tools.find((t) => t.name === "findings")!;
+      const props = findings.inputSchema.properties as Record<string, { description?: string }>;
+      expect(props.to?.description).toContain("current time");
+      expect(props.to?.description).not.toContain("latest event");
+      // sinceMs's own description must not claim it looks back from "now"
+      // unqualified either — it anchors to `to` (explicit or defaulted),
+      // which is this host's only honest source for "now".
+      expect(props.sinceMs?.description).toContain("`to`");
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 describe("findings", () => {
