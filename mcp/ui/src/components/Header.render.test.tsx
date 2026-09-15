@@ -145,6 +145,12 @@ describe("Header's keep control (GRA-116)", () => {
 
   it("renders no result row and no alert before any save has happened", () => {
     renderHeader("connected");
+    // The whole row, not just the elements inside it -- an empty wrapper
+    // rendering unconditionally would pass the two checks below without
+    // actually gating anything, which is exactly what this line is here to
+    // catch (measured: mutating the row's own condition to `true` left both
+    // inner checks green).
+    expect(screen.queryByTestId("save-result")).toBeNull();
     expect(screen.queryByLabelText("saved trace path")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });

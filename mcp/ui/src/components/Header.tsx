@@ -234,7 +234,10 @@ export function Header({
           line, so the result (or error) shows on its own row below the
           controls rather than fighting them for space. */}
       {(savePath || saveError) && (
-        <div className="flex w-full basis-full flex-wrap items-center gap-2.5 font-mono text-[11px]">
+        <div
+          data-testid="save-result"
+          className="flex w-full basis-full flex-wrap items-center gap-2.5 font-mono text-[11px]"
+        >
           {savePath && (
             <>
               <input
