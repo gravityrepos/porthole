@@ -1,13 +1,36 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  cacheKey,
+  fetchAskTrace,
+  floorWindow,
+  hitWindow,
+  isAskable,
+  selectTrace,
+  type AskTraceResult,
+  type Window as AskWindow,
+} from "../lib/askTrace";
+import { askTracePrompt, captureTracePrompt } from "../lib/agentPrompt";
 import { groupFields, rawText, type Field, type Tone } from "../lib/fields";
 import { deviceLabel, type Hit } from "../lib/laneData";
 import { shortUrl } from "../lib/spans";
-import { num, str, type Finding } from "../types";
+import { num, str, type Finding, type TraceListing } from "../types";
 
 interface Props {
   hit: Hit | null;
+  /** GRA-115: what `/api/traces` currently lists and which one the findings
+   *  panel has chosen, so `AskTraceAction` below can apply ruling 3's trace
+   *  selection to whatever hit is selected. Optional, defaulting to "no
+   *  traces known" -- every caller that predates this ticket (this file's
+   *  own render tests included) still renders correctly, just always in the
+   *  no-coverage state. */
+  traces?: TraceListing[];
+  selectedTraceId?: string | null;
+  /** The window the last `/api/findings` request actually covered
+   *  (`findingsPayload.window` in `App`), used only as a fallback when a
+   *  selected finding is `spanning` -- see `askTrace.ts`'s `hitWindow`. */
+  contextWindow?: AskWindow | null;
 }
 
 const TONE: Record<Tone, string> = {
@@ -22,7 +45,7 @@ const TONE: Record<Tone, string> = {
  * window-wide counts live in WindowPanel, because they are true of the visible
  * range whether or not anything is selected.
  */
-export function SelectionPanel({ hit }: Props) {
+export function SelectionPanel({ hit, traces = [], selectedTraceId = null, contextWindow = null }: Props) {
   const heading = hit ? headingFor(hit) : null;
   const [showRaw, setShowRaw] = useState(false);
 
@@ -57,6 +80,13 @@ export function SelectionPanel({ hit }: Props) {
         {hit && (
           <>
             <Detail hit={hit} />
+
+            <AskTraceAction
+              hit={hit}
+              traces={traces}
+              selectedTraceId={selectedTraceId}
+              contextWindow={contextWindow}
+            />
 
             <button
               onClick={() => setShowRaw((value) => !value)}
@@ -105,6 +135,185 @@ const SEVERITY_COLOR: Record<Finding["severity"], string> = {
   warning: "--color-recompose",
   note: "--color-muted",
 };
+
+/** `InsightsPanel`'s own `SEVERITY` table spells these the same way; kept as
+ *  its own small copy here rather than imported so this component does not
+ *  reach into another component's module for three strings (`InsightsPanel`
+ *  does not export it). */
+const SEVERITY_LABEL: Record<Finding["severity"], string> = {
+  error: "ERROR",
+  warning: "WARN",
+  note: "NOTE",
+};
+
+/**
+ * GRA-115: the gesture. Shown only for a dropped frame, a main-thread stall
+ * or a finding (`isAskable`) -- a span or any other event lane gets nothing
+ * here, the same "out of scope" the ticket's own list implies by omission.
+ *
+ * Hooks run unconditionally above the eligibility check, as React requires;
+ * the check itself only decides what JSX comes back, never whether a hook
+ * runs.
+ */
+function AskTraceAction({
+  hit,
+  traces,
+  selectedTraceId,
+  contextWindow,
+}: {
+  hit: Hit;
+  traces: TraceListing[];
+  selectedTraceId: string | null;
+  contextWindow: AskWindow | null;
+}) {
+  // Ruling 5: per `(trace id, from, to)` for the session -- a plain `Map`
+  // held in a ref survives across re-selecting hits (this component stays
+  // mounted the whole session; only its `hit` prop changes) without forcing
+  // a re-render of its own on every write.
+  const cache = useRef<Map<string, AskTraceResult>>(new Map());
+  const [result, setResult] = useState<AskTraceResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [promptLabel, setPromptLabel] = useState("copy prompt");
+
+  const eligible = isAskable(hit);
+  const raw = eligible ? hitWindow(hit, contextWindow) : null;
+  const window = raw ? floorWindow(raw) : null;
+  const trace = window ? selectTrace(traces, selectedTraceId, window) : null;
+  const key = trace && window ? cacheKey(trace.id, window) : null;
+
+  // A different hit (a different cache key) shows whatever that key already
+  // has cached -- instantly, no request -- or nothing yet if it has never
+  // been asked. This is what makes re-selecting an already-answered hit come
+  // back without a fetch, not just re-clicking "ask the trace" on the same one.
+  useEffect(() => {
+    setResult(key ? (cache.current.get(key) ?? null) : null);
+  }, [key]);
+
+  const ask = useCallback(() => {
+    if (!trace || !window || !key) return;
+    const cached = cache.current.get(key);
+    if (cached) {
+      setResult(cached);
+      return;
+    }
+    setLoading(true);
+    void fetchAskTrace(trace.id, window).then((outcome) => {
+      cache.current.set(key, outcome);
+      setLoading(false);
+      setResult(outcome);
+    });
+  }, [trace, window, key]);
+
+  const copyPrompt = useCallback((text: string) => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setPromptLabel("copied");
+        setTimeout(() => setPromptLabel("copy prompt"), 1200);
+      })
+      .catch(() => {
+        // Clipboard access can be refused; the prompt text is still on screen
+        // nowhere else to copy it from, so there is nothing more to do here.
+      });
+  }, []);
+
+  if (!eligible || !window) return null;
+
+  return (
+    <div className="mt-3.5 flex flex-col gap-2 border-t border-[var(--color-line)] pt-3">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] tracking-[0.12em] text-[var(--color-dim)]">
+          ASK THE TRACE
+        </span>
+        <button
+          type="button"
+          onClick={() => copyPrompt(trace ? askTracePrompt(trace.id, window) : captureTracePrompt(window))}
+          className="cursor-pointer font-mono text-[10px] text-[var(--color-dim)] hover:text-[#9aa6b8]"
+        >
+          {promptLabel}
+        </button>
+      </div>
+
+      {/* Ruling 3: an empty answer and a missing capture must never look
+          alike -- this branch never calls fetchAskTrace at all. */}
+      {!trace && (
+        <p className="text-[12px] leading-snug text-[var(--color-muted)]">
+          No capture on file covers device uptime {Math.round(window.from)}–{Math.round(window.to)}ms.
+        </p>
+      )}
+
+      {trace && (
+        <button
+          type="button"
+          onClick={ask}
+          disabled={loading}
+          className="self-start rounded-sm border border-[var(--color-line)] bg-[var(--color-control)] px-2 py-1 font-mono text-[10.5px] text-[var(--color-fg)] hover:border-[var(--color-dim)] disabled:opacity-60"
+        >
+          {loading ? "asking…" : "ask the trace"}
+        </button>
+      )}
+
+      {result?.kind === "error" && (
+        <p className="text-[11px] leading-snug text-[var(--color-danger)]">{result.message}</p>
+      )}
+
+      {result?.kind === "answer" && (
+        <div className="flex flex-col gap-1.5">
+          {/* Ruling 4: negative answers get equal weight -- an empty
+              `findings` with nothing ruled out either is still a real state
+              (an old server with no `asked`, or a window with truly nothing
+              to say) and gets its own sentence rather than silently
+              rendering an empty list. */}
+          {result.findings.length === 0 && result.ruledOut.length === 0 && (
+            <p className="text-[11px] leading-snug text-[var(--color-dim)]">
+              Nothing came back for this window.
+            </p>
+          )}
+          {result.findings.map((finding, index) => (
+            <AskFinding key={`${finding.id}-${index}`} finding={finding} />
+          ))}
+          {result.ruledOut.map((line) => (
+            <p key={line} className="text-[11px] leading-snug text-[var(--color-dim)]">
+              Ruled out: {line}.
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One finding, in the same vocabulary `InsightsPanel`'s list uses: severity,
+ *  source and confidence on one line, then the title and detail sentences. */
+function AskFinding({ finding }: { finding: Finding }) {
+  return (
+    <div className="rounded border border-[var(--color-line)] bg-[var(--color-tile)] p-2">
+      <div className="flex items-center gap-2">
+        <span
+          className="font-mono text-[10px]"
+          style={{ color: `var(${SEVERITY_COLOR[finding.severity]})` }}
+        >
+          {SEVERITY_LABEL[finding.severity]}
+        </span>
+        <span
+          className="rounded-sm px-1 font-mono text-[9px] text-[var(--color-muted)] ring-1 ring-[var(--color-line)]"
+          title={
+            finding.source === "trace"
+              ? "from the system trace, which sees the whole device"
+              : "from Porthole, which sees inside the app"
+          }
+        >
+          {finding.source}
+        </span>
+        <span className="ml-auto font-mono text-[9px] text-[var(--color-dim)]">{finding.confidence}</span>
+      </div>
+      <p className="mt-1 text-[12px] leading-snug text-[var(--color-fg)]">{finding.title}</p>
+      {finding.detail && (
+        <p className="mt-1 text-[11px] leading-snug text-[var(--color-muted)]">{finding.detail}</p>
+      )}
+    </div>
+  );
+}
 
 function headingFor(hit: Hit): { title: string; subtitle: string; color: string } {
   if (hit.kind === "finding") {

@@ -70,6 +70,38 @@ The ${LOG_CONTEXT_MS * 2}ms around it contains: ${summary}.
 For context, try recompositions {"from": ${from}, "to": ${to}}, frames and blocking over the same window, and logs {"from": ${from}, "to": ${to}, "level": "W"}.`;
 }
 
+/**
+ * GRA-115 ruling 6: the bounds `SelectionPanel` just computed for a clicked
+ * hit (`lib/askTrace.ts`'s `hitWindow`, floored), as a prompt naming the
+ * trace to ask and the window to ask about -- the same shape `agentPrompt`
+ * and `logPrompt` above already use, so a developer pastes one sentence
+ * rather than retyping a timestamp and a trace id by hand.
+ */
+export function askTracePrompt(traceId: string, window: { from: number; to: number }): string {
+  const from = Math.round(window.from);
+  const to = Math.round(window.to);
+  return (
+    `Using the Porthole MCP tools, call ask_system_trace with trace "${traceId}" over device ` +
+    `uptime ${from} to ${to}, and explain what the rest of the device was doing during that window.`
+  );
+}
+
+/**
+ * GRA-115 ruling 3: when nothing on disk covers the window a clicked hit
+ * asked about, the paste-ready alternative is to go get one -- named against
+ * the same bounds so the capture, once taken, is the one that will actually
+ * answer this.
+ */
+export function captureTracePrompt(window: { from: number; to: number }): string {
+  const from = Math.round(window.from);
+  const to = Math.round(window.to);
+  return (
+    `No capture on disk covers device uptime ${from} to ${to}. Using the Porthole MCP tools, call ` +
+    "capture_system_trace (or run `porthole capture` from the CLI) to record one, then ask about " +
+    "that window again."
+  );
+}
+
 /** How far either side of a line counts as "what was happening at the time". */
 const LOG_CONTEXT_MS = 2000;
 

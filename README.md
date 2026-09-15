@@ -471,6 +471,23 @@ nothing to say about this window" (no bar reaches it) and "the trace says
 nothing was wrong here" (the bar reaches it and the lane is quiet), which
 otherwise look identical.
 
+Selecting a dropped frame, a main-thread stall, or a finding adds an
+**ask the trace** action to the selection panel — the gesture that replaces
+opening a trace viewer. It asks about that hit's own window (its duration,
+centred, floored at 200ms of total width — never the visible view) against
+whichever capture's coverage actually contains it: the one chosen above if
+its coverage reaches that far, otherwise the first listed capture that does,
+otherwise none. With none, the panel says plainly that no capture covers that
+moment and offers a copy-ready prompt for taking one. Otherwise it asks
+`GET /api/findings?trace=<id>&from=&to=` — the same endpoint the lane above
+already uses, no second implementation — and renders the answer sourced and
+confidence-labelled like every other finding, including a line for each
+question the trace answered that ruled something out rather than finding it:
+"the main thread was running for all of it" is as much an answer as a jank
+finding is. A copy-ready prompt names the same bounds for pasting at an agent.
+The answer is cached per capture and window for the session, so re-selecting
+the same hit never re-asks.
+
 The header also has **database**, a read-only inspector over the app's own
 tables — list, page, and run a SELECT — and **restart app**, which force-stops
 and relaunches over adb.
@@ -486,7 +503,11 @@ the device rather than assumed from the socket being loopback.
 finding sit in one list, on one severity vocabulary, each carrying a `source`.
 Add `?trace=<id>` to merge in what a system trace has to say about the same
 window; the id has to be one `GET /api/traces` just listed — an arbitrary
-filesystem path is refused, before anything is spawned.
+filesystem path is refused, before anything is spawned. When a trace was
+actually queried, the response also carries `asked`: one `{ id, answered }`
+per question `ask_system_trace` puts to it, so a caller can tell "this
+question was answered and ruled nothing out" apart from "this question was
+never reached" — the two look the same from the finding list alone.
 
 `GET /api/traces` lists what is under `.porthole/traces/`: `id` (the file name,
 without `.pftrace`), `bytes`, `recordedAt`, and `coverage` — the uptime window
@@ -1635,16 +1656,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1268 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1328 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 424 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 416
-passed, 0 failed, 8 skipped), 671 in the MCP server (`cd mcp && npm test` —
-668 passed, 0 failed, 3 skipped), and 173 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 173 passed, 0 failed, 0
+passed, 0 failed, 8 skipped), 675 in the MCP server (`cd mcp && npm test` —
+672 passed, 0 failed, 3 skipped), and 229 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 229 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1268 disagrees with the sum of the three suites' totals stated
+XML, and when 1328 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1668,10 +1689,10 @@ this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 424 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 671 server tests with 0 skipped, because it has the
+set) and the same 675 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 671/669/2, missing only that capture. The timeline UI is the one suite
-whose split does not move: 173/173/0 on every leg.
+sees 675/673/2, missing only that capture. The timeline UI is the one suite
+whose split does not move: 229/229/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
