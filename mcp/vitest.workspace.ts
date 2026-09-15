@@ -11,9 +11,9 @@ import { defineWorkspace } from "vitest/config";
 // scheduling race rather than a timeout was in play.
 //
 // The fix is runner configuration, not the tests: split the suite into two
-// vitest projects that both extend this package's own vitest.config.ts, so
-// neither drifts from its sibling's include glob or passWithNoTests
-// posture. `rigs` is exactly the files that build a real loopback rig
+// vitest projects (see the second comment below for why they do not
+// `extends` vitest.config.ts). `rigs` is exactly the files that build a
+// real loopback rig
 // (confirmed by reading each one for FakeDevice.start/TimelineServer/
 // net.createServer - see the ticket for the file-by-file check, and note
 // entrypoints.test.ts was deliberately left out of this list: it spawns
