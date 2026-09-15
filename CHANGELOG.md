@@ -34,6 +34,17 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- Every window-taking tool (`findings`, `save_moment`, `recompositions`,
+  `frames`, `blocking`, `logs`, `timeline`) accepts `since: "last" | "all"`,
+  and `"last"` is now the default when no window is given: it starts where
+  the previous window-taking tool call on this session left off instead of
+  re-reading the whole buffer every time. `"all"` is the explicit reset.
+  Every tool result carries a one-line banner and a structured `sinceLast`
+  field when an `error`-severity finding has happened since the last call
+  and has not yet been reported, and `findings` classifies each finding as
+  `new`/`ongoing`/`resolved` against its own previous call. This state (a
+  "watermark") is per MCP server process and survives a restart, written to
+  `watermark.json` beside a session's `events.ndjson` (GRA-55).
 - `portholeStart`, a single task that installs the debug build, forwards the
   port, writes `.mcp.json`, fetches `trace_processor` on first need, and
   opens the timeline — a thin orchestrator over the existing narrow tasks,
