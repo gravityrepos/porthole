@@ -2148,13 +2148,22 @@ function setupFakeAdb(): FakeAdb {
   const root = mkdtempSync(path.join(tmpdir(), "porthole-fakeadb-"));
   const binaryName = process.platform === "win32" ? "adb.exe" : "adb";
   const binaryPath = path.join(root, binaryName);
-  try {
-    // A hard link, not a copy: same bytes, no ~90MB copy per test run. Falls
-    // back to copying only if the temp directory is not on the same volume
-    // as the running node binary, which a hard link cannot span.
-    linkSync(process.execPath, binaryPath);
-  } catch {
+  if (process.platform === "win32") {
+    // Always a copy on Windows. A hard link to the running node.exe can
+    // never be unlinked while this test runner is alive — Windows refuses
+    // with EPERM for every link to an in-use executable, not only the path
+    // that was launched — and CI's windows leg failed on exactly that twice,
+    // retries included. A copy the child ran and exited is deletable.
     copyFileSync(process.execPath, binaryPath);
+  } else {
+    try {
+      // A hard link, not a copy: same bytes, no ~90MB copy per test run.
+      // Falls back to copying only if the temp directory is not on the same
+      // volume as the running node binary, which a hard link cannot span.
+      linkSync(process.execPath, binaryPath);
+    } catch {
+      copyFileSync(process.execPath, binaryPath);
+    }
   }
 
   const preloadPath = path.join(root, "fake-adb-preload.cjs");
