@@ -810,6 +810,16 @@ describe("runAdbAsync — an async, awaited spawn standing in for spawnSync (GRA
       onProgress: (elapsedMs) => ticks.push(elapsedMs),
     });
     expect(result.ok).toBe(true);
-    expect(ticks.length).toBeGreaterThan(0);
+    // A ~2s command ticking every 50ms should fire on the order of dozens of
+    // times. >0 alone would also pass a broken implementation that calls
+    // onProgress exactly once, immediately, instead of on an interval — >5
+    // does not: it fails a single-shot call, and a real periodic ticker over
+    // this duration clears it many times over.
+    expect(ticks.length).toBeGreaterThan(5);
+    // And it should actually be periodic, not one big element followed by
+    // silence: consecutive ticks should be roughly tickMs apart, not the
+    // whole elapsed duration apart.
+    const gaps = ticks.slice(1).map((t, i) => t - ticks[i]);
+    expect(Math.max(...gaps)).toBeLessThan(500);
   }, 15_000);
 });
