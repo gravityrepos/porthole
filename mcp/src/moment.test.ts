@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe as suite, expect, it } from "vitest";
 import type { DeviceEvent } from "./device.js";
-import { describe, fromBootMs, fromTraceClockSnapshot, momentOf, toBootNs } from "./moment.js";
+import { describe, fromBootMs, fromTraceClockSnapshot, momentOf, toBoot, toBootNs } from "./moment.js";
 
 const at = (t: number, event: string, data: Record<string, unknown> = {}): DeviceEvent =>
   ({ t, seq: t, event, data }) as DeviceEvent;
@@ -141,6 +141,29 @@ suite("toBootNs (GRA-113): the reverse trip, for scoping a trace query", () => {
   it("assumes no accumulated sleep rather than refusing, when the run has no clocks sample yet", () => {
     const noClocks = session.filter((e) => e.event !== "clocks");
     expect(toBootNs(noClocks, 10_600)).toBe(10_600 * 1e6);
+  });
+});
+
+suite("toBoot (GRA-113): toBootNs's fuller answer, for a caller that reports the offset back", () => {
+  it("is toBootNs's ns, plus the sleepMs and sample it used to get there", () => {
+    const full = toBoot(session, 5_600);
+    expect(full.ns).toBe(toBootNs(session, 5_600));
+    expect(full.sleepMs).toBe(5_000);
+    expect(full.sampledAt).toBe(0); // the session's one `clocks` sample, at t=0
+  });
+
+  it("picks a different sample's sleepMs for a moment on the other side of a doze, same as toBootNs's own ns does", () => {
+    const dozed = [
+      ...session,
+      at(30_000, "clocks", { uptimeMs: 30_000, bootMs: 95_000, wallMs: 2, sleepMs: 65_000 }),
+    ];
+    expect(toBoot(dozed, 10_600)).toMatchObject({ sleepMs: 5_000, sampledAt: 0 });
+    expect(toBoot(dozed, 95_000)).toMatchObject({ sleepMs: 65_000, sampledAt: 30_000 });
+  });
+
+  it("reports sleepMs 0 and a null sampledAt rather than refusing, when there is no clocks sample yet", () => {
+    const noClocks = session.filter((e) => e.event !== "clocks");
+    expect(toBoot(noClocks, 10_600)).toEqual({ ns: 10_600 * 1e6, sleepMs: 0, sampledAt: null });
   });
 });
 

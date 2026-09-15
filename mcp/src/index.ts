@@ -8,7 +8,7 @@ import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./dev
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
 import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
-import { describe as describeMoment, fromBootMs, momentOf } from "./moment.js";
+import { describe as describeMoment, fromBootMs, momentOf, toBoot } from "./moment.js";
 import {
   CPU_PROBE,
   describeSystem,
@@ -1224,26 +1224,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "Ask again in a moment.",
         );
       }
-      const sample = events.find((e) => e.event === "clocks");
-      const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
-      const bounds = {
-        fromNs: (span.from + sleepMs) * 1e6,
-        toNs: (span.to + sleepMs) * 1e6,
-      };
+      // GRA-113: the one conversion, through moment.ts's toBoot — this used
+      // to read whichever `clocks` sample `events.find()` happened to
+      // return first and apply it to both bounds, the same open-coded bug
+      // that ticket fixed in timeline.ts. toBoot picks the sample actually
+      // in force at each boundary separately (so a sleep that happened
+      // between `from` and `to` is reflected correctly instead of averaged
+      // away), and hands back the offset it used so this tool can still
+      // report `sleepMs` the way its payload always has.
+      const bootFrom = toBoot(events, span.from);
+      const bootTo = toBoot(events, span.to);
 
       const { findings: traceFindings, unanswered } = await askTrace({
         binary,
         trace,
         packageName: app,
-        fromNs: bounds.fromNs,
-        toNs: bounds.toNs,
+        fromNs: bootFrom.ns,
+        toNs: bootTo.ns,
       });
 
       const findings = traceFindings.map(withFollowUp);
       const payload = {
         trace,
         app,
-        window: { from: span.from, to: span.to, sleepMs },
+        // bootTo's offset, not bootFrom's: if the device slept between the
+        // two, the more recent sample is the more representative one to
+        // report.
+        window: { from: span.from, to: span.to, sleepMs: bootTo.sleepMs },
         asked: QUESTIONS.map((q) => q.asks),
         unanswered,
         findings,

@@ -77,29 +77,45 @@ export function fromBootMs(
 
 /**
  * The reverse of fromBootMs: a Porthole uptime-ms moment, converted to the
- * CLOCK_BOOTTIME ns a trace stamps with — what `timeline.ts` needs to scope a
- * trace_processor query to the window a finding named in Porthole's own clock.
- *
- * This used to be open-coded at the one call site, picking whichever `clocks`
- * sample the search happened to find first rather than the one in force at
- * `atMs` — the same bug `fromBootMs` was written to avoid on the other leg of
- * the trip. Mirroring `fromBootMs`'s own selection (the most recent sample at
- * or before the moment, by Porthole's own clock this time: `sample.t`, not a
- * boot-time field) is what fixes it, and living here rather than back at that
- * call site is what keeps it fixed: every place that needs the offset between
- * the two clocks reads it the same way, once.
+ * CLOCK_BOOTTIME ns a trace stamps with — what a caller scoping a
+ * trace_processor query to a window named in Porthole's own clock needs.
+ * `timeline.ts`'s `/api/findings?trace=` and `index.ts`'s `ask_system_trace`
+ * both do exactly this, and both used to open-code it separately, each
+ * picking whichever `clocks` sample the search happened to find first
+ * rather than the one in force at `atMs` — the same bug `fromBootMs` was
+ * written to avoid on the other leg of the trip. Mirroring `fromBootMs`'s
+ * own selection (the most recent sample at or before the moment, by
+ * Porthole's own clock this time: `sample.t`, not a boot-time field) is what
+ * fixes it, and living here rather than at either call site is what keeps it
+ * fixed: every place that needs the offset between the two clocks reads it
+ * the same way, once.
  *
  * Never refuses. A caller scoping a query needs *a* bound to hand
  * trace_processor even before the run has sampled the offset at all, and
- * assuming no accumulated sleep — the same default the open-coded version
- * used — is the conservative placeholder: it is wrong only by however long the
- * device has actually slept, and only until a real sample arrives.
+ * assuming no accumulated sleep — the same default both open-coded versions
+ * used — is the conservative placeholder: it is wrong only by however long
+ * the device has actually slept, and only until a real sample arrives.
+ *
+ * Returns the offset alongside the answer, not just the ns: `ask_system_trace`
+ * reports `sleepMs` back to whoever asked, the same way `fromBootMs`'s own
+ * `{at, sleepMs, sampledAt}` already does for the reverse trip — and doing
+ * that by re-deriving it at the call site is exactly the duplication this
+ * function exists to close off. `toBootNs` below is this, minus the
+ * bookkeeping, for the caller (`timeline.ts`) that only ever wants the number.
  */
-export function toBootNs(events: DeviceEvent[], atMs: number): number {
+export function toBoot(
+  events: DeviceEvent[],
+  atMs: number,
+): { ns: number; sleepMs: number; sampledAt: number | null } {
   const samples = events.filter((e) => e.event === "clocks" && e.t <= atMs);
   const chosen = samples.length ? samples[samples.length - 1] : undefined;
   const sleepMs = chosen ? num(chosen.data.sleepMs) : 0;
-  return (atMs + sleepMs) * 1e6;
+  return { ns: (atMs + sleepMs) * 1e6, sleepMs, sampledAt: chosen ? chosen.t : null };
+}
+
+/** `toBoot(events, atMs).ns` — see `toBoot` for the full story. */
+export function toBootNs(events: DeviceEvent[], atMs: number): number {
+  return toBoot(events, atMs).ns;
 }
 
 /**
