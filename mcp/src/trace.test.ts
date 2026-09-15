@@ -385,6 +385,22 @@ describe("findingsOf", () => {
       expect(findings[0].severity).toBe("note");
     });
 
+    // GRA-113: exit.t is stamped in the *next* process's uptime clock, not
+    // the dead one's — so unlike every other finding here, this is spanning
+    // rather than windowed, and says so in the detail rather than silently.
+    it("is spanning, not windowed — exit.t belongs to the process reporting the death, not the one that died", () => {
+      const findings = find([exitEvent("REASON_ANR")]);
+      expect(findings[0].spanning).toBe(true);
+      expect(findings[0].window).toBeUndefined();
+      expect(findings[0].detail).toContain("predates this process's uptime clock");
+    });
+
+    it("keeps a real description alongside the predates-uptime-clock note, rather than replacing it", () => {
+      const findings = find([exitEvent("REASON_CRASH", { description: "NullPointerException: cart was null" })]);
+      expect(findings[0].detail).toContain("NullPointerException: cart was null");
+      expect(findings[0].detail).toContain("predates this process's uptime clock");
+    });
+
     it.each(["REASON_OTHER", "REASON_SIGNALED"])(
       "produces no finding at all for %s",
       (reason) => {
@@ -467,5 +483,111 @@ describe("the new metric keys against an older baseline", () => {
     expect(by("http.stillOpen")).toMatchObject({ before: 0, after: 2, kind: "new" });
     // And a lane with no hang stays quiet rather than inventing a row.
     expect(by("work.stillOpen")).toMatchObject({ kind: "unchanged" });
+  });
+});
+
+describe("GRA-113: every finding carries a window, taken from the events that produced it", () => {
+  const find = (events: DeviceEvent[], marks: Array<{ at: number; label: string }> = []) =>
+    findingsOf(events, marks, 60);
+
+  it("places db-on-main-thread at the worst query's own start and end", () => {
+    const findings = find(span("db", "a", 100, 147, { onMainThread: "true", sql: "SELECT 1" }));
+    expect(findings[0]).toMatchObject({ id: "db-on-main-thread", window: { from: 100, to: 147 } });
+    expect(findings[0].spanning).toBeUndefined();
+  });
+
+  it("places main-thread-stall by backdating the reporting event with its own duration", () => {
+    const events = [event("blocked", 500, { durationMs: 400, top: "a.B.c(B.kt:1)" })];
+    expect(find(events)[0].window).toEqual({ from: 100, to: 500 });
+  });
+
+  it("places http-failed at the failed call's own start and end", () => {
+    const events = span("http", "a", 200, 260, { status: 500 });
+    const finding = find(events).find((f) => f.id === "http-failed");
+    expect(finding?.window).toEqual({ from: 200, to: 260 });
+  });
+
+  it("places a still-open finding from its start to the last moment it was known open, not an invented 'now'", () => {
+    const events = [
+      event("http_start", 10, { id: "a", method: "GET", url: "https://api/a" }),
+      event("nav", 510, { route: "cart" }),
+    ];
+    const finding = find(events).find((f) => f.id === "http-still-open");
+    // atLeastMs is 500 (510 - 10); the window's `to` is exactly startedAt + that.
+    expect(finding?.window).toEqual({ from: 10, to: 510 });
+  });
+
+  it("places frames-dropped by backdating the worst frame with its own totalMs", () => {
+    const events = [event("frame", 300, { missedFrames: 1, totalMs: 50 })];
+    expect(find(events)[0].window).toEqual({ from: 250, to: 300 });
+  });
+
+  it("places blocking-gc across the earliest and latest blocking collection, not a single invented instant", () => {
+    const events = [
+      event("gc", 100, { blocking: 1, pausedMs: 10 }),
+      event("gc", 900, { blocking: 1, pausedMs: 15 }),
+      event("gc", 500, { count: 1 }), // concurrent — must not widen the window
+    ];
+    const finding = find(events).find((f) => f.id === "blocking-gc");
+    expect(finding?.window).toEqual({ from: 100, to: 900 });
+  });
+
+  it("places trim-memory across every trim, not just the last one the title quotes", () => {
+    const events = [
+      event("device", 50, { kind: "trimMemory", level: "moderate" }),
+      event("device", 700, { kind: "trimMemory", level: "running critical" }),
+    ];
+    const finding = find(events).find((f) => f.id === "trim-memory");
+    expect(finding?.window).toEqual({ from: 50, to: 700 });
+  });
+
+  it("places recompose-hotspot across only the hottest component's own recompositions, not every recompose in the run", () => {
+    const events = [
+      ...Array.from({ length: 150 }, (_, i) => event("recompose", i, { name: "Cart.ItemRow" })),
+      // A different, unrelated component recomposing much later must not
+      // widen the hotspot's window — it is not part of what made this hot.
+      event("recompose", 9000, { name: "Unrelated.Thing" }),
+    ];
+    const finding = find(events).find((f) => f.id === "recompose-hotspot");
+    expect(finding?.window).toEqual({ from: 0, to: 149 });
+  });
+
+  it("walks every finding from a rig exercising every finding type and fails on any with neither window nor spanning", () => {
+    const events: DeviceEvent[] = [
+      ...span("db", "main-db", 0, 50, { onMainThread: "true", sql: "SELECT 1" }),
+      event("blocked", 500, { durationMs: 100, top: "a.B.c(B.kt:1)" }),
+      ...span("http", "failed-call", 600, 650, { status: 500 }),
+      event("http_start", 700, { id: "open-call", method: "GET", url: "https://api/x" }),
+      event("db_start", 710, { id: "open-db", sql: "SELECT 2" }),
+      event("work_start", 720, { id: "open-work", name: "SyncWorker" }),
+      event("frame", 800, { missedFrames: 1, totalMs: 30 }),
+      event("gc", 850, { blocking: 1, pausedMs: 5 }),
+      event("device", 860, { kind: "trimMemory", level: "moderate" }),
+      ...span("work", "retried", 870, 900, { retrying: "true" }),
+      ...Array.from({ length: 150 }, (_, i) => event("recompose", 1000 + i, { name: "Cart.ItemRow" })),
+      event("exit", 2000, { reason: "REASON_CRASH", timestamp: 1_700_000_000_000 }),
+      event("nav", 3000, { route: "cart" }),
+    ];
+    const findings = find(events);
+    // Positive control: a rig producing no findings would pass the loop below
+    // vacuously. This exercises twelve of findingsOf's distinct finding ids.
+    expect(findings.length).toBeGreaterThanOrEqual(9);
+
+    for (const finding of findings) {
+      const hasWindow =
+        finding.window !== undefined &&
+        typeof finding.window.from === "number" &&
+        typeof finding.window.to === "number";
+      const hasSpanning = finding.spanning === true;
+      expect(
+        hasWindow !== hasSpanning,
+        `finding ${finding.id} must carry exactly one of window/spanning, got ${JSON.stringify({ window: finding.window, spanning: finding.spanning })}`,
+      ).toBe(true);
+    }
+
+    // And exit — the one finding here that is spanning by design (GRA-58's
+    // death predates this process's clock) — is the only one that is.
+    const spanningIds = findings.filter((f) => f.spanning).map((f) => f.id);
+    expect(spanningIds).toEqual([expect.stringMatching(/^exit-/)]);
   });
 });
