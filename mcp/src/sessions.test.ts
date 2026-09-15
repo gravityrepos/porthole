@@ -3,7 +3,7 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_RETENTION,
   SessionWriter,
@@ -22,6 +22,16 @@ import {
   sessionsRoot,
   type SessionEvent,
 } from "./sessions.js";
+
+// GRA-191: wraps the real writeFile in a spy rather than replacing it — every
+// existing test still gets real disk writes, and the one test below that
+// needs meta.json's own write to fail with ENOENT can make it do so for a
+// single call without touching anything else `sessions.ts` (or this file's
+// own fixtures) does with the filesystem.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 
 const HELLO = {
   packageName: "com.example.shop",
@@ -276,6 +286,62 @@ describe("SessionWriter", () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// GRA-191: a vanished sessions root must not become an unhandled rejection
+// ---------------------------------------------------------------------------
+
+describe("SessionWriter: a vanished sessions root", () => {
+  // No afterEach cleanup needed: `mockRejectedValueOnce` below is
+  // self-consuming — it overrides exactly one call to writeFile and every
+  // call after that (in this test or any later one) falls through to the
+  // real implementation the module mock above wraps.
+
+  it("doFlush() does not reject, and does not produce an unhandled rejection, when meta.json's write hits ENOENT (GRA-183's repro)", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 20); // short interval: exercises the real, fire-and-forget timer path
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000)); // arms the 20ms flush timer
+
+    const enoent = Object.assign(new Error("ENOENT: no such file or directory, open 'meta.json'"), {
+      code: "ENOENT",
+    });
+    vi.mocked(writeFile).mockRejectedValueOnce(enoent);
+
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      // Let the 20ms timer fire on its own, fire-and-forget (`void
+      // this.flush()` inside append()'s own setTimeout) — exactly the shape
+      // GRA-183 found: a writer whose owner never called flush() explicitly
+      // before whatever the timer needed had already vanished.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(rejections).toEqual([]);
+    // And the flush pipeline is not left permanently wedged by the one
+    // ENOENT — an explicit flush() afterwards still resolves normally
+    // rather than rejecting or hanging.
+    await expect(writer.flush()).resolves.toBeUndefined();
+  });
+
+  it("does not need the flush timer at all — an explicit flush() after the root is removed also resolves, not rejects", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000); // long interval: only the explicit flush() below should do anything
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000));
+
+    const enoent = Object.assign(new Error("ENOENT: no such file or directory, open 'meta.json'"), {
+      code: "ENOENT",
+    });
+    vi.mocked(writeFile).mockRejectedValueOnce(enoent);
+
+    await expect(writer.flush()).resolves.toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
