@@ -56,7 +56,7 @@ export interface ToolCallResult {
   isError?: boolean;
   /** The first text block, unwrapped — every tool here returns exactly one. */
   text: string;
-  /** The JSON half of the `ok()` convention's "summary\n\n{json}", parsed back out. */
+  /** The JSON half of `ok()`'s second `content` block, parsed back out. */
   json: unknown;
 }
 
@@ -67,12 +67,21 @@ export interface TestClient {
   close(): Promise<void>;
 }
 
-/** Splits `ok()`'s "summary\n\n{json}" back into the payload half. Undefined if the tool errored. */
-function parsePayload(text: string): unknown {
-  const split = text.indexOf("\n\n");
-  if (split < 0) return undefined;
+/**
+ * GRA-171: reads the payload out of the *second* text block in `content`,
+ * not by searching the first block's text for a delimiter. `ok()` now
+ * returns two separate `content` entries — summary, then payload (see
+ * `joinSummaryAndPayload()` in `index.ts`) — and `fail()` returns exactly
+ * one, so "is there a second text block at all" is what used to be "did the
+ * text contain a blank line", with no string scanning either way. Undefined
+ * if the tool errored (no second block) or the second block isn't valid
+ * JSON.
+ */
+function parsePayload(content: ToolContent[]): unknown {
+  const textBlocks = content.filter((c) => c.type === "text");
+  if (textBlocks.length < 2) return undefined;
   try {
-    return JSON.parse(text.slice(split + 2));
+    return JSON.parse(textBlocks[1].text ?? "");
   } catch {
     return undefined;
   }
@@ -93,12 +102,17 @@ export async function connect(server: McpServer): Promise<TestClient> {
     async callTool(name, args = {}) {
       const result = await client.callTool({ name, arguments: args });
       const content = (result.content ?? []) as ToolContent[];
+      // The summary is always the FIRST text block, by position — not "the
+      // first text block found" scanning for a marker inside it. GRA-171:
+      // there is no longer a single string to split, so `text` is exactly
+      // `content[0]`'s text, whatever it contains (see `parsePayload` above
+      // for the payload half).
       const text = content.find((c) => c.type === "text")?.text ?? "";
       return {
         content,
         isError: result.isError as boolean | undefined,
         text,
-        json: parsePayload(text),
+        json: parsePayload(content),
       };
     },
     async listTools() {
