@@ -463,6 +463,66 @@ describe("GRA-55 acceptance criteria", () => {
       await rig.close();
     }
   });
+
+  // GRA-189: device pass, 2026-09-15 — `findings` resolved a zero-length
+  // window and reported "0s examined (1 events)" on the *first* call a
+  // process ever made, because a different window-taking tool (`frames`,
+  // on the device) had already advanced the watermark with no digest for
+  // `findings` to re-ask. The fix: `since: "last"` resolving to nothing new
+  // and no digest to fall back to must say "nothing new," never analyse a
+  // 0s window, and never claim to be a first call.
+  it("GRA-189: since:\"last\" says 'nothing new', not 'first call' or '0s examined', when a different tool already advanced the watermark", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([blocked(1_000)]);
+      // `timeline` advances the watermark's lastExaminedT without ever
+      // recording a findings digest — the exact device shape.
+      const setup = await rig.client.callTool("timeline", {});
+      expect(setup.isError).toBeFalsy();
+
+      // Nothing new happens. The buffer still holds the one old event.
+      const result = await rig.client.callTool("findings", { since: "last" });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).not.toMatch(/first call this session/i);
+      expect(result.text).not.toMatch(/crossed a threshold/i); // not "nothing crossed a threshold in the 0s examined"
+      expect(result.text).toMatch(/nothing new/i);
+      const payload = result.json as {
+        window: { from: number; to: number; ms: number };
+        eventsExamined: number;
+        findings: unknown[];
+      };
+      expect(payload.eventsExamined).toBe(0);
+      expect(payload.window.ms).toBe(0);
+      expect(payload.window.from).toBe(payload.window.to);
+      expect(payload.findings).toEqual([]);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("GRA-55 AC1 still holds: two consecutive findings calls re-derive 'ongoing' even though the re-asked window is also zero-width", async () => {
+    // The case GRA-189's fix must not break: back-to-back findings calls on
+    // a single-instant buffer land on the exact same `from === to` shape the
+    // "nothing new" branch above checks for, but here there IS a previous
+    // findings digest to reclassify against, and that must still run.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([blocked(1_000)]);
+      const first = await rig.client.callTool("findings", {});
+      expect(first.isError).toBeFalsy();
+      const firstPayload = first.json as { window: { from: number; to: number } };
+      expect(firstPayload.window.from).toBe(firstPayload.window.to); // single event, zero-width
+
+      const second = await rig.client.callTool("findings", {});
+      expect(second.isError).toBeFalsy();
+      expect(second.text).not.toMatch(/nothing new/i);
+      const secondPayload = second.json as { findings: Array<{ id: string; status?: string }> };
+      const finding = secondPayload.findings.find((f) => f.id === "main-thread-stall");
+      expect(finding?.status).toBe("ongoing");
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 // GRA-53's `sessions-integration.test.ts` already measured this: two real
@@ -564,5 +624,77 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
     // Loaded from disk, not re-derived in memory: process 2 never saw the
     // stall itself, only `watermark.json`'s record that process 1 had.
     expect(resolved?.status).toBe("resolved");
+  });
+
+  // GRA-189: the device pass's own shape — a fresh MCP process whose live
+  // ring is genuinely empty (self-check: "the nothing-new branch with an
+  // empty buffer") loads a watermark an earlier process left on disk, and
+  // nothing has arrived since. This must read as "nothing new," never as
+  // "first call" (the watermark is not empty, it just has nothing past it)
+  // and never as "0s examined" (no digest exists to reclassify against,
+  // because process 1's last window-taking call was `timeline`, not
+  // `findings` — exactly the device's own sequence).
+  it("GRA-189: a fresh process's first findings call says 'nothing new', not 'first call', when its restored watermark has nothing new past it", async () => {
+    const sessionsRoot = await mkdtemp(path.join(tmpdir(), "porthole-watermark-nothing-new-"));
+    roots.push(sessionsRoot);
+
+    const hello: Hello = {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: 300_000,
+      collectors: [],
+      deviceId: "device-under-test",
+    };
+    fakeDevice = await FakeDevice.start({
+      hello: () => hello,
+      timeline: () => ({ events: [], droppedBefore: 0, now: Date.now() }),
+    });
+
+    // --- process 1: sees the stall, calls `timeline` (never `findings`) ---
+    const device1 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline1 = new TimelineServer(device1, 0);
+    devices.push(device1);
+    timelines.push(timeline1);
+    const { server: server1 } = createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    device1.start();
+    await waitUntil(() => device1.hello !== null, 10_000);
+
+    const target1 = timeline1.buffer().length + 1;
+    fakeDevice.emit("blocked", 1_000, { durationMs: 6_200, stack: "x" });
+    await waitUntil(() => timeline1.buffer().length >= target1, 10_000);
+    await device1.sessions!.flush();
+
+    const client1 = await connect(server1);
+    clients.push(client1);
+    const setup = await client1.callTool("timeline", {});
+    expect(setup.isError).toBeFalsy();
+
+    device1.stop();
+    timeline1.stop();
+    server1.close();
+
+    // --- process 2: same app, same device, a fresh MCP server, nothing new
+    const device2 = new DeviceClient("127.0.0.1", fakeDevice.port, sessionsRoot);
+    const timeline2 = new TimelineServer(device2, 0);
+    devices.push(device2);
+    timelines.push(timeline2);
+    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    device2.start();
+    await waitUntil(() => device2.hello !== null, 10_000);
+    expect(timeline2.buffer().length).toBe(0); // the live ring really is empty
+
+    const client2 = await connect(server2);
+    clients.push(client2);
+    const result = await client2.callTool("findings", { since: "last" });
+    expect(result.isError).toBeFalsy();
+    expect(result.text).not.toMatch(/first call this session/i);
+    expect(result.text).toMatch(/nothing new/i);
+    const payload = result.json as { eventsExamined: number; window: { from: number; to: number; ms: number } };
+    expect(payload.eventsExamined).toBe(0);
+    expect(payload.window.ms).toBe(0);
   });
 });

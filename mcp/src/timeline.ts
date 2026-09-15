@@ -9,7 +9,7 @@ import { extname, resolve, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { isConnected, isHandshaking, type ConnectionState, type DeviceClient, type DeviceEvent } from "./device.js";
 import { askTrace, findTraceProcessor, parseRows, runScript, why, QUESTIONS, type RunResult } from "./perfetto.js";
-import { buildTrace } from "./trace.js";
+import { buildTrace, resolveProfile } from "./trace.js";
 import { fromBootMs, fromTraceClockSnapshot, toBootNs } from "./moment.js";
 import { UNKNOWN_DEVICE_ID, fillWindowFromDisk, sessionsRoot, type SessionEvent } from "./sessions.js";
 import { InvalidScenarioError, buildSavedTrace, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
@@ -496,12 +496,22 @@ export class TimelineServer {
           return;
         }
 
+        // GRA-185: searched over the *unwindowed* `events` (the whole live
+        // ring), not `within` — a profile event before `from` still counts,
+        // which is the entire point of this ticket.
+        const profile = resolveProfile({
+          liveEvents: events,
+          windowTo: to,
+          sessionProfile: this.device.sessions?.currentMeta()?.profile ?? null,
+          hello: (this.device.hello as unknown as Record<string, unknown>) ?? null,
+        });
         const live = buildTrace({
           scenario: "live",
           events: within,
           hello: (this.device.hello as unknown as Record<string, unknown>) ?? null,
           durationMs: Math.max(0, to - from),
           withEvents: false,
+          profile,
         });
 
         type Sourced = (typeof live.findings)[number] & { source: "porthole" | "trace" };
@@ -787,6 +797,14 @@ export class TimelineServer {
         const scenario = scenarioInput ?? defaultScenarioName(from, to);
         const outPath = defaultOutPath(resolveProjectRoot().directory, scenario);
 
+        // GRA-185: same resolution `/api/findings` above uses — the whole
+        // live ring (`this.events`), not the window-restricted `events`.
+        const profile = resolveProfile({
+          liveEvents: this.events,
+          windowTo: to,
+          sessionProfile: this.device.sessions?.currentMeta()?.profile ?? null,
+          hello,
+        });
         const trace = buildSavedTrace({
           events,
           hello,
@@ -794,6 +812,7 @@ export class TimelineServer {
           coveredFrom: merged.coveredFrom,
           coveredTo: merged.coveredTo,
           scenario,
+          profile,
         });
         await writeSavedTrace(trace, outPath);
 

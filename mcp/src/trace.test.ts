@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceEvent } from "./device.js";
 import { compareMetrics } from "./report.js";
-import { findingsOf, frameBudgetMs, metricsOf } from "./trace.js";
+import { buildTrace, describeBudget, findingsOf, frameBudgetMs, metricsOf, resolveProfile } from "./trace.js";
 
 function event(name: string, t: number, data: Record<string, unknown> = {}): DeviceEvent {
   return { event: name, t, seq: t, data };
@@ -31,6 +31,165 @@ describe("frameBudgetMs", () => {
     // Calling a 10ms frame fine on a 120Hz panel is wrong, so the fallback has
     // to be the conservative one rather than whatever arrived.
     expect(frameBudgetMs(0)).toBe(16.7);
+  });
+});
+
+describe("describeBudget", () => {
+  it("names the Hz when the profile was actually observed", () => {
+    expect(describeBudget({ refreshHz: 120, assumed: false })).toBe("8.3ms at 120Hz");
+  });
+
+  it("flags a guess as a guess rather than printing it as fact (GRA-185)", () => {
+    expect(describeBudget({ refreshHz: 60, assumed: true })).toBe(
+      "16.7ms (assumed 60Hz; no display profile seen)",
+    );
+  });
+});
+
+// GRA-185: `findings` used to derive the device profile from a `device`
+// event found *inside the window being asked about*, which silently fell
+// back to 60Hz the moment a window started after `DeviceCollector`'s one
+// startup profile event — exactly the device pass's own reproduction (a
+// 120Hz panel reporting "budget 16.7ms at 60Hz" for a window minutes into
+// the session). `resolveProfile` is the one place this is decided now, and
+// every caller resolves it through this function rather than its own copy.
+describe("resolveProfile", () => {
+  const profileEvent = (t: number, over: Record<string, unknown> = {}): DeviceEvent =>
+    event("device", t, {
+      kind: "profile",
+      model: "Pixel 9 Pro Fold",
+      sdkInt: 37,
+      abi: "arm64-v8a",
+      cores: 8,
+      deviceRamMb: 12_288,
+      refreshHz: 120,
+      lowRamDevice: "false",
+      ...over,
+    });
+
+  it("falls back to assumed 60Hz when no profile is seen anywhere (missing-input case)", () => {
+    const resolved = resolveProfile({ liveEvents: [], windowTo: 10_000, sessionProfile: null, hello: null });
+    expect(resolved).toEqual({ assumed: true, refreshHz: 60 });
+  });
+
+  it("finds a live-buffer profile at or before the window's end regardless of the window's start — the GRA-185 bug", () => {
+    // The startup profile fired at t=0; the window being asked about starts
+    // long after it. The old code searched only the *windowed* events and
+    // missed this; `liveEvents` here is the whole ring, unfiltered by `from`.
+    const resolved = resolveProfile({
+      liveEvents: [profileEvent(0)],
+      windowTo: 400_300,
+      sessionProfile: null,
+      hello: null,
+    });
+    expect(resolved).toMatchObject({ assumed: false, refreshHz: 120 });
+  });
+
+  it("ignores a profile event after the window's end and falls through instead of using it", () => {
+    const resolved = resolveProfile({
+      liveEvents: [profileEvent(9_000)],
+      windowTo: 5_000,
+      sessionProfile: null,
+      hello: null,
+    });
+    expect(resolved).toEqual({ assumed: true, refreshHz: 60 });
+  });
+
+  it("falls back to the session's own meta.json profile when the live buffer has none (profile only on disk)", () => {
+    const sessionProfile = {
+      model: "Pixel 9 Pro Fold",
+      sdkInt: 37,
+      abi: "arm64-v8a",
+      cores: 8,
+      deviceRamMb: 12_288,
+      refreshHz: 120,
+      lowRamDevice: false,
+    };
+    const resolved = resolveProfile({ liveEvents: [], windowTo: 10_000, sessionProfile, hello: null });
+    expect(resolved).toEqual({ assumed: false, refreshHz: 120, full: sessionProfile });
+  });
+
+  it("prefers the live buffer's profile over the session's disk one when both exist", () => {
+    const onDisk = {
+      model: "old",
+      sdkInt: 30,
+      abi: "x",
+      cores: 4,
+      deviceRamMb: 4_096,
+      refreshHz: 60,
+      lowRamDevice: false,
+    };
+    const resolved = resolveProfile({
+      liveEvents: [profileEvent(0)],
+      windowTo: 10_000,
+      sessionProfile: onDisk,
+      hello: null,
+    });
+    expect(resolved.refreshHz).toBe(120);
+  });
+
+  it("takes the most recent of several live profile events at or before the window's end", () => {
+    const resolved = resolveProfile({
+      liveEvents: [profileEvent(0, { refreshHz: 60 }), profileEvent(1_000, { refreshHz: 90 })],
+      windowTo: 5_000,
+      sessionProfile: null,
+      hello: null,
+    });
+    expect(resolved.refreshHz).toBe(90);
+  });
+});
+
+// GRA-185: the same reproduction end to end — `buildTrace` fed a windowed
+// event list that does not itself contain the startup profile, exactly what
+// `findings` hands it once a window starts after startup, must still report
+// the real refresh rate once the profile is resolved through the live
+// buffer rather than through `events` alone.
+describe("buildTrace resolves the profile it is handed, not one it goes looking for", () => {
+  it("keeps the observed refresh rate when the window misses the profile event but the live buffer has it", () => {
+    const profile = event("device", 0, {
+      kind: "profile",
+      model: "Pixel 9 Pro Fold",
+      sdkInt: 37,
+      refreshHz: 120,
+      lowRamDevice: "false",
+    });
+    const windowed = [event("frame", 400_300, { missedFrames: 1, totalMs: 20 })];
+    const resolved = resolveProfile({
+      liveEvents: [profile, ...windowed],
+      windowTo: 400_300,
+      sessionProfile: null,
+      hello: null,
+    });
+
+    const trace = buildTrace({
+      scenario: "live",
+      events: windowed, // the merged/windowed view findings hands buildTrace — no profile event in it
+      hello: null,
+      durationMs: 300,
+      withEvents: false,
+      profile: resolved,
+    });
+
+    expect(trace.device.refreshHz).toBe(120);
+    expect(trace.findings[0].title).toContain("8.3ms at 120Hz");
+    expect(trace.findings[0].confidence).toBe("observed");
+  });
+
+  it("marks the budget assumed, not observed, when nothing resolved a real profile", () => {
+    const windowed = [event("frame", 5, { missedFrames: 1, totalMs: 20 })];
+    const resolved = resolveProfile({ liveEvents: [], windowTo: 5, sessionProfile: null, hello: null });
+
+    const trace = buildTrace({
+      scenario: "live",
+      events: windowed,
+      hello: null,
+      durationMs: 5,
+      withEvents: false,
+      profile: resolved,
+    });
+
+    expect(trace.findings[0].confidence).toBe("correlated");
+    expect(trace.findings[0].title).toContain("assumed 60Hz; no display profile seen");
   });
 });
 
@@ -256,6 +415,24 @@ describe("findingsOf", () => {
     const events = [event("frame", 5, { missedFrames: 1, totalMs: 20 })];
     expect(findingsOf(events, [], 120)[0].title).toContain("8.3ms at 120Hz");
     expect(findingsOf(events, [], 60)[0].title).toContain("16.7ms at 60Hz");
+  });
+
+  // GRA-185: `assumed` defaults to false, so every call above (a bare
+  // refresh rate, no opinion on how it was derived) keeps reading as
+  // observed — this pins the default itself, not merely the true/false
+  // branches, so a signature change that silently flipped the default
+  // would fail here.
+  it("defaults `assumed` to false — a bare refreshHz still reads as observed", () => {
+    const events = [event("frame", 5, { missedFrames: 1, totalMs: 20 })];
+    expect(findingsOf(events, [], 60)[0].confidence).toBe("observed");
+  });
+
+  it("reports the frame budget as a guess, correlated not observed, when the refresh rate is assumed", () => {
+    const events = [event("frame", 5, { missedFrames: 1, totalMs: 20 })];
+    const findings = findingsOf(events, [], 60, true);
+    expect(findings[0].confidence).toBe("correlated");
+    expect(findings[0].title).toContain("assumed 60Hz; no display profile seen");
+    expect(findings[0].title).not.toContain("at 60Hz)");
   });
 
   it("reports a blocking collection but not a concurrent one", () => {

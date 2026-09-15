@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
+import { profileFromEvent, type ProfileData } from "./trace.js";
 
 /**
  * GRA-53: sessions on disk.
@@ -156,6 +157,16 @@ export interface SessionMeta {
   firstT: number | null;
   lastT: number | null;
   eventCounts: Record<string, number>;
+  /**
+   * GRA-185: the device profile `SessionWriter.append` captured off the wire
+   * for this session, once a `device`/`profile` event has flowed through —
+   * absent (undefined) on a session written before this field existed, and
+   * on any session whose profile event, for whatever reason, never arrived.
+   * `resolveProfile` (trace.ts) reads this as its second-choice source, so a
+   * window that starts after the live ring has rolled the startup event out
+   * still gets the real refresh rate rather than the 60Hz fallback.
+   */
+  profile?: ProfileData | null;
   /** Wall clock (`Date.now()`) the session directory was created. */
   createdAt: number;
   /** Wall clock of the most recent flush. What retention ages a session by. */
@@ -273,6 +284,17 @@ export class SessionWriter {
    */
   append(event: SessionEvent): void {
     if (!this.dir) return;
+    // GRA-185: captured here, off the wire, rather than read back out of
+    // `events.ndjson` later — `meta.json` is the cheap, already-flushed
+    // record `resolveProfile` (trace.ts) consults once the live ring has
+    // moved past the one moment this event exists (`DeviceCollector` emits
+    // it once, at startup). `this.meta` is set before any event can reach
+    // here (`open()` awaited by `device.ts`'s `hello` handler, `append()`
+    // only ever called after), so this never needs to invent one.
+    if (this.meta) {
+      const profile = profileFromEvent(event as unknown as Parameters<typeof profileFromEvent>[0]);
+      if (profile) this.meta.profile = profile;
+    }
     this.queue.push(event);
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
