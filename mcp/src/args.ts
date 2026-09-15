@@ -52,6 +52,50 @@ export function parsePort(raw: string | undefined, option: string): number | Par
   return { message: `${option} ${JSON.stringify(raw)} is not a number` };
 }
 
+/**
+ * A device-uptime millisecond value — `porthole save`'s `--from`/`--to`.
+ * Same shape discipline as `parsePort`: a run of decimal digits only, so
+ * `"1e4"` or `" 100 "` (both finite per `Number()`) are refused rather than
+ * silently accepted. Unlike a port, 0 is a legitimate value (the very start
+ * of the uptime clock) and there is no upper bound — a session can run for
+ * days.
+ */
+export function parseMillis(raw: string | undefined, option: string): number | ParseError {
+  if (raw === undefined || raw === "") {
+    return { message: `${option} needs a millisecond value` };
+  }
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (/^\d+\.\d+$/.test(raw)) {
+    return { message: `${option} ${raw} must be a whole number` };
+  }
+  return { message: `${option} ${JSON.stringify(raw)} is not a number` };
+}
+
+/**
+ * A relative lookback for `porthole save --since`: `10m`, `90s`, `2h`, or a
+ * bare millisecond count — the ticket's own examples, all a single unit, so
+ * a compound duration like `1h30m` is refused rather than half-parsed.
+ * Returns milliseconds.
+ */
+export function parseDuration(raw: string | undefined, option: string): number | ParseError {
+  if (raw === undefined || raw === "") {
+    return { message: `${option} needs a duration (e.g. 10m, 90s, 2h, or a millisecond count)` };
+  }
+  const MULTIPLIER_MS: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 };
+  const bare = /^\d+$/.test(raw) ? { value: Number(raw), unitMs: 1 } : null;
+  const suffixed = /^(\d+)(ms|s|m|h)$/.exec(raw);
+  const parsed = bare ?? (suffixed ? { value: Number(suffixed[1]), unitMs: MULTIPLIER_MS[suffixed[2]] } : null);
+  if (!parsed) {
+    return {
+      message: `${option} ${JSON.stringify(raw)} is not a duration (use 10m, 90s, 2h, or a millisecond count)`,
+    };
+  }
+  if (parsed.value <= 0) {
+    return { message: `${option} ${raw} must be positive` };
+  }
+  return parsed.value * parsed.unitMs;
+}
+
 const FAIL_ON_VALUES = ["nothing", "error", "regression"] as const;
 
 export type FailOn = (typeof FAIL_ON_VALUES)[number];

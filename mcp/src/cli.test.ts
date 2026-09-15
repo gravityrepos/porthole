@@ -33,7 +33,7 @@ process.argv = ["node", "cli.js"];
 const exitDuringImport = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
 const stdoutDuringImport = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
-const { parse } = await import("./cli.js");
+const { parse, parseSave } = await import("./cli.js");
 
 process.argv = originalArgv;
 exitDuringImport.mockRestore();
@@ -133,6 +133,99 @@ describe("parse() wiring", () => {
   it("accepts a valid --serial without exiting", () => {
     const options = parse(["--serial", "emulator-5554", "--no-forward", "--no-open"]);
     expect(options.serial).toBe("emulator-5554");
+    expect(exit).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * GRA-54: `porthole save`'s own argv loop. Same reasoning as "parse()
+ * wiring" above — parseDuration/parseMillis being correct in isolation
+ * (args.test.ts) proves nothing about this loop, which decides *whether*
+ * and *when* to call them and what to do with a refusal.
+ */
+describe("parseSave() wiring", () => {
+  let exit: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    exit.mockRestore();
+    stderr.mockRestore();
+  });
+
+  function stderrText(): string {
+    return stderr.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("exits 2 with no window at all — neither --since nor --from/--to given", () => {
+    expect(() => parseSave([])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("give either --since <duration> or both --from and --to");
+  });
+
+  it("exits 2 when --since has no value", () => {
+    expect(() => parseSave(["--since"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--since needs a duration");
+  });
+
+  it("exits 2 when --since is malformed", () => {
+    expect(() => parseSave(["--since", "10x"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain('"10x" is not a duration');
+  });
+
+  it("exits 2 when --from is given without --to", () => {
+    expect(() => parseSave(["--from", "1000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--from and --to must be given together");
+  });
+
+  it("exits 2 when --to is given without --from", () => {
+    expect(() => parseSave(["--to", "5000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--from and --to must be given together");
+  });
+
+  it("exits 2 when --since is combined with --from/--to", () => {
+    expect(() => parseSave(["--since", "10m", "--from", "0", "--to", "1000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--since cannot be combined with --from/--to");
+  });
+
+  it("exits 2 when --from has a malformed value", () => {
+    expect(() => parseSave(["--from", "abc", "--to", "1000"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain('--from "abc" is not a number');
+  });
+
+  it("exits 2 when --scenario has no value", () => {
+    expect(() => parseSave(["--scenario", "--since", "10m"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--scenario needs a value");
+  });
+
+  it("exits 2 on an unknown option", () => {
+    expect(() => parseSave(["--nonsense"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("unknown option: --nonsense");
+  });
+
+  it("accepts --since without exiting", () => {
+    const options = parseSave(["--since", "10m", "--scenario", "checkout"]);
+    expect(options).toEqual({ sinceMs: 600_000, scenario: "checkout" });
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("accepts --from/--to without exiting", () => {
+    const options = parseSave(["--from", "1000", "--to", "5000", "--out", "trace.json"]);
+    expect(options).toEqual({ from: 1_000, to: 5_000, out: "trace.json" });
     expect(exit).not.toHaveBeenCalled();
   });
 });

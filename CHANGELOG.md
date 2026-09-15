@@ -78,6 +78,13 @@ PR that makes the change, not after the fact.
   optional `deviceId` (`Settings.Secure.ANDROID_ID`) in `hello`, and the ring
   buffer's capacity is now configurable via `porthole { ringCapacity.set(…) }`
   (GRA-53).
+- `save_moment` (MCP) and `porthole save`/`porthole sessions` (CLI): turn a
+  window of what already happened into a trace file, in exactly the format
+  `capture` writes, without having to reproduce the problem with a recording
+  running. `clippedMs` says how much of the requested window was never
+  recorded, in the same vocabulary `findings` uses; `porthole sessions` lists
+  every session on disk, across every app and device, newest first, with the
+  most recently active one marked (GRA-54).
 
 ### Fixed
 

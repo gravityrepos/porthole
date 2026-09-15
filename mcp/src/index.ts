@@ -27,10 +27,12 @@ import { pathToFileURL } from "node:url";
 import { buildTrace, type Finding } from "./trace.js";
 import {
   UNKNOWN_DEVICE_ID,
+  clippedMsOf,
   fillWindowFromDisk,
   sessionsRoot as sessionsRootPath,
   type SessionEvent,
 } from "./sessions.js";
+import { buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, writeSavedTrace } from "./save.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -625,13 +627,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // neither the buffer nor any session on disk overlaps the window at
       // all, `coveredFrom`/`coveredTo` are null and the whole window is
       // honestly unrecorded.
-      const clipped =
-        merged.coveredFrom === null || merged.coveredTo === null
-          ? { start: span.ms, end: 0 }
-          : {
-              start: span.from < merged.coveredFrom ? merged.coveredFrom - span.from : 0,
-              end: span.to > merged.coveredTo ? span.to - merged.coveredTo : 0,
-            };
+      // GRA-54: the same function `save_moment`'s trace carries this exact
+      // number under, so the two cannot drift apart the way two hand-rolled
+      // copies of this formula eventually would (see clippedMsOf's own
+      // comment in sessions.ts).
+      const clipped = clippedMsOf(span.from, span.to, merged.coveredFrom, merged.coveredTo);
       const trace = buildTrace({
         // The same analyser the headless capture runs, pointed at the live
         // buffer instead of a recorded scenario. One analyser, so a finding
@@ -983,6 +983,86 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         notes: plan.notes,
       };
       return ok(describeCapture(result), result);
+    },
+  );
+
+  server.registerTool(
+    "save_moment",
+    {
+      title: "Save what just happened",
+      description:
+        "Turns a window of what already happened into a named trace file on disk, in exactly the " +
+        "format `capture` writes — `porthole report` and `porthole compare` work on it with no " +
+        "changes. For when the developer pokes the app, something bad happens, and only then wants " +
+        "to keep it: no need to reproduce it again with a recording running.\n\n" +
+        "Give it a window the way every other windowed tool takes one — `sinceMs`, or `from`/`to` " +
+        "quoted from a `findings` result — plus an optional `scenario` name. `scenario` defaults to " +
+        "`moment-<from>-<to>` on the uptime clock when omitted, and `out` defaults to " +
+        "`.porthole/traces/<scenario>.json`, the same directory `capture_system_trace` uses.\n\n" +
+        "The events come from the same merged live-buffer-plus-disk view `findings` and " +
+        "`what_was_happening` already use, so a save over a window quoted from a `findings` result " +
+        "produces the same findings `findings` reported for it. `clippedMs` in the result says how " +
+        "much of the requested window was never actually recorded — a window reaching before the " +
+        "session started reports that honestly rather than silently writing a shorter trace.",
+      inputSchema: {
+        ...windowShape,
+        scenario: z
+          .string()
+          .optional()
+          .describe("What to call this. Defaults to moment-<from>-<to> on the uptime clock."),
+        out: z
+          .string()
+          .optional()
+          .describe("Where to write the trace. Defaults to .porthole/traces/<scenario>.json."),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ sinceMs, from, to, scenario, out }): Promise<ToolResult> => {
+      const span = resolveWindow({ sinceMs, from, to });
+      if (!span) {
+        // Same shape as ask_system_trace's empty-ring refusal: there is
+        // genuinely no window to save here, nothing partial to write.
+        return fail(
+          "No window to save: nothing is buffered live and no absolute `from`/`to` was given. " +
+            "Quote a `window` from an earlier `findings` result, or pass `from`/`to` directly.",
+        );
+      }
+
+      const merged = await mergeWithDisk(span.from, span.to);
+      const events = merged.events as unknown as DeviceEvent[];
+      // Post-mortem is the whole point of this tool, so `device.hello` alone
+      // is not enough — the app may well have exited since the moment being
+      // saved. Falls back to the last confirmed process's own hello, the
+      // same source `currentIdentity()` already trusts for exactly this.
+      const helloLike = device.hello ?? device.lastExited?.hello ?? null;
+      const hello = (helloLike as unknown as Record<string, unknown>) ?? null;
+
+      const resolvedScenario = scenario ?? defaultScenarioName(span.from, span.to);
+      const outPath = out ?? defaultOutPath(resolveProjectRoot().directory, resolvedScenario);
+
+      const trace = buildSavedTrace({
+        events,
+        hello,
+        window: { from: span.from, to: span.to },
+        coveredFrom: merged.coveredFrom,
+        coveredTo: merged.coveredTo,
+        scenario: resolvedScenario,
+      });
+      await writeSavedTrace(trace, outPath);
+
+      const findings = trace.findings.map(withFollowUp);
+      return ok(
+        `Saved "${resolvedScenario}" (${trace.findings.length} finding(s)) to ${outPath}.` +
+          coverageNote(trace.clippedMs),
+        {
+          scenario: resolvedScenario,
+          out: outPath,
+          window: { from: span.from, to: span.to, ms: span.ms },
+          clippedMs: trace.clippedMs,
+          metrics: trace.metrics,
+          findings,
+        },
+      );
     },
   );
 

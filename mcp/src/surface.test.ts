@@ -251,7 +251,7 @@ function readmeToolNames(): string[] {
 }
 
 describe("the tool surface", () => {
-  // The 16 names `index.ts` registers, in registration order, verified
+  // The 17 names `index.ts` registers, in registration order, verified
   // against the running server rather than copied from the ticket that
   // asked for this test — see the "registers exactly these tools" case
   // below, which is what would have caught this list being wrong.
@@ -261,6 +261,7 @@ describe("the tool surface", () => {
     "system_context",
     "ask_system_trace",
     "capture_system_trace",
+    "save_moment",
     "what_was_happening",
     "recompositions",
     "semantics_tree",

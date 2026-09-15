@@ -7,8 +7,9 @@ import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { resolveProjectRoot, runAdb } from "./adb.js";
 import { bootPortholeServer } from "./index.js";
-import { parsePort, requiredValue } from "./args.js";
+import { parseDuration, parseMillis, parsePort, requiredValue } from "./args.js";
 import { sessionsRoot } from "./sessions.js";
+import { listSessionsText, saveFromSessions, type SaveFromSessionsOptions } from "./save.js";
 
 /**
  * The human entry point.
@@ -31,6 +32,8 @@ porthole — a window into a running Android app
 
   porthole ui                          open the live timeline
   porthole capture --scenario <name> -- <command>   record a run to a trace
+  porthole save (--since <dur> | --from <ms> --to <ms>)   save what already happened
+  porthole sessions                    list what is recorded on disk
   porthole report <trace.json>         what the run is worth looking at
   porthole compare <base> <trace>      regressions against a baseline
   porthole mcp                         the MCP server (stdio)
@@ -98,6 +101,105 @@ export function parse(argv: string[]): Options {
       process.stderr.write(`unknown option: ${arg}\n${USAGE}`);
       process.exit(2);
     }
+  }
+  return options;
+}
+
+export const SAVE_USAGE = `
+porthole save — turn a window of what already happened into a trace file
+
+  porthole save (--since <duration> | --from <ms> --to <ms>) [options]
+
+  --since <duration>   how far back to look: 10m, 90s, 2h, or a millisecond count
+  --from <ms>          absolute start, device uptime clock (quote a finding's window)
+  --to <ms>            absolute end, same clock
+  --scenario <name>    what to call it. Defaults to moment-<from>-<to>
+  --out <file>         where to write the trace. Defaults to .porthole/traces/<scenario>.json
+
+Resolves against whichever session on disk was most recently written to —
+there is no running MCP server here to ask "what counts as now" of.
+
+  porthole sessions    list every session recorded on disk
+`;
+
+export interface SaveCliOptions {
+  scenario?: string;
+  sinceMs?: number;
+  from?: number;
+  to?: number;
+  out?: string;
+}
+
+/**
+ * GRA-54. Same discipline as `parseCapture`/`parse()` above: every value
+ * goes through a validator that names the option and refuses rather than
+ * silently accepting `NaN` or swallowing the next flag as its own value.
+ * Exported, like `parse()`, so a test can drive the argv loop itself and not
+ * just the pure validators it calls (deleting the `process.exit(2)`
+ * branches below would otherwise leave every prior test green).
+ */
+export function parseSave(argv: string[]): SaveCliOptions {
+  const options: SaveCliOptions = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--scenario") {
+      const value = requiredValue(argv[++i], "--scenario");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.scenario = value;
+    } else if (arg === "--since") {
+      const value = parseDuration(argv[++i], "--since");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.sinceMs = value;
+    } else if (arg === "--from") {
+      const value = parseMillis(argv[++i], "--from");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.from = value;
+    } else if (arg === "--to") {
+      const value = parseMillis(argv[++i], "--to");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.to = value;
+    } else if (arg === "--out") {
+      const value = requiredValue(argv[++i], "--out");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.out = value;
+    } else if (arg === "--help" || arg === "-h") {
+      process.stdout.write(SAVE_USAGE);
+      process.exit(0);
+    } else {
+      process.stderr.write(`unknown option: ${arg}\n${SAVE_USAGE}`);
+      process.exit(2);
+    }
+  }
+
+  const hasSince = options.sinceMs !== undefined;
+  const hasFrom = options.from !== undefined;
+  const hasTo = options.to !== undefined;
+  if (hasSince && (hasFrom || hasTo)) {
+    process.stderr.write(`--since cannot be combined with --from/--to\n${SAVE_USAGE}`);
+    process.exit(2);
+  }
+  if (hasFrom !== hasTo) {
+    process.stderr.write(`--from and --to must be given together\n${SAVE_USAGE}`);
+    process.exit(2);
+  }
+  if (!hasSince && !hasFrom) {
+    process.stderr.write(`give either --since <duration> or both --from and --to\n${SAVE_USAGE}`);
+    process.exit(2);
   }
   return options;
 }
@@ -236,6 +338,17 @@ if (command === "ui") {
     if (!forwarded.ok) console.error(forwarded.output);
   }
   process.exit(await capture(options));
+} else if (command === "save") {
+  const options = parseSave(rest);
+  const projectRoot = resolveProjectRoot().directory;
+  const saveOptions: SaveFromSessionsOptions = { root: sessionsRoot(projectRoot), projectRoot, ...options };
+  const result = await saveFromSessions(saveOptions);
+  process.stderr.write(`${result.message}\n`);
+  process.exit(result.code);
+} else if (command === "sessions") {
+  const result = await listSessionsText(sessionsRoot(resolveProjectRoot().directory));
+  process.stdout.write(`${result.message}\n`);
+  process.exit(result.code);
 } else if (command === "report") {
   if (!rest[0]) {
     process.stderr.write("porthole report <trace.json>\n");
