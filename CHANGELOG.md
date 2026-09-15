@@ -215,6 +215,10 @@ PR that makes the change, not after the fact.
 - `porthole_status`'s `exitTrace` now accepts the ISO-8601 timestamp
   `exits.recent` itself prints (`at`), not only the epoch-milliseconds
   `timestamp` it already accepted (GRA-188).
+- `capture_system_trace` no longer freezes the rest of the MCP server for
+  the length of a recording — its three `adb` calls run through an
+  asynchronous, awaited spawn instead of a blocking one — and its label
+  scan no longer reads the whole trace into memory to find them (GRA-89).
 
 ## [0.1.0] - 2026-09-11
 

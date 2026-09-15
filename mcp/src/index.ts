@@ -7,7 +7,7 @@ import { z } from "zod";
 import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir, runAdb, runAdbAsync } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf, toBoot } from "./moment.js";
 import {
   CPU_PROBE,
@@ -44,11 +44,41 @@ const HOST = process.env.PORTHOLE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
 const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
 
+/**
+ * GRA-89: how much longer than the plan's own recording duration
+ * `capture_system_trace` gives the on-device `perfetto` invocation before
+ * presuming it wedged — adb's own connect/attach overhead plus whatever
+ * margin covers a slow device, on top of the `-t Ns` the command itself
+ * asked to run for.
+ */
+const CAPTURE_ADB_TIMEOUT_BUFFER_MS = 30_000;
+
 export interface PortholeServerOptions {
   /** Injected in tests; a real one is created in `createPortholeServer` otherwise. */
   device?: DeviceClient;
   timeline?: TimelineServer;
   version?: string;
+  /**
+   * Test-only. Passed straight through to every `runAdbAsync` call
+   * `capture_system_trace` makes; every real caller leaves it undefined, in
+   * which case each spawned adb inherits `process.env` exactly as it always
+   * did. This exists so a test can point `findAdb()` at a stand-in adb that
+   * needs its own `NODE_OPTIONS` (or any other variable) without mutating
+   * the real `process.env` — a global shared with every other test running
+   * in the same worker. See `runAdbAsync`'s own `env` option in `adb.ts` for
+   * the incident that made this worth a parameter rather than a shared
+   * global.
+   */
+  adbEnv?: NodeJS.ProcessEnv;
+  /**
+   * Test-only, same reasoning as `adbEnv`: overrides `findAdb()`'s own
+   * resolution for every `runAdbAsync` call `capture_system_trace` makes, so
+   * a test can point it at a real, controllable process without setting
+   * `PORTHOLE_SDK_DIR`/`ANDROID_HOME` on the real `process.env` — again a
+   * global, and again shared with `adb.test.ts`'s own tests of that exact
+   * resolution, running concurrently in the same worker.
+   */
+  adbBinary?: string;
 }
 
 export interface PortholeServer {
@@ -152,6 +182,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   // branch only runs when nothing was injected.
   const device = options.device ?? new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory));
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
+  const adbEnv = options.adbEnv;
+  const adbBinary = options.adbBinary;
   // GRA-55: one watermark per process (see watermark.ts's module doc comment
   // for why not per connection), re-opened against whichever session
   // directory is current every time a tool runs — cheap, since `open()` is a
@@ -1507,7 +1539,26 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const apps = packages?.length ? packages : device.hello ? [device.hello.packageName] : [];
       const plan = planCapture({ seconds, categories, apps });
 
-      const recorded = runAdb(captureArgs(plan), serial);
+      // GRA-89: async, awaited spawn for all three adb calls below, not
+      // `runAdb`'s `spawnSync` — that used to freeze the whole MCP server
+      // for the entire recording (up to two minutes at this tool's own
+      // 120s maximum): nothing read the device socket, nothing answered
+      // another tool call, and the timeline WebSocket went silent for as
+      // long as each call took. The recording gets its own, longer timeout
+      // (the plan's own duration plus room for adb's own startup and
+      // teardown) rather than `runAdbAsync`'s short default, which exists
+      // for calls — the pull, the cleanup — that are supposed to be quick.
+      const recorded = await runAdbAsync(captureArgs(plan), {
+        serial,
+        env: adbEnv,
+        binary: adbBinary,
+        timeoutMs: plan.seconds * 1000 + CAPTURE_ADB_TIMEOUT_BUFFER_MS,
+        onProgress: (elapsedMs) =>
+          process.stderr.write(
+            `[porthole] capture_system_trace: recording, ${Math.round(elapsedMs / 1000)}s of ` +
+              `${plan.seconds}s elapsed...\n`,
+          ),
+      });
       if (!recorded.ok) {
         return fail(
           `Could not record: ${recorded.output}\n` +
@@ -1521,9 +1572,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       mkdirSync(dir, { recursive: true });
       const local = join(dir, plan.devicePath.split("/").pop() as string);
 
-      const pulled = runAdb(["pull", plan.devicePath, local], serial);
+      const pulled = await runAdbAsync(["pull", plan.devicePath, local], { serial, env: adbEnv, binary: adbBinary });
       // Tidy up regardless: the device's trace directory is not ours to fill.
-      runAdb(["shell", "rm", "-f", plan.devicePath], serial);
+      await runAdbAsync(["shell", "rm", "-f", plan.devicePath], { serial, env: adbEnv, binary: adbBinary });
 
       if (!pulled.ok) return fail(`Recorded, but could not pull it: ${pulled.output}`);
 
@@ -1533,7 +1584,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         bytes,
         seconds: plan.seconds,
         categories: plan.categories,
-        portholeLabels: countPortholeLabels(readFileSync(local)),
+        // GRA-89: streamed in chunks by countPortholeLabels itself now, not
+        // a whole-file readFileSync handed to it — see systrace.ts.
+        portholeLabels: await countPortholeLabels(local),
         notes: plan.notes,
       };
       return ok(describeCapture(result), result);
