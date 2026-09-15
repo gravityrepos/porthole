@@ -3,29 +3,48 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent, Hello } from "./device.js";
+import { findTraceProcessor } from "./perfetto.js";
 import { TimelineServer } from "./timeline.js";
 
-// The only thing in here that touches the outside world. `restart` shells out
-// to adb, and a test that force-stopped whatever app happens to be installed
-// would be a worse bug than the one this file exists to catch.
+// The only thing in here that touches the outside world besides trace_processor
+// (see the next mock). `restart` shells out to adb, and a test that
+// force-stopped whatever app happens to be installed would be a worse bug
+// than the one this file exists to catch. `resolveProjectRoot` is stubbed to
+// a fixed answer — `process.cwd()`, the same default it would reach on its
+// own — purely so every test in this file agrees on where `tracesDir()`
+// (timeline.ts) looks, regardless of any PORTHOLE_PROJECT_ROOT some other
+// suite left behind in this worker.
 vi.mock("./adb.js", () => ({
   restartApp: vi.fn(() => ({ ok: true, output: "restarted" })),
+  resolveProjectRoot: vi.fn(() => ({ directory: process.cwd(), source: "cwd" as const })),
 }));
 
-// Stubbed so the /api/findings "trace" branch can actually be reached in
-// this test environment, which has no real trace_processor_shell — without
-// this, findTraceProcessor() returns null and the app-scoping note this
-// ticket changed (GRA-157) is unreachable, the same gap a weaker version of
-// this file's test for it left open.
-vi.mock("./perfetto.js", () => ({
-  findTraceProcessor: vi.fn(() => "/fake/trace_processor_shell"),
-  askTrace: vi.fn(async () => ({ findings: [], unanswered: [] })),
-}));
+// findTraceProcessor and askTrace are stubbed so the /api/findings "trace"
+// branch can actually be reached in this test environment, which has no real
+// trace_processor_shell by default — without this, findTraceProcessor()
+// returns null and the app-scoping note this ticket changed (GRA-157) is
+// unreachable, the same gap a weaker version of this file's test for it left
+// open. Everything else — parseRows, runScript, why — is the real
+// implementation: `/api/traces`' coverage computation (GRA-113) calls those
+// directly, and a fake binary path plus the real (spawn-based) `runScript`
+// together already produce the honest "could not run" answer most of this
+// file's coverage tests want, with no need to fake the parsing too.
+vi.mock("./perfetto.js", async () => {
+  const actual = await vi.importActual<typeof import("./perfetto.js")>("./perfetto.js");
+  return {
+    ...actual,
+    findTraceProcessor: vi.fn(() => "/fake/trace_processor_shell"),
+    askTrace: vi.fn(async () => ({ findings: [], unanswered: [] })),
+  };
+});
 
 /**
  * A running timeline server, on a real port, answering real requests.
@@ -308,10 +327,13 @@ describe("who the server answers", () => {
     expect(timeline.device.calls).toHaveLength(0);
   });
 
-  it("refuses the endpoint that takes a filesystem path", async () => {
+  it("refuses the endpoint that takes a trace id before even that gets validated", async () => {
     const response = await timeline.send("/api/findings?trace=C:/Windows/win.ini", {
       headers: { host: "evil.example.com" },
     });
+    // The origin gate runs first regardless of what the id validation below
+    // would have said about this value — a foreign caller learns nothing
+    // about which id shapes this endpoint accepts.
     expect(response.status).toBe(403);
   });
 
@@ -403,6 +425,24 @@ describe("GRA-157: the three sites that used to read hello without checking stat
   // raw server. The real DeviceClient's invariant is covered in
   // device.test.ts.
 
+  // GRA-113: `trace=` is now an id resolved against the traces directory,
+  // not an arbitrary path — the two tests below that scope a request to a
+  // trace need one that actually resolves, or they would see this ticket's
+  // own 400 before ever reaching the handshake/attachment branch they exist
+  // to pin. `askTrace` is mocked (see this file's top), so nothing ever
+  // reads this file's contents; it only has to exist.
+  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const traceFile = resolve(tracesDir, "gra157-fixture.pftrace");
+
+  beforeEach(async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(traceFile, "");
+  });
+
+  afterEach(async () => {
+    await rm(traceFile, { force: true });
+  });
+
   it("/api/health reports connected: false with app/device null while handshaking, not the old self-contradicting combo", async () => {
     timeline.device.state = "handshaking";
     const response = await timeline.send("/api/health");
@@ -438,9 +478,7 @@ describe("GRA-157: the three sites that used to read hello without checking stat
 
   it("/api/findings' trace-scoping note says 'still waiting' while handshaking, not 'not attached'", async () => {
     timeline.device.state = "handshaking";
-    const response = await timeline.send(
-      "/api/findings?trace=" + encodeURIComponent("/fake/trace.pftrace"),
-    );
+    const response = await timeline.send("/api/findings?trace=gra157-fixture");
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body) as { notes: string[] };
     expect(body.notes.join(" ")).toContain("Still waiting on the app's first check-in");
@@ -449,9 +487,7 @@ describe("GRA-157: the three sites that used to read hello without checking stat
 
   it("/api/findings' trace-scoping note says 'not attached' when there is no handshake in progress at all", async () => {
     timeline.device.state = "disconnected";
-    const response = await timeline.send(
-      "/api/findings?trace=" + encodeURIComponent("/fake/trace.pftrace"),
-    );
+    const response = await timeline.send("/api/findings?trace=gra157-fixture");
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body) as { notes: string[] };
     expect(body.notes.join(" ")).toContain("Not attached to an app");
