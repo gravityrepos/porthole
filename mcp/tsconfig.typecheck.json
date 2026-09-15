@@ -1,0 +1,34 @@
+{
+  // GRA-172: tsconfig.json's `exclude` keeps src/testing/** and *.test.ts
+  // out of the build on purpose — see that file's own comment — which means
+  // "tsc --noEmit clean" has only ever been a claim about src/ minus those.
+  // src/testing/ is not scaffolding any more: stripComments.ts is the shared
+  // engine the ConnectionState guard (surface.test.ts) and the
+  // PROTOCOL_VERSION drift scan (device.test.ts) both depend on, and neither
+  // guard's own type checker sees it.
+  //
+  // This is a second, standalone project, not a patch to tsconfig.json:
+  // it type-checks every .ts file under src/, testing/ included, with
+  // noEmit, so it can never write to dist/ and can never change what
+  // `npm run build` or `npm pack` produce. tsconfig.json keeps its existing
+  // exclusions unchanged; the published package is unaffected by this file
+  // existing at all.
+  //
+  // *.test.ts stays excluded here too, matching the build project — not
+  // because it's out of scope in principle, but because this ticket's own
+  // Owns line is mcp/tsconfig*.json, mcp/package.json and
+  // .github/workflows/**, not the test files themselves. The first run of
+  // this project (before this exclusion was added back) found 7 pre-existing
+  // type errors, all vitest mock-typing mismatches in capture.test.ts and
+  // cli.test.ts, none in src/testing/. Those are real and vitest's esbuild
+  // transform has never caught them either — but fixing them is a separate,
+  // wider change to files this ticket cannot touch. See GRA-172's Linear
+  // comment for the full first-run output; flagged there for a follow-up
+  // ticket rather than silently absorbed here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
