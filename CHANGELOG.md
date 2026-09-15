@@ -192,6 +192,11 @@ PR that makes the change, not after the fact.
   now clamps a negative `from` to 0 and refuses an inverted window (`from`
   after `to`) instead of handing one back, and `windowShape`'s `to`/`sinceMs`
   descriptions say what the code actually defaults to (GRA-120).
+- The server test suite no longer runs its loopback-socket rig files
+  (`save`, `watermark`, `surface`, `sessions-integration` and others)
+  concurrently with each other, which is what produced CI-only flakes on
+  the Windows and macOS runners; the split runs as two vitest projects with
+  the same total test count (GRA-183).
 
 ## [0.1.0] - 2026-09-11
 
