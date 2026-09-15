@@ -22,11 +22,18 @@ import type { FindingsPayload, Hello, TraceListing } from "./types";
  *
  * `TimelinePanel` is mocked the same way `App.render.test.tsx` mocks it
  * (canvas/ResizeObserver, not implemented by happy-dom) -- but as a
- * prop-capturing mock rather than `() => null`, specifically so a
- * regression that reintroduced a second fetcher *inside* TimelinePanel
- * would not be hidden by the mock itself: what is asserted is the fetch
- * count as observed from the network stand-in, which does not care whether
- * the caller was the real TimelinePanel or this one.
+ * prop-capturing mock rather than `() => null`, so this file can also assert
+ * `TimelinePanel` and `InsightsPanel` were handed the same `payload`.
+ *
+ * State the boundary plainly, the way `App.render.test.tsx` does for its own
+ * mocks: because `TimelinePanel` is mocked, this file proves App's own
+ * wiring constructs and schedules exactly one `FindingsLoader` (confirmed by
+ * mutation: duplicating that construction in `App.tsx` turns the "exactly
+ * one fetch" assertions below red) -- it says nothing about whether the
+ * *real* `TimelinePanel`'s internals could grow a fetch of their own, since
+ * the real component's body never runs here. Catching that would need an
+ * un-mocked `TimelinePanel`, which this workspace's render tests avoid for
+ * the canvas/ResizeObserver reason above.
  */
 
 vi.mock("./components/LogPane", () => ({ LogPane: () => null }));
