@@ -458,6 +458,28 @@ not emit query events for the act of looking. It refuses anything that is not a
 single SELECT, WITH, or a PRAGMA with no assignment in it. That is enforced on
 the device rather than assumed from the socket being loopback.
 
+### Timeline server API
+
+`GET /api/findings` is the one place a trace-derived finding and a Porthole
+finding sit in one list, on one severity vocabulary, each carrying a `source`.
+Add `?trace=<id>` to merge in what a system trace has to say about the same
+window; the id has to be one `GET /api/traces` just listed — an arbitrary
+filesystem path is refused, before anything is spawned.
+
+`GET /api/traces` lists what is under `.porthole/traces/`: `id` (the file name,
+without `.pftrace`), `bytes`, `recordedAt`, and `coverage` — the uptime window
+the capture covers, `{ from, to }` in the same clock every finding's own
+`window` is in, or `null` with a `reason` when trace_processor could not read
+it (missing binary, no clock snapshot). It is how a caller finds out whether a
+trace has anything to say about what is on screen right now without opening
+it.
+
+Every finding either carries a `window` in that clock or is marked
+`spanning: true` for one that is a property of the whole window asked about
+rather than a moment inside it — a thread-state aggregate summed across
+however many stretches the scheduler visited that state, say. Drawing either
+as a point under one frame would invent a precision neither one has.
+
 ## Capturing a run with nobody watching
 
 The timeline is for a person looking at their own app. On CI there is nobody

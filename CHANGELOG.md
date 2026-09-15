@@ -66,6 +66,13 @@ PR that makes the change, not after the fact.
   through `ask_system_trace` / `capture_system_trace`, backed by five
   curated SQL questions (jank, thread_states, binder, render, slices)
   interpreted into findings with a `severity` and a `confidence`.
+- A finding can now say when it happened: `window` (device uptime ms) or
+  `spanning: true` for one that is a property of the whole window asked
+  about rather than a moment inside it. The timeline server's `GET
+  /api/traces` lists what is under `.porthole/traces/` — id, bytes,
+  recorded-at, and the uptime window each capture covers — and
+  `/api/findings?trace=<id>` takes an id from that listing rather than an
+  arbitrary filesystem path, refused before anything is spawned (GRA-113).
 - `portholeTraceProcessor`, a Gradle task that fetches Perfetto's
   `trace_processor` (pinned v58.2, SHA-256 verified) and caches it under
   `~/.porthole/trace-processor/<version>/`.
