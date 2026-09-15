@@ -190,6 +190,45 @@ class ExitInfoTest {
         assertEquals(1, event.field("otherThreadCount")?.jsonPrimitive?.content?.toInt())
     }
 
+    // -- AC2: a crash names its exception class ------------------------------
+
+    @Test
+    fun `a crash's description, with the exception class in it, reaches the event redacted`() {
+        // QA round 1: deleting the description line left the suite green.
+        // Android puts the exception class in the record's description for
+        // REASON_CRASH; the event must carry it, through the same redaction
+        // as everything else (the message half of a description can carry
+        // a URL with a query string, so the URL rule applies here too).
+        val ring = EventRing()
+        val collector = ExitInfoCollector(
+            ring,
+            appPackages = listOf("com.example.shop."),
+            historyProvider = {
+                listOf(
+                    ExitRecord(
+                        timestamp = 11_000L,
+                        reason = ApplicationExitInfo.REASON_CRASH,
+                        importance = 100,
+                        pss = 1,
+                        rss = 1,
+                        description = "java.lang.IllegalStateException: checkout failed for https://api.example.com/cart?token=abc",
+                    ),
+                )
+            },
+        )
+
+        collector.install(app)
+
+        val event = exitEvents(ring).single()
+        val description = event.field("description")?.jsonPrimitive?.content
+            ?: error("expected a description field on a REASON_CRASH exit event")
+        assertTrue(
+            "expected the exception class in the description, got: $description",
+            description.startsWith("java.lang.IllegalStateException"),
+        )
+        assertTrue("expected the query-string value starred, got: $description", !description.contains("token=abc"))
+    }
+
     // -- redaction of the thread name -----------------------------------------
 
     @Test

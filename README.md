@@ -437,8 +437,8 @@ logs and device context all need nothing at all.
 ## What the timeline shows
 
 Lanes, sharing one clock: recompositions and state writes, dropped frames and
-main-thread stalls, navigation, http, db, work, memory, device context, process
-exits, and your own logcat at warning and above.
+main-thread stalls, navigation, http, db, work, memory, device context, and
+your own logcat at warning and above.
 
 A few of them are worth knowing about because the number means something
 specific. Dropped frames are counted in refreshes, so a 400ms freeze is not "one
