@@ -27,6 +27,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlin { jvmToolchain(17) }
+
+    // GRA-190: only the debug build type — the one every unit test here
+    // actually compiles and runs against (see AndroidWiring.kt: the plugin
+    // wires `runtime` to debug and `runtime-noop` to every other build
+    // type). Turning this on for release too would ask AGP to instrument a
+    // variant nothing tests, for a build type this module doesn't have.
+    buildTypes {
+        debug {
+            enableUnitTestCoverage = true
+        }
+    }
 }
 
 dependencies {

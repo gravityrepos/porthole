@@ -379,12 +379,32 @@ function defaultHandlers(): FakeDeviceHandlers {
 // waiting
 // ---------------------------------------------------------------------------
 
-/** Polls `predicate` until it is true. Everything here is async over a real socket. */
-export async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+/**
+ * Polls `predicate` until it is true. Everything here is async over a real
+ * socket.
+ *
+ * GRA-183: every prior timeout here read as a bare "waitUntil timed out
+ * after 10000ms" with a stack frame pointing at this function, not at the
+ * call site that actually hung — the useful line (which condition, in which
+ * test) had to be found by re-reading the surrounding source by hand every
+ * time. `description` closes that gap two ways: pass a string for a
+ * human-written reason ("device2 hello landed"), or omit it and this falls
+ * back to `predicate.toString()` — the arrow function's own source text,
+ * which vitest's esbuild transform leaves readable (original identifiers,
+ * no minification) even though the *values* those identifiers held are
+ * long gone by the time the error is thrown. Either way the timeout names
+ * the condition instead of making a reader reconstruct it.
+ */
+export async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+  description?: string,
+): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
+      const what = description ?? predicate.toString();
+      throw new Error(`waitUntil timed out after ${timeoutMs}ms waiting for: ${what}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -414,6 +434,10 @@ export interface BuildRigOptions {
   handlers?: FakeDeviceHandlers;
   /** Skip waiting for the fake device's `hello` to land — for testing the disconnected state. */
   connectDevice?: boolean;
+  /** Forwarded to `createPortholeServer` — see `PortholeServerOptions.adbEnv` in index.ts (GRA-89). */
+  adbEnv?: NodeJS.ProcessEnv;
+  /** Forwarded to `createPortholeServer` — see `PortholeServerOptions.adbBinary` in index.ts (GRA-89). */
+  adbBinary?: string;
 }
 
 /**
@@ -426,7 +450,13 @@ export async function buildRig(options: BuildRigOptions = {}): Promise<Rig> {
   const fakeDevice = await FakeDevice.start(options.handlers);
   const device = new DeviceClient("127.0.0.1", fakeDevice.port);
   const timeline = new TimelineServer(device, 0);
-  const { server } = createPortholeServer({ device, timeline, version: "0.0.0-test" });
+  const { server } = createPortholeServer({
+    device,
+    timeline,
+    version: "0.0.0-test",
+    adbEnv: options.adbEnv,
+    adbBinary: options.adbBinary,
+  });
 
   if (options.connectDevice ?? true) {
     device.start();

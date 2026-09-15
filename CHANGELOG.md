@@ -34,6 +34,10 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- Every PR now reports test coverage to Codecov: JaCoCo XML for the two
+  Kotlin modules under a `jvm` flag, and `lcov` from each vitest suite under
+  `server`/`ui`. Both status checks are informational and cannot fail a PR
+  (GRA-190).
 - Why the app died last time: a new runtime collector reads
   `ActivityManager.getHistoricalProcessExitReasons` on install (API 30+) and
   emits one `exit` event per death not already reported, deduplicated across
@@ -192,6 +196,11 @@ PR that makes the change, not after the fact.
   now clamps a negative `from` to 0 and refuses an inverted window (`from`
   after `to`) instead of handing one back, and `windowShape`'s `to`/`sinceMs`
   descriptions say what the code actually defaults to (GRA-120).
+- The server test suite no longer runs its loopback-socket rig files
+  (`save`, `watermark`, `surface`, `sessions-integration` and others)
+  concurrently with each other, which is what produced CI-only flakes on
+  the Windows and macOS runners; the split runs as two vitest projects with
+  the same total test count (GRA-183).
 - `findings` no longer prints a 60Hz frame budget on a higher-refresh-rate
   panel just because the requested window misses the device's one startup
   profile event; the resolved profile (live buffer, then the session's own
@@ -212,6 +221,10 @@ PR that makes the change, not after the fact.
   writer also no longer drops (or, on a removed sessions root, throws an
   unhandled rejection over) an event that arrives before it has finished
   opening (GRA-191).
+- `capture_system_trace` no longer freezes the rest of the MCP server for
+  the length of a recording — its three `adb` calls run through an
+  asynchronous, awaited spawn instead of a blocking one — and its label
+  scan no longer reads the whole trace into memory to find them (GRA-89).
 
 ## [0.1.0] - 2026-09-11
 

@@ -1478,9 +1478,25 @@ Both jobs finish with `git diff --exit-code`, so a build step that
 regenerates a file this repo commits (`site/api`, if `apiDocs` ever gets
 wired into `check`) fails the PR instead of drifting in silently.
 
-No job in this workflow ever runs a publish task, and the workflow has no
-secrets — the emulator, the AGP compatibility matrix and anything nightly are
-separate, slower checks that live outside this workflow entirely.
+No job in this workflow ever runs a publish task, and the only secret it
+references is the coverage token described below — the emulator, the AGP
+compatibility matrix and anything nightly are separate, slower checks that
+live outside this workflow entirely.
+
+**Coverage.** Both jobs also upload coverage to Codecov: the Gradle job
+uploads JaCoCo XML for `gradle-plugin` and `runtime` under the `jvm` flag
+(`runtime-noop` has no tests worth measuring and is excluded); the Node job
+uploads each vitest suite's own `lcov` report under `server` and `ui`, from
+the same `--coverage` run that already produces the JUnit XML the checks
+above read, on every leg. Reports upload with `if: always()`, so a red suite
+still shows whatever coverage it produced. Both the project and patch status
+checks are `informational: true` in `codecov.yml` — they appear on every PR
+but cannot fail one, until the founder turns that off deliberately — and
+`fail_ci_if_error: false` on every upload means a Codecov outage degrades
+reporting, never the PR itself. The upload reads `secrets.CODECOV_TOKEN` by
+name only; the repo is public, so Codecov's tokenless upload is the fallback
+for as long as a maintainer has not created that secret in the repository's
+own settings, which is the only place its value ever exists.
 
 **The exec-bit rule.** A `*.sh` or `gradlew` committed from a Windows checkout
 arrives in the index as mode `100644` — Windows has no such bit to record —
@@ -1714,16 +1730,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1415 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1430 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 444 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 436
-passed, 0 failed, 8 skipped), 726 in the MCP server (`cd mcp && npm test` —
-723 passed, 0 failed, 3 skipped), and 245 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 741 in the MCP server (`cd mcp && npm test` —
+738 passed, 0 failed, 3 skipped), and 245 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 245 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1415 disagrees with the sum of the three suites' totals stated
+XML, and when 1430 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1747,9 +1763,9 @@ this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 444 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 726 server tests with 0 skipped, because it has the
+set) and the same 741 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 726/724/2, missing only that capture. The timeline UI is the one suite
+sees 741/739/2, missing only that capture. The timeline UI is the one suite
 whose split does not move: 245/245/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
