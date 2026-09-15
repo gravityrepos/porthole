@@ -38,10 +38,12 @@ import live.gravitylabs.porthole.collect.DbInspector
 import live.gravitylabs.porthole.collect.AutoWire
 import live.gravitylabs.porthole.collect.BackStackCollector
 import live.gravitylabs.porthole.collect.DeviceCollector
+import live.gravitylabs.porthole.collect.ExitInfoCollector
 import live.gravitylabs.porthole.collect.MemoryCollector
 import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.protocol.DbPage
 import live.gravitylabs.porthole.protocol.DbTables
+import live.gravitylabs.porthole.protocol.ExitTraceResult
 import live.gravitylabs.porthole.protocol.Inflight
 import live.gravitylabs.porthole.protocol.SetupEntry
 import live.gravitylabs.porthole.protocol.LogPage
@@ -103,6 +105,7 @@ object Porthole {
         val frames: FrameCollector,
         val memory: MemoryCollector,
         val deviceContext: DeviceCollector,
+        val exitInfo: ExitInfoCollector,
         val autoWire: AutoWire,
         val watchdog: MainThreadWatchdog,
         val nav: NavCollector?,
@@ -152,6 +155,7 @@ object Porthole {
             val frames = FrameCollector(ring)
             val memory = MemoryCollector(ring)
             val deviceContext = DeviceCollector(ring)
+            val exitInfo = ExitInfoCollector(ring, appPackages)
             val autoWire = AutoWire(semantics, state)
             val watchdog = MainThreadWatchdog(ring, appPackages)
 
@@ -190,6 +194,7 @@ object Porthole {
             memory.start()
             collectors += "memory"
             if (deviceContext.install(app)) collectors += "device"
+            if (exitInfo.install(app)) collectors += "exit_info"
             if (autoWire.install(app)) collectors += "autowire"
 
             // Snapshotted rather than handed over live: Session used to receive
@@ -222,6 +227,7 @@ object Porthole {
                 frames = frames,
                 memory = memory,
                 deviceContext = deviceContext,
+                exitInfo = exitInfo,
                 autoWire = autoWire,
                 watchdog = watchdog,
                 nav = nav,
@@ -262,6 +268,7 @@ object Porthole {
             s.frames.stop(s.app)
             s.memory.stop()
             s.deviceContext.stop(s.app)
+            s.exitInfo.stop()
             s.autoWire.stop()
             s.watchdog.stop()
             s.recompositions.stop()
@@ -474,6 +481,29 @@ object Porthole {
             encode(
                 DbPage.serializer(),
                 s.dbInspector.query(params.string("database"), params.string("sql").orEmpty()),
+            )
+        }
+
+        method("exit_trace") { params ->
+            val timestamp = params.long("timestamp")
+            encode(
+                ExitTraceResult.serializer(),
+                if (timestamp == null) {
+                    // Missing, empty and malformed all land here alike:
+                    // `JsonObject.long` returns null for every one of them
+                    // (an absent key, an empty string, a non-numeric
+                    // string), and there is no meaningful distinction to
+                    // draw between "you forgot the argument" and "you sent
+                    // something that isn't a timestamp" — both mean the
+                    // caller has no timestamp to ask about.
+                    ExitTraceResult(
+                        timestamp = -1,
+                        found = false,
+                        error = "missing or malformed `timestamp` parameter",
+                    )
+                } else {
+                    s.exitInfo.trace(timestamp)
+                },
             )
         }
 

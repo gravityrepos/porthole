@@ -34,6 +34,18 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- Why the app died last time: a new runtime collector reads
+  `ActivityManager.getHistoricalProcessExitReasons` on install (API 30+) and
+  emits one `exit` event per death not already reported, deduplicated across
+  reconnects and reinstalls. `porthole_status` gains an `exits` section (most
+  recent exits, the build that died, the top app frame for an ANR or native
+  crash, and a statement when the API is unavailable below API 30) and an
+  `exitTrace: <timestamp>` parameter that fetches the full redacted trace on
+  demand, capped at 256 KB. The same deaths appear in `findings` at `error`
+  severity (`note` for a user-requested exit; nothing for a background
+  `REASON_OTHER` kill). No new tool: the ticket's own EM argued against a
+  sixteenth tool for a fact `porthole_status` already had the room to answer
+  (GRA-58).
 - Every window-taking tool (`findings`, `save_moment`, `recompositions`,
   `frames`, `blocking`, `logs`, `timeline`) accepts `since: "last" | "all"`,
   and `"last"` is now the default when no window is given: it starts where

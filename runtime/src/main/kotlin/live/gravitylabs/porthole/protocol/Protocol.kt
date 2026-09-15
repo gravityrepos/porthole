@@ -475,6 +475,30 @@ internal data class DbPage(
 )
 
 // ---------------------------------------------------------------------------
+// exit
+// ---------------------------------------------------------------------------
+//
+// The `exit` event itself (reason, importance, timestamp, pss, rss,
+// description, versionName/versionAssumed, and — for REASON_ANR and
+// REASON_CRASH_NATIVE only — mainStack/otherThreadCount/otherThreadStates)
+// is built as a plain JsonObject in ExitInfoCollector, the same way
+// `memory`/`device`/`blocked` are: it travels as a ring event, not a typed
+// RPC result, so it has no Serializable data class here. `exit_trace` is an
+// RPC method with an actual typed response, which is what this section is.
+
+/** The `exit_trace` RPC's answer: the full redacted trace for one exit, fetched on demand. */
+@Serializable
+internal data class ExitTraceResult(
+    val timestamp: Long,
+    /** False for a timestamp with no matching exit, or an exit whose reason never carries a trace. */
+    val found: Boolean,
+    val text: String? = null,
+    /** True when [text] was cut short at the cap; a note is already appended to [text] when so. */
+    val truncated: Boolean = false,
+    val error: String? = null,
+)
+
+// ---------------------------------------------------------------------------
 // setup
 // ---------------------------------------------------------------------------
 

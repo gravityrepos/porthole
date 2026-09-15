@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { buildTrace, type Finding } from "./trace.js";
+import { buildTrace, num, str, type Finding } from "./trace.js";
 import {
   UNKNOWN_DEVICE_ID,
   clippedMsOf,
@@ -318,6 +318,82 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       );
     }
     return "";
+  }
+
+  // ---------------------------------------------------------------------------
+  // GRA-58: why the app died, folded into porthole_status rather than a new tool
+  // ---------------------------------------------------------------------------
+
+  /** How many recent exits `porthole_status`'s `exits.recent` carries — a literal, not "however many fit". */
+  const EXITS_SECTION_CAP = 10;
+
+  /** How long after an exit it is still worth calling out as *why* the app is not connected right now. */
+  const RECENT_EXIT_MS = 5 * 60 * 1000;
+
+  interface ExitSummary {
+    reason: string;
+    /** ISO wall-clock — this is `ApplicationExitInfo.getTimestamp()`'s own unit, not the device-uptime clock every other timestamp in this surface uses. */
+    timestamp: string;
+    versionName: string | null;
+    versionAssumed: boolean;
+    topAppFrame: string | null;
+  }
+
+  /**
+   * `porthole_status`'s `exits` payload: the most recent deaths this
+   * process's ring still holds (the runtime's `ExitInfoCollector` put them
+   * there at install time — see `Protocol.kt#exit`), newest first, and the
+   * one fact that needs no ring content at all: whether the exit-reason API
+   * exists on this device. `hello.sdkInt` already answers that — the
+   * runtime emits nothing at all below API 30 (GRA-58's own ruling), so
+   * there is no event to read for it either way.
+   */
+  function exitsSection(): { apiUnavailable: string | null; recent: ExitSummary[] } {
+    const hello = device.hello ?? device.lastExited?.hello ?? null;
+    const sdkInt = hello?.sdkInt;
+    const apiUnavailable =
+      sdkInt !== undefined && sdkInt < 30
+        ? `The exit-reason API needs Android 11 (API 30); this device reports API ${sdkInt}, so no exit history is available.`
+        : null;
+
+    const recent = timeline
+      .buffer()
+      .filter((e) => e.event === "exit")
+      .slice()
+      .sort((a, b) => num(b.data.timestamp) - num(a.data.timestamp))
+      .slice(0, EXITS_SECTION_CAP)
+      .map(
+        (e): ExitSummary => ({
+          reason: str(e.data.reason),
+          timestamp: new Date(num(e.data.timestamp)).toISOString(),
+          versionName: e.data.versionName != null ? str(e.data.versionName) : null,
+          versionAssumed: e.data.versionAssumed === true,
+          topAppFrame: str(e.data.mainStack).split("\n")[0] || null,
+        }),
+      );
+
+    return { apiUnavailable, recent };
+  }
+
+  /**
+   * "the app is not connected because it died and why" (GRA-58's own
+   * wording): only when there is genuinely no live session right now, and
+   * only when the most recent exit is recent enough that it is plausibly
+   * *why* — an exit from an hour ago says nothing about a disconnect that
+   * just happened.
+   */
+  function exitDeathNotice(recent: ExitSummary[], stronglyConnected: boolean): string {
+    if (stronglyConnected || recent.length === 0) return "";
+    const latest = recent[0];
+    const ageMs = Date.now() - new Date(latest.timestamp).getTime();
+    if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > RECENT_EXIT_MS) return "";
+    const build = latest.versionName
+      ? `${latest.versionName}${latest.versionAssumed ? " (assumed)" : ""}`
+      : "an unknown build";
+    const frame = latest.topAppFrame ? ` Top app frame: ${latest.topAppFrame}.` : "";
+    return (
+      `Not connected because the app died: ${latest.reason} (${build}) at ${latest.timestamp}.` + frame + " "
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -681,11 +757,25 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       description:
         "Whether the porthole is connected to a running app, which collectors are active, and what to " +
         "do if it is not. Call this when another tool reports it cannot reach the device.\n\n" +
-        "This tool answers 'is it plugged in', not 'is anything wrong'. For that, call `findings`.",
-      inputSchema: {},
+        "This tool answers 'is it plugged in', not 'is anything wrong'. For that, call `findings`.\n\n" +
+        "Also carries `exits`: the most recent process deaths Android recorded for this app, so " +
+        "'why did it just die' is answerable on the first call after a crash, not a tool an agent " +
+        "has to know to reach for.",
+      inputSchema: {
+        exitTrace: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Fetch the full redacted ANR/native-crash trace for one entry in `exits` — pass its " +
+              "`timestamp` verbatim. Capped at 256 KB by the runtime, with a note in the text if it " +
+              "was truncated. Omit this to just see the `exits` summary.",
+          ),
+      },
       annotations: { readOnlyHint: true },
     },
-    async (): Promise<ToolResult> => {
+    async ({ exitTrace }): Promise<ToolResult> => {
       // GRA-119 AC5: name which SDK and which project root this run resolved
       // to, and where each came from, so "adb resolved to the wrong SDK" is
       // something this tool can actually diagnose instead of something an
@@ -709,6 +799,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // buffered data this tool is not itself reporting any.
       const exitedProcess = exitedProcessField();
       const notice = exitedProcessNotice(exitedProcess, bufferedEvents > 0, pending === null);
+      const exits = exitsSection();
+      const deathNotice = exitDeathNotice(exits.recent, pending === null);
+
+      // GRA-58: missing, empty and malformed all fail zod validation before
+      // the handler ever runs (`exitTrace` is `z.number().int().positive()`),
+      // so the only two shapes reaching here are "omitted" (skip the call
+      // entirely, `exitTrace: null`) and "a real number" — which may still
+      // name a timestamp the runtime has never heard of, hence the `found`
+      // field in what comes back rather than a thrown error.
+      let exitTraceResult: unknown = null;
+      if (exitTrace !== undefined) {
+        try {
+          exitTraceResult = await device.request("exit_trace", { timestamp: exitTrace });
+        } catch (error) {
+          exitTraceResult = {
+            timestamp: exitTrace,
+            found: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+
       const payload = {
         state: device.state,
         host: HOST,
@@ -727,6 +839,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         projectRoot: projectRoot.directory,
         projectRootSource: projectRoot.source,
         exitedProcess,
+        exits,
+        exitTrace: exitTraceResult,
       };
       // GRA-96: a protocol mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
@@ -737,6 +851,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // text an agent reads, rather than a field it has to know to check.
       const summary =
         notice +
+        deathNotice +
         (pending ??
           device.protocolMismatch ??
           `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
