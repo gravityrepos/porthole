@@ -436,9 +436,9 @@ logs and device context all need nothing at all.
 
 ## What the timeline shows
 
-Lanes, sharing one clock: recompositions and state writes, dropped frames and
-main-thread stalls, navigation, http, db, work, memory, device context, and
-your own logcat at warning and above.
+Lanes, sharing one clock: findings, recompositions and state writes, dropped
+frames and main-thread stalls, navigation, http, db, work, memory, device
+context, and your own logcat at warning and above.
 
 A few of them are worth knowing about because the number means something
 specific. Dropped frames are counted in refreshes, so a 400ms freeze is not "one
@@ -448,6 +448,28 @@ the queries that ran on it.
 
 Clicking any mark opens it: the subject first, then its attributes, then whatever
 bulk it carries. `ask agent` copies the window as bounds.
+
+The findings lane is the first one, above recompositions, and it is the one
+lane whose data is a server answer rather than the event buffer — it has its
+own loading, stale and empty states, so a request still in flight does not
+read as "nothing is wrong." Severity is colour, matching the insights panel
+exactly; confidence is a solid mark for `observed` and an outline for
+`correlated`; source is a small filled-versus-hollow mark at the mark's edge.
+A `spanning` finding draws as a dim band across the window it was asked
+about rather than as a point, since it has no narrower moment to sit under.
+Findings that overlap on screen stack up to three rows before a `+N` glyph
+takes over. With no trace loaded, the lane still shows Porthole's own
+findings and says the trace half is missing in one line.
+
+That trace half comes from a capture chosen in the insights panel header: a
+small dropdown, fed by `GET /api/traces`, listing captures by when they were
+recorded. A capture whose coverage could not be read (`coverage: null`) is
+listed with its reason and cannot be chosen. Once one is chosen, the ruler
+grows a thin bar under it showing which part of the visible axis that
+capture's coverage actually covers — the difference between "the trace has
+nothing to say about this window" (no bar reaches it) and "the trace says
+nothing was wrong here" (the bar reaches it and the lane is quiet), which
+otherwise look identical.
 
 The header also has **database**, a read-only inspector over the app's own
 tables — list, page, and run a SELECT — and **restart app**, which force-stops
@@ -1613,16 +1635,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1229 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1268 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 424 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 416
 passed, 0 failed, 8 skipped), 671 in the MCP server (`cd mcp && npm test` —
-668 passed, 0 failed, 3 skipped), and 134 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
+668 passed, 0 failed, 3 skipped), and 173 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 173 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1229 disagrees with the sum of the three suites' totals stated
+XML, and when 1268 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1649,7 +1671,7 @@ the same 424 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
 set) and the same 671 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
 sees 671/669/2, missing only that capture. The timeline UI is the one suite
-whose split does not move: 134/134/0 on every leg.
+whose split does not move: 173/173/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,

@@ -73,6 +73,17 @@ PR that makes the change, not after the fact.
   recorded-at, and the uptime window each capture covers — and
   `/api/findings?trace=<id>` takes an id from that listing rather than an
   arbitrary filesystem path, refused before anything is spawned (GRA-113).
+- The timeline UI draws findings on the same axis as Porthole's own events: a
+  findings lane, above recompositions, placing every finding from `/api/
+  findings` by its `window` (or as a dim band across the queried window for
+  a `spanning` one) with severity as colour, confidence as solid-vs-outline,
+  and source as a small mark — the same encoding the insights panel already
+  used, now also on the canvas. A trace chooser in the insights panel header
+  (fed by `GET /api/traces`) picks which capture `?trace=` asks about, and a
+  coverage bar on the ruler shows which part of the visible axis that
+  capture actually covers. The findings fetch itself moved out of the
+  insights panel and into the app shell, so the panel and the lane share one
+  request per settled view instead of doubling it (GRA-114).
 - `portholeTraceProcessor`, a Gradle task that fetches Perfetto's
   `trace_processor` (pinned v58.2, SHA-256 verified) and caches it under
   `~/.porthole/trace-processor/<version>/`.

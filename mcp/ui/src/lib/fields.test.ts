@@ -1,25 +1,24 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { fieldsFor, groupFields, rawText } from "./fields";
-import type { Hit } from "./laneData";
+import { fieldsFor, groupFields, rawText, type FieldableHit } from "./fields";
 import { LANES } from "../timeline/lanes";
 import type { DeviceEvent, Span } from "../types";
 
 const lane = (key: string) => LANES.find((entry) => entry.key === key)!;
 
-function eventHit(name: string, data: Record<string, unknown>, laneKey = name): Hit {
+function eventHit(name: string, data: Record<string, unknown>, laneKey = name): FieldableHit {
   const event: DeviceEvent = { event: name, t: 0, seq: 1, data };
   return { kind: "event", lane: lane(laneKey), event };
 }
 
-function spanHit(laneKey: string, data: Record<string, unknown>, start = 0, end = 100): Hit {
+function spanHit(laneKey: string, data: Record<string, unknown>, start = 0, end = 100): FieldableHit {
   const span: Span = { id: "x", start, end, open: false, data };
   return { kind: "span", lane: lane(laneKey), span };
 }
 
-const labels = (hit: Hit) => fieldsFor(hit).map((field) => field.label);
-const find = (hit: Hit, key: string) => fieldsFor(hit).find((field) => field.key === key);
+const labels = (hit: FieldableHit) => fieldsFor(hit).map((field) => field.label);
+const find = (hit: FieldableHit, key: string) => fieldsFor(hit).find((field) => field.key === key);
 
 describe("fieldsFor ordering", () => {
   it("puts a known kind in its declared order", () => {

@@ -1,15 +1,19 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FindingsLoader } from "./InsightsPanel";
+import { FindingsLoader } from "./findingsLoader";
 
 /**
- * `FindingsLoader` is the part of InsightsPanel that used to be a bare
+ * `FindingsLoader` started life inside `InsightsPanel` as a bare
  * `useEffect(() => { void load(); }, [load])`: no debounce, no cancellation,
- * no defence against a slow response landing after a fast one. These tests
- * exercise it directly rather than rendering the component, the same way
- * `TimelineStore.test.ts` tests that store directly -- this workspace has no
- * DOM-rendering test setup, and the loader has no React dependency of its own.
+ * no defence against a slow response landing after a fast one. GRA-114
+ * hoisted it out into this module and into `App`, so the findings lane and
+ * the panel share one fetch instead of each running its own; the class
+ * itself, and these tests, moved with it. These tests exercise it directly
+ * rather than rendering a component, the same way `TimelineStore.test.ts`
+ * tests that store directly -- this workspace has no DOM-rendering test
+ * setup for most of the codebase, and the loader has no React dependency of
+ * its own regardless of who constructs it.
  */
 
 function okResponse(body: unknown): Response {
@@ -280,6 +284,43 @@ describe("FindingsLoader.runNow", () => {
     // waiting it out must not produce a second, stale request.
     await vi.advanceTimersByTimeAsync(300);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("FindingsLoader's trace parameter (GRA-114)", () => {
+  it("omits trace= entirely when no trace is scheduled, unchanged from before this ticket", async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
+    const loader = new FindingsLoader(callbacks(), { fetchImpl, debounceMs: 10 });
+
+    loader.schedule(0, 100);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(String(fetchImpl.mock.calls[0][0])).not.toContain("trace=");
+  });
+
+  it("carries the scheduled trace id through to the request", async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
+    const loader = new FindingsLoader(callbacks(), { fetchImpl, debounceMs: 10 });
+
+    loader.schedule(0, 100, "capture-1");
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(String(fetchImpl.mock.calls[0][0])).toContain("trace=capture-1");
+  });
+
+  it("runNow carries its own trace id the same way", () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      okResponse({ findings: [] }),
+    );
+    const loader = new FindingsLoader(callbacks(), { fetchImpl, debounceMs: 300 });
+
+    loader.runNow(0, 100, "capture-2");
+
+    expect(String(fetchImpl.mock.calls[0][0])).toContain("trace=capture-2");
   });
 });
 

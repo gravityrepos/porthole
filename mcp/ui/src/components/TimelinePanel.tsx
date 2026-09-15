@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LANES, TICK_COUNT, type Lane } from "../timeline/lanes";
-import { bounds, panBy, toTime, zoomAt } from "../timeline/geometry";
+import { bounds, panBy, toTime, toX, zoomAt } from "../timeline/geometry";
 import { drawLane, readCss, type LaneScene } from "../timeline/draw";
-import { hitLane, laneStat, navChips, spansForLane, type Hit } from "../lib/laneData";
+import { hitFindings, hitLane, laneStat, navChips, spansForLane, type Hit } from "../lib/laneData";
+import { placeFindings } from "../lib/findings";
 import { missingIntegration, type SetupEntry } from "../lib/setup";
+import { FindingsLaneStatus, type FindingsState } from "./FindingsLaneStatus";
 import type { TimelineStore } from "../store/TimelineStore";
-import type { Span, ViewWindow } from "../types";
+import type { Finding, Span, ViewWindow } from "../types";
 
 /** The gutter column, shared by the ruler and every lane so they stay aligned. */
 const GUTTER = "clamp(150px, 18%, 178px)";
@@ -22,6 +24,17 @@ interface Props {
   setup: SetupEntry[];
   onSelect: (hit: Hit) => void;
   selectedSeq: number | null;
+  /** GRA-114: the same findings App hands InsightsPanel — one fetch, two consumers. */
+  findings: Finding[];
+  /** The window `/api/findings` was actually asked about, for placing `spanning` findings. Null before the first answer ever lands. */
+  findingsWindow: { from: number; to: number } | null;
+  findingsLoading: boolean;
+  hasFindingsPayload: boolean;
+  selectedFindingId: string | null;
+  /** Whether a trace is currently selected (`App`'s `selectedTraceId`), for the lane's "trace half not loaded" line. */
+  traceLoaded: boolean;
+  /** The selected trace's coverage, for the ruler's coverage band. Null with no trace selected, or one whose coverage could not be read. */
+  traceCoverage: { from: number; to: number } | null;
 }
 
 export function TimelinePanel({
@@ -34,6 +47,13 @@ export function TimelinePanel({
   setup,
   onSelect,
   selectedSeq,
+  findings,
+  findingsWindow,
+  findingsLoading,
+  hasFindingsPayload,
+  selectedFindingId,
+  traceLoaded,
+  traceCoverage,
 }: Props) {
   const dragRef = useRef<{ active: boolean; x: number; moved: boolean }>({
     active: false,
@@ -77,6 +97,30 @@ export function TimelinePanel({
     [onViewChange, view],
   );
 
+  // GRA-114 ruling 1: nothing yet (loading), a previous answer while a new
+  // one is in flight (stale), or an answer that named nothing (empty) — see
+  // FindingsLaneStatus's own comment for why "empty" must not read as
+  // "loading" and how these three are told apart.
+  const findingsState: FindingsState = !hasFindingsPayload
+    ? "loading"
+    : findingsLoading
+      ? "stale"
+      : findings.length === 0
+        ? "empty"
+        : "ready";
+
+  // Ruling 4: which part of the visible axis the loaded trace's coverage
+  // covers, clamped to the view the same way a `spanning` finding's band is
+  // (lib/findings.ts's `clip`) — a coverage window need not fully contain
+  // the view, or be contained by it.
+  const coverageBand =
+    traceCoverage &&
+    (() => {
+      const left = Math.max(toX(traceCoverage.from, view, 100), 0);
+      const right = Math.min(toX(traceCoverage.to, view, 100), 100);
+      return right > left ? { left, width: right - left } : null;
+    })();
+
   return (
     <section className="grid min-h-0 min-w-0 grid-rows-[30px_minmax(0,1fr)] bg-[var(--color-plot)]">
       <div
@@ -101,6 +145,18 @@ export function TimelinePanel({
               <span className="font-mono text-[10px] text-[var(--color-muted)]">{tick.label}</span>
             </div>
           ))}
+          {/* GRA-114 ruling 4: which part of the visible axis a loaded
+              trace's coverage actually covers. A thin bar under the ruler
+              rather than a lane of its own — it is a property of the whole
+              axis, not one more row of data. */}
+          {coverageBand && (
+            <div
+              data-trace-coverage=""
+              className="pointer-events-none absolute bottom-0 h-[3px] bg-[var(--color-accent)] opacity-70"
+              style={{ left: `${coverageBand.left}%`, width: `${coverageBand.width}%` }}
+              title={`trace coverage: ${Math.round(traceCoverage!.from)}–${Math.round(traceCoverage!.to)}ms`}
+            />
+          )}
         </div>
       </div>
 
@@ -127,6 +183,11 @@ export function TimelinePanel({
             onDragMove={onDragMove}
             onDragEnd={() => (dragRef.current.active = false)}
             dragRef={dragRef}
+            findings={findings}
+            findingsWindow={findingsWindow}
+            findingsState={findingsState}
+            selectedFindingId={selectedFindingId}
+            traceLoaded={traceLoaded}
           />
         ))}
       </div>
@@ -159,6 +220,11 @@ interface RowProps {
   onDragMove: (x: number, width: number) => void;
   onDragEnd: () => void;
   dragRef: React.RefObject<{ active: boolean; x: number; moved: boolean }>;
+  findings: Finding[];
+  findingsWindow: { from: number; to: number } | null;
+  findingsState: FindingsState;
+  selectedFindingId: string | null;
+  traceLoaded: boolean;
 }
 
 function LaneRow({
@@ -177,6 +243,11 @@ function LaneRow({
   onDragMove,
   onDragEnd,
   dragRef,
+  findings,
+  findingsWindow,
+  findingsState,
+  selectedFindingId,
+  traceLoaded,
 }: RowProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const plotRef = useRef<HTMLDivElement>(null);
@@ -184,8 +255,8 @@ function LaneRow({
   /** Mirrors sizeRef for the DOM chips, which need a width to thin labels by. */
   const [plotWidth, setPlotWidth] = useState(0);
 
-  const latest = useRef({ view, showFramework, spans });
-  latest.current = { view, showFramework, spans };
+  const latest = useRef({ view, showFramework, spans, findings, findingsWindow, selectedFindingId });
+  latest.current = { view, showFramework, spans, findings, findingsWindow, selectedFindingId };
 
   const render = useCallback(() => {
     const ctx = canvasRef.current?.getContext("2d");
@@ -201,6 +272,16 @@ function LaneRow({
       spans: latest.current.spans,
       color: readCss(lane.color),
       showFramework: latest.current.showFramework,
+      findingsLayout:
+        lane.kind === "findings"
+          ? placeFindings(
+              latest.current.findings,
+              queryWindowOf(latest.current.findingsWindow, latest.current.view),
+              latest.current.view,
+              width,
+            )
+          : undefined,
+      selectedFindingId: lane.kind === "findings" ? latest.current.selectedFindingId : undefined,
     };
     drawLane(lane, scene);
   }, [lane, store]);
@@ -264,7 +345,17 @@ function LaneRow({
 
   const point = (event: React.MouseEvent) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    return { x: event.clientX - rect.left, width: rect.width };
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top, width: rect.width };
+  };
+
+  /** The findings lane's own hit test — its data is not `store.events`, so
+   *  it does not go through `hitLane`. Recomputed on interaction rather than
+   *  cached: cheap (a handful of findings at most, per GRA-114's own
+   *  overflow ruling), and simpler than threading the render loop's
+   *  precomputed layout out to the event handlers. */
+  const findingsHit = (x: number, y: number, width: number) => {
+    const { placed } = placeFindings(findings, queryWindowOf(findingsWindow, view), view, width);
+    return hitFindings(placed, x, y);
   };
 
   return (
@@ -282,13 +373,17 @@ function LaneRow({
             {lane.label}
           </span>
         </div>
-        <span
-          className="truncate pl-2.5 font-mono text-[10px]"
-          style={{ color: missing ? "var(--recompose)" : "var(--color-dim)" }}
-          title={missing ?? undefined}
-        >
-          {missing ?? stat}
-        </span>
+        {lane.kind === "findings" ? (
+          <FindingsLaneStatus state={findingsState} count={findings.length} traceLoaded={traceLoaded} />
+        ) : (
+          <span
+            className="truncate pl-2.5 font-mono text-[10px]"
+            style={{ color: missing ? "var(--recompose)" : "var(--color-dim)" }}
+            title={missing ?? undefined}
+          >
+            {missing ?? stat}
+          </span>
+        )}
       </div>
 
       <div
@@ -301,9 +396,15 @@ function LaneRow({
         onMouseDown={(event) => onDragStart(point(event).x)}
         onMouseUp={onDragEnd}
         onMouseMove={(event) => {
-          const { x, width } = point(event);
+          const { x, y, width } = point(event);
           if (dragRef.current.active) {
             onDragMove(x, width);
+            return;
+          }
+          if (lane.kind === "findings") {
+            const found = findingsHit(x, y, width);
+            const hit: Hit | null = found ? { kind: "finding", lane, finding: found.finding } : null;
+            onTooltip(hit ? { x: event.clientX, y: event.clientY, text: tipFor(hit) } : null);
             return;
           }
           const hit = hitLane(lane, store.events, spans, view, width, x, showFramework);
@@ -315,7 +416,12 @@ function LaneRow({
         }}
         onClick={(event) => {
           if (dragRef.current.moved) return;
-          const { x, width } = point(event);
+          const { x, y, width } = point(event);
+          if (lane.kind === "findings") {
+            const found = findingsHit(x, y, width);
+            if (found) onSelect({ kind: "finding", lane, finding: found.finding });
+            return;
+          }
           const hit = hitLane(lane, store.events, spans, view, width, x, showFramework);
           if (hit) onSelect(hit);
         }}
@@ -357,7 +463,30 @@ function LaneRow({
   );
 }
 
+/** `findingsWindow` (the window `/api/findings` was actually asked about)
+ *  falls back to the current `view` when nothing has ever landed yet — but
+ *  `ViewWindow` is `{start, end}`, not `{from, to}`, so that fallback is a
+ *  conversion, not a bare `??`. Shared by the render loop and the pointer
+ *  handlers so a hit test always agrees with what was just painted. */
+function queryWindowOf(
+  findingsWindow: { from: number; to: number } | null,
+  view: ViewWindow,
+): { from: number; to: number } {
+  return findingsWindow ?? { from: view.start, to: view.end };
+}
+
 function tipFor(hit: Hit): string {
+  // Ruling 3: the findings lane's hover uses this same tooltip path, not a
+  // bespoke one — title and detail, then the three facts the lane also
+  // encodes visually, spelled out for whoever is not reading the marks.
+  if (hit.kind === "finding") {
+    const { finding } = hit;
+    const lines = [finding.title];
+    if (finding.detail) lines.push(finding.detail);
+    lines.push(`${finding.severity} · ${finding.confidence} · ${finding.source}`);
+    return lines.join("\n");
+  }
+
   const data: Record<string, unknown> =
     hit.kind === "span"
       ? { durationMs: hit.span.end - hit.span.start, open: hit.span.open, ...hit.span.data }

@@ -97,8 +97,15 @@ export interface GroupedFields {
   payloads: Field[];
 }
 
+/** A finding hit has its own fixed layout (SelectionPanel's `FindingDetail`)
+ *  rather than going through the generic field pipeline below, which is
+ *  built around a device event's or span's open-ended `data` bag — a finding
+ *  has none. Excluded from the parameter type here so that stays true by
+ *  construction, not by convention. */
+export type FieldableHit = Exclude<Hit, { kind: "finding" }>;
+
 /** Splits fields into the three tiers the panel lays out. */
-export function groupFields(hit: Hit): GroupedFields {
+export function groupFields(hit: FieldableHit): GroupedFields {
   const kind = hit.kind === "span" ? hit.lane.key : hit.event.event;
   const subjectKey = SUBJECT[kind];
   const group: GroupedFields = { subject: null, attributes: [], payloads: [] };
@@ -111,7 +118,7 @@ export function groupFields(hit: Hit): GroupedFields {
   return group;
 }
 
-export function fieldsFor(hit: Hit): Field[] {
+export function fieldsFor(hit: FieldableHit): Field[] {
   const data: Record<string, unknown> =
     hit.kind === "span"
       ? { durationMs: Math.round(hit.span.end - hit.span.start), ...hit.span.data }
@@ -380,7 +387,7 @@ function prettyJson(text: string): string {
 }
 
 /** The escape hatch: everything the device sent, as sent. */
-export function rawText(hit: Hit): string {
+export function rawText(hit: FieldableHit): string {
   const data =
     hit.kind === "span"
       ? {

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { groupFields, rawText, type Field, type Tone } from "../lib/fields";
 import { deviceLabel, type Hit } from "../lib/laneData";
 import { shortUrl } from "../lib/spans";
-import { num, str } from "../types";
+import { num, str, type Finding } from "../types";
 
 interface Props {
   hit: Hit | null;
@@ -67,7 +67,7 @@ export function SelectionPanel({ hit }: Props) {
 
             {showRaw && (
               <pre className="mt-2 mb-0 rounded-lg border border-[#242c3a] bg-[var(--color-tile)] p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-[#9aa6b8] [overflow-wrap:anywhere]">
-                {rawText(hit)}
+                {rawTextFor(hit)}
               </pre>
             )}
           </>
@@ -77,7 +77,45 @@ export function SelectionPanel({ hit }: Props) {
   );
 }
 
+/** `rawText` is built around an event's or span's `data` bag, which a
+ *  finding does not have (see `FieldableHit`'s comment in fields.ts) — this
+ *  is its finding-shaped equivalent, in the same `key: value` style. */
+function rawTextFor(hit: Hit): string {
+  if (hit.kind !== "finding") return rawText(hit);
+  const { finding } = hit;
+  const lines = [
+    `id: ${finding.id}`,
+    `severity: ${finding.severity}`,
+    `confidence: ${finding.confidence}`,
+    `source: ${finding.source}`,
+    `title: ${finding.title}`,
+  ];
+  if (finding.detail) lines.push(`detail: ${finding.detail}`);
+  if (finding.spanning) lines.push("spanning: true");
+  else if (finding.window) lines.push(`window: ${finding.window.from}..${finding.window.to}`);
+  if (finding.count !== undefined) lines.push(`count: ${finding.count}`);
+  return lines.join("\n");
+}
+
+/** The same three CSS variables `InsightsPanel`'s `SEVERITY` table and the
+ *  findings lane's canvas both read, so a finding's colour agrees everywhere
+ *  it appears (GRA-114). */
+const SEVERITY_COLOR: Record<Finding["severity"], string> = {
+  error: "--color-danger",
+  warning: "--color-recompose",
+  note: "--color-muted",
+};
+
 function headingFor(hit: Hit): { title: string; subtitle: string; color: string } {
+  if (hit.kind === "finding") {
+    const { finding } = hit;
+    return {
+      title: finding.title,
+      subtitle: `${finding.severity} · ${finding.confidence} · ${finding.source}`,
+      color: SEVERITY_COLOR[finding.severity],
+    };
+  }
+
   const { lane } = hit;
 
   if (hit.kind === "span") {
@@ -195,6 +233,13 @@ function headingFor(hit: Hit): { title: string; subtitle: string; color: string 
  * this, a full URL and a one-word method were laid out identically.
  */
 function Detail({ hit }: { hit: Hit }) {
+  // Ruling 3: title and severity/confidence/source already sit in the
+  // heading above (via `headingFor`); this is `detail` and `window`, the two
+  // facts a finding has that nothing above already shows. A finding has no
+  // open-ended `data` bag the way an event or span does, so it never goes
+  // through `groupFields` — see `FieldableHit`'s own comment in fields.ts.
+  if (hit.kind === "finding") return <FindingDetail finding={hit.finding} />;
+
   const { subject, attributes, payloads } = groupFields(hit);
 
   return (
@@ -230,6 +275,36 @@ function Detail({ hit }: { hit: Hit }) {
           </pre>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** A finding's own detail layout: its `detail` sentence, then its window on
+ *  the device's uptime clock — a point (`from` == `to`), a span, or, for a
+ *  `spanning` finding, a note that it describes the whole window asked
+ *  about rather than a moment inside it. */
+function FindingDetail({ finding }: { finding: Finding }) {
+  return (
+    <div className="mt-3 flex flex-col gap-3.5">
+      {finding.detail && (
+        <p className="text-[12px] leading-snug text-[var(--color-fg)]">
+          {finding.detail}
+        </p>
+      )}
+      <dl className="grid grid-cols-[repeat(auto-fit,minmax(102px,1fr))] gap-x-3 gap-y-2.5">
+        <div className="min-w-0">
+          <Label>window</Label>
+          <div className="mt-0.5 font-mono text-[12px]">
+            {finding.spanning
+              ? "the whole window asked about"
+              : finding.window
+                ? finding.window.from === finding.window.to
+                  ? `${Math.round(finding.window.from)}ms`
+                  : `${Math.round(finding.window.from)}–${Math.round(finding.window.to)}ms`
+                : "unplaced"}
+          </div>
+        </div>
+      </dl>
     </div>
   );
 }
