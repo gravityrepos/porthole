@@ -75,6 +75,58 @@ export function fromBootMs(
   return { at: bootMs - sleepMs, sleepMs, sampledAt: chosen.t };
 }
 
+/**
+ * The reverse of fromBootMs: a Porthole uptime-ms moment, converted to the
+ * CLOCK_BOOTTIME ns a trace stamps with — what `timeline.ts` needs to scope a
+ * trace_processor query to the window a finding named in Porthole's own clock.
+ *
+ * This used to be open-coded at the one call site, picking whichever `clocks`
+ * sample the search happened to find first rather than the one in force at
+ * `atMs` — the same bug `fromBootMs` was written to avoid on the other leg of
+ * the trip. Mirroring `fromBootMs`'s own selection (the most recent sample at
+ * or before the moment, by Porthole's own clock this time: `sample.t`, not a
+ * boot-time field) is what fixes it, and living here rather than back at that
+ * call site is what keeps it fixed: every place that needs the offset between
+ * the two clocks reads it the same way, once.
+ *
+ * Never refuses. A caller scoping a query needs *a* bound to hand
+ * trace_processor even before the run has sampled the offset at all, and
+ * assuming no accumulated sleep — the same default the open-coded version
+ * used — is the conservative placeholder: it is wrong only by however long the
+ * device has actually slept, and only until a real sample arrives.
+ */
+export function toBootNs(events: DeviceEvent[], atMs: number): number {
+  const samples = events.filter((e) => e.event === "clocks" && e.t <= atMs);
+  const chosen = samples.length ? samples[samples.length - 1] : undefined;
+  const sleepMs = chosen ? num(chosen.data.sleepMs) : 0;
+  return (atMs + sleepMs) * 1e6;
+}
+
+/**
+ * Coverage's variant of fromBootMs: `GET /api/traces` has no live device
+ * session, so there is no Porthole-recorded `clocks` sample to read an offset
+ * from. A trace's own `clock_snapshot` carries the same information anyway —
+ * CLOCK_BOOTTIME (Perfetto's clock_id 6) and CLOCK_MONOTONIC (clock_id 3, the
+ * same clock `SystemClock.uptimeMillis()` reads) sampled at the same instant
+ * — so the offset can be read directly out of the trace instead of out of a
+ * session that may not exist. This is that same {bootMs, sleepMs} pair
+ * `fromBootMs` already knows how to apply, computed from a different source;
+ * it stays in this file rather than at its call site for the same reason
+ * `toBootNs` does.
+ *
+ * One snapshot is enough for the same reason `fromBootMs` only needs the
+ * nearest one: the offset changes only across a stretch of deep sleep, and an
+ * 11-second capture window is far too short for that to move it (verified on
+ * hardware: 183ns of drift across nine minutes).
+ */
+export function fromTraceClockSnapshot(
+  snapshot: { bootNs: number; monotonicNs: number },
+  atNs: number,
+): number {
+  const sleepNs = snapshot.bootNs - snapshot.monotonicNs;
+  return Math.round((atNs - sleepNs) / 1e6);
+}
+
 /** Spans open across `at`, plus those that closed inside the window. */
 function spansAcross(
   events: DeviceEvent[],

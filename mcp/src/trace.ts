@@ -42,6 +42,29 @@ export interface Finding {
   /** The mark this fell under, when the run was marked. */
   during?: string;
   evidence?: Record<string, unknown>;
+  /**
+   * Where this finding sits on the device's uptime clock (GRA-113) — the same
+   * clock every Porthole event and `momentOf` already speak in. Every finding
+   * `/api/findings` returns carries exactly one of `window` or `spanning`,
+   * never both and never neither: a finding that cannot say where it belongs
+   * is a defect in the code that produced it, not a legitimate third state.
+   *
+   * `from`/`to` may be equal — a single instant is a zero-width window, not a
+   * special case — and, for a trace-derived finding, arrives already
+   * converted through `moment.ts`'s `fromBootMs`, never as the raw
+   * boot-clock ns a query answered in.
+   */
+  window?: { from: number; to: number };
+  /**
+   * Set instead of `window` for a finding that is a property of the whole
+   * window it was asked about rather than of a moment inside it — a
+   * thread-state aggregate summed across however many disjoint stretches the
+   * scheduler happened to visit that state, say, or GRA-58's exit findings,
+   * whose `exit.t` is stamped in the *next* process's uptime clock and so
+   * cannot be honestly placed on this session's axis at all. Drawing either
+   * as a point under one frame would invent a precision neither one has.
+   */
+  spanning?: true;
 }
 
 export interface Trace {
@@ -92,6 +115,13 @@ export interface CompletedSpan {
   open: false;
   ms: number;
   data: Record<string, unknown>;
+  /** When it ended — always known, since only a closed span reaches here. */
+  endedAt: number;
+  /**
+   * When it started, if this capture saw the start; null for an end with no
+   * start (a capture that attached mid-call, not a hang — see `spans`).
+   */
+  startedAt: number | null;
 }
 
 /** A span that was still running when the events ran out. */
@@ -151,7 +181,13 @@ function spans(events: DeviceEvent[], prefix: string): Span[] {
       const started = open.get(id);
       open.delete(id);
       const ms = started === undefined ? num(event.data.elapsedMs) : event.t - started.at;
-      out.push({ open: false, ms, data: event.data });
+      out.push({
+        open: false,
+        ms,
+        data: event.data,
+        endedAt: event.t,
+        startedAt: started ? started.at : null,
+      });
     }
   }
 
@@ -233,6 +269,29 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
   };
 }
 
+/**
+ * The envelope from the earliest to the latest of a set of real, timestamped
+ * events — for a finding that aggregates several occurrences (a run of
+ * blocking GCs, every `trimMemory` call) rather than naming one. Unlike a
+ * trace-side aggregate summed with no timestamp at all, each contributor here
+ * has a real `t`, so the envelope is read off the events that produced the
+ * finding, not invented for it. Undefined only for an empty list, which no
+ * caller should ever pass — every call site already checked `.length > 0`.
+ */
+function eventWindow(events: DeviceEvent[]): { from: number; to: number } | undefined {
+  if (events.length === 0) return undefined;
+  const ts = events.map((e) => e.t);
+  return { from: Math.min(...ts), to: Math.max(...ts) };
+}
+
+/** `eventWindow`'s counterpart for a list of spans rather than raw events. */
+function spanWindow(spans: Span[]): { from: number; to: number } | undefined {
+  if (spans.length === 0) return undefined;
+  const starts = spans.map((s) => (s.open ? s.startedAt : (s.startedAt ?? s.endedAt)));
+  const ends = spans.map((s) => (s.open ? s.startedAt : s.endedAt));
+  return { from: Math.min(...starts), to: Math.max(...ends) };
+}
+
 /** The mark in force at a moment, or undefined if the run was not marked. */
 function markAt(marks: Trace["marks"], at: number): string | undefined {
   let current: string | undefined;
@@ -288,6 +347,11 @@ function stillOpenFinding(
     count,
     during: markAt(marks, oldest.startedAt),
     evidence: { oldestAtLeastMs: oldest.atLeastMs, ...evidence },
+    // `to` is the last moment we know it was still open — the capture's own
+    // last event, which is exactly what `atLeastMs` is already measured
+    // against — not an invented "now". A window that stopped narrating
+    // wherever the run happened to end would be lying about how sure it is.
+    window: { from: oldest.startedAt, to: oldest.startedAt + oldest.atLeastMs },
   };
 }
 
@@ -319,6 +383,7 @@ export function findingsOf(
       detail: `Worst was ${worst.ms}ms: ${str(worst.data.sql).slice(0, 80)}`,
       count: onMain.length,
       evidence: { worstMs: worst.ms, sql: str(worst.data.sql) },
+      window: { from: worst.startedAt ?? worst.endedAt, to: worst.endedAt },
     });
   }
 
@@ -339,10 +404,17 @@ export function findingsOf(
         at: worst.t,
         stack: str(worst.data.stack).split("\n").slice(0, 6),
       },
+      // `blocked` is reported when the stall ends, so `worst.t` is its end and
+      // the start is however long before that its own duration says.
+      window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
     });
   }
 
-  const failed = http.filter((c) => num(c.data.status) >= 400 || c.data.error !== undefined);
+  // Completed only — see the same reasoning as `onMain` above: a status or an
+  // error is reported by the *end* event, so an open span cannot be a failure
+  // yet, only a hang (`http-still-open` already covers that). Filtering here
+  // also gives `first` a real `endedAt`/`startedAt` to place a window with.
+  const failed = http.filter(isCompleted).filter((c) => num(c.data.status) >= 400 || c.data.error !== undefined);
   if (failed.length > 0) {
     const first = failed[0];
     findings.push({
@@ -352,6 +424,7 @@ export function findingsOf(
       title: `${failed.length} HTTP ${failed.length === 1 ? "call" : "calls"} failed`,
       detail: `${str(first.data.method)} ${str(first.data.url)} → ${str(first.data.status) || str(first.data.error)}`,
       count: failed.length,
+      window: { from: first.startedAt ?? first.endedAt, to: first.endedAt },
     });
   }
 
@@ -411,6 +484,10 @@ export function findingsOf(
         : undefined,
       count: missed,
       during: markAt(marks, worst.t),
+      // A `frame` event is posted when the frame finishes, so `worst.t` is its
+      // end and its own totalMs backdates the start — the same reasoning as
+      // `main-thread-stall`.
+      window: { from: worst.t - num(worst.data.totalMs), to: worst.t },
     });
   }
 
@@ -423,6 +500,11 @@ export function findingsOf(
       confidence: "observed",
       title: `${gc.length} blocking collections paused the app for ${paused}ms`,
       count: gc.length,
+      // Not `spanning`: unlike a trace-side aggregate that sums duration with
+      // no timestamp of its own, every contributing collection here is a real
+      // event with a real `t`, so a window from the earliest to the latest is
+      // exactly where the count came from, not an invented range.
+      window: eventWindow(gc),
     });
   }
 
@@ -435,6 +517,7 @@ export function findingsOf(
       title: `the system asked for memory back ${trims.length} ${trims.length === 1 ? "time" : "times"}`,
       detail: `worst level: ${str(trims[trims.length - 1].data.level)}`,
       count: trims.length,
+      window: eventWindow(trims),
     });
   }
 
@@ -446,6 +529,7 @@ export function findingsOf(
       confidence: "observed",
       title: `${retried.length} background ${retried.length === 1 ? "job" : "jobs"} retried`,
       count: retried.length,
+      window: spanWindow(retried),
     });
   }
 
@@ -473,6 +557,10 @@ export function findingsOf(
           ? `most often within a frame of ${trigger[0]} — ordering, not proof`
           : undefined,
         count: hottest[1],
+        // Scoped to the hottest component's own recompositions, not every
+        // recompose in the run, so the window is as tight as the count it
+        // labels rather than as wide as the whole capture.
+        window: eventWindow(recompose.filter((e) => str(e.data.name) === hottest[0])),
       });
     }
   }
@@ -500,12 +588,20 @@ export function findingsOf(
     const build = versionName ? `${versionName}${versionAssumed ? " (assumed)" : ""}` : "an unknown build";
     const topFrame = str(exit.data.mainStack).split("\n")[0] || undefined;
 
+    // GRA-113: `spanning`, not `window`. `exit.t` is a timestamp in *this*
+    // process's uptime clock — the one reporting the death, at its next
+    // check-in — not the dead process's, whose own uptime clock reset with
+    // it and is gone. Placing the finding at `exit.t` would draw the death as
+    // though it happened just now, in the wrong process's session.
+    const predates = "the death predates this process's uptime clock, so it cannot be placed on this session's timeline";
+    const description = str(exit.data.description) || undefined;
+
     findings.push({
       id: `exit-${num(exit.data.timestamp)}`,
       severity,
       confidence: "observed",
       title: `${reason} — ${build}` + (topFrame ? ` — ${topFrame}` : ""),
-      detail: str(exit.data.description) || undefined,
+      detail: description ? `${description} (${predates})` : predates,
       during: markAt(marks, exit.t),
       evidence: {
         reason,
@@ -514,6 +610,7 @@ export function findingsOf(
         timestamp: num(exit.data.timestamp),
         ...(topFrame ? { topFrame } : {}),
       },
+      spanning: true,
     });
   }
 
