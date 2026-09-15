@@ -3,15 +3,14 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import { existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent, Hello } from "./device.js";
-import { findTraceProcessor } from "./perfetto.js";
+import { askTrace, findTraceProcessor, runScript } from "./perfetto.js";
 import { TimelineServer } from "./timeline.js";
 
 // The only thing in here that touches the outside world besides trace_processor
@@ -43,6 +42,14 @@ vi.mock("./perfetto.js", async () => {
     ...actual,
     findTraceProcessor: vi.fn(() => "/fake/trace_processor_shell"),
     askTrace: vi.fn(async () => ({ findings: [], unanswered: [] })),
+    // Wrapped, not replaced: this file's AC4 tests need to count how many
+    // times `/api/traces`' coverage computation actually spawns
+    // trace_processor, and a `vi.fn` around the real implementation is a call
+    // count `vi.mocked(runScript).mock.calls` can answer without touching
+    // `node:child_process` directly — `vi.spyOn` there throws ("Cannot
+    // redefine property: spawn") under this project's ESM interop, which is
+    // why this goes through the module mock instead of the built-in.
+    runScript: vi.fn(actual.runScript),
   };
 });
 
@@ -661,5 +668,231 @@ describe("the websocket", () => {
     const result = await connect(timeline.port, { path: "/nope" });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("404");
+  });
+});
+
+describe("GET /api/traces (GRA-113)", () => {
+  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+
+  beforeEach(async () => {
+    await rm(tracesDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await rm(tracesDir, { recursive: true, force: true });
+  });
+
+  it("is an empty list when the traces directory does not exist", async () => {
+    const response = await timeline.send("/api/traces");
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ traces: [] });
+  });
+
+  it("is an empty list when the traces directory exists but is empty", async () => {
+    await mkdir(tracesDir, { recursive: true });
+    const response = await timeline.send("/api/traces");
+    expect(JSON.parse(response.body)).toEqual({ traces: [] });
+  });
+
+  it("ignores a file that is not a .pftrace, rather than trying to read it as one", async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, "readme.txt"), "not a trace");
+    const response = await timeline.send("/api/traces");
+    expect(JSON.parse(response.body)).toEqual({ traces: [] });
+  });
+
+  it("lists a 0-byte .pftrace with bytes: 0 and a null coverage carrying a reason", async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, "zero-byte-a.pftrace"), "");
+    const response = await timeline.send("/api/traces");
+    const body = JSON.parse(response.body) as { traces: Array<Record<string, unknown>> };
+    expect(body.traces).toHaveLength(1);
+    // The mocked findTraceProcessor() in this file answers a path nothing is
+    // actually listening on, so coverage comes back null via a spawn error
+    // here rather than via the "no clock snapshot" reading a real 0-byte
+    // file produces — verified separately against the real binary (see this
+    // ticket's report). Both are real, honest "could not compute it" answers;
+    // this test pins the shape every null-coverage entry must have, not which
+    // specific reason produced it.
+    expect(body.traces[0]).toMatchObject({ id: "zero-byte-a", bytes: 0, coverage: null });
+    expect(typeof body.traces[0].reason).toBe("string");
+    expect(typeof body.traces[0].recordedAt).toBe("string");
+    expect(() => new Date(body.traces[0].recordedAt as string).toISOString()).not.toThrow();
+  });
+
+  it("spawns trace_processor at most once per file, even across repeated listings (AC4)", async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, "cached-b.pftrace"), "");
+    vi.mocked(runScript).mockClear();
+    await timeline.send("/api/traces");
+    await timeline.send("/api/traces");
+    await timeline.send("/api/traces");
+    expect(runScript).toHaveBeenCalledTimes(1);
+  });
+
+  it("does spawn again for a second, different file — the cache is per-file, not a global switch", async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, "cached-c.pftrace"), "");
+    vi.mocked(runScript).mockClear();
+    await timeline.send("/api/traces");
+    await writeFile(resolve(tracesDir, "cached-d.pftrace"), "");
+    await timeline.send("/api/traces");
+    expect(runScript).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("/api/findings?trace= validation (GRA-113 AC5)", () => {
+  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const knownId = "validation-fixture";
+
+  beforeEach(async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, `${knownId}.pftrace`), "");
+  });
+
+  afterEach(async () => {
+    await rm(resolve(tracesDir, `${knownId}.pftrace`), { force: true });
+  });
+
+  it("400s an empty trace id", async () => {
+    const response = await timeline.send("/api/findings?trace=");
+    expect(response.status).toBe(400);
+  });
+
+  it("400s a unix-style traversal", async () => {
+    const response = await timeline.send(
+      "/api/findings?trace=" + encodeURIComponent("../../../etc/passwd"),
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("400s a windows-style traversal", async () => {
+    const response = await timeline.send(
+      "/api/findings?trace=" + encodeURIComponent("..\\..\\..\\Windows\\win.ini"),
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("400s a well-formed id that does not resolve to a real file", async () => {
+    const response = await timeline.send("/api/findings?trace=does-not-exist-at-all");
+    expect(response.status).toBe(400);
+  });
+
+  it("never calls askTrace for any of the refused shapes above — refused before anything is spawned", async () => {
+    vi.mocked(askTrace).mockClear();
+    await timeline.send("/api/findings?trace=");
+    await timeline.send("/api/findings?trace=" + encodeURIComponent("../../../etc/passwd"));
+    await timeline.send("/api/findings?trace=" + encodeURIComponent("..\\..\\..\\Windows\\win.ini"));
+    await timeline.send("/api/findings?trace=does-not-exist-at-all");
+    expect(askTrace).not.toHaveBeenCalled();
+  });
+
+  it("accepts the matching id and reaches askTrace, proving the four refusals above are about the id and not the branch itself", async () => {
+    timeline.device.saidHello();
+    vi.mocked(askTrace).mockClear();
+    const response = await timeline.send(`/api/findings?trace=${knownId}`);
+    expect(response.status).toBe(200);
+    expect(askTrace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GRA-113 AC1: every finding carries window xor spanning, never neither", () => {
+  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const traceId = "both-sources-fixture";
+
+  beforeEach(async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, `${traceId}.pftrace`), "");
+  });
+
+  afterEach(async () => {
+    await rm(resolve(tracesDir, `${traceId}.pftrace`), { force: true });
+  });
+
+  it("walks every finding from a rig producing both a Porthole finding and a trace finding, and fails on any with neither", async () => {
+    timeline.device.saidHello("com.example.shop");
+    // A Porthole-side finding: a completed query on the main thread.
+    timeline.device.emit("event", event(1, "db_start", { id: "q", sql: "SELECT 1", onMainThread: "true" }));
+    timeline.device.emit("event", event(2, "db_end", { id: "q", onMainThread: "true" }));
+    timeline.device.emit("event", event(3, "nav", { route: "cart" }));
+
+    // A trace-side rig with one of each shape GRA-113 distinguishes: a
+    // point-placeable finding (window) and a spanning one — the same pair
+    // interpret() itself produces for a real jank + thread_states answer.
+    vi.mocked(askTrace).mockResolvedValueOnce({
+      findings: [
+        {
+          id: "trace-frame-deadline",
+          severity: "error",
+          confidence: "observed",
+          title: "the frame timeline recorded a miss",
+          window: { from: 1, to: 2 },
+        },
+        {
+          id: "trace-main-thread-contention",
+          severity: "note",
+          confidence: "observed",
+          title: "the main thread was not waiting for a CPU",
+          spanning: true,
+        },
+      ],
+      unanswered: [],
+    });
+
+    const response = await timeline.send(`/api/findings?trace=${traceId}`);
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { findings: Array<Record<string, unknown>> };
+
+    // Positive control: a rig that produced no findings at all would make the
+    // loop below pass vacuously. It has to actually see both sources' output.
+    expect(body.findings.some((f) => f.source === "porthole")).toBe(true);
+    expect(body.findings.some((f) => f.source === "trace")).toBe(true);
+    expect(body.findings.length).toBeGreaterThanOrEqual(3);
+
+    for (const finding of body.findings) {
+      const hasWindow =
+        finding.window !== undefined &&
+        finding.window !== null &&
+        typeof (finding.window as { from?: unknown }).from === "number" &&
+        typeof (finding.window as { to?: unknown }).to === "number";
+      const hasSpanning = finding.spanning === true;
+      expect(
+        hasWindow !== hasSpanning,
+        `finding ${JSON.stringify(finding)} must carry exactly one of window/spanning`,
+      ).toBe(true);
+    }
+  });
+});
+
+describe("GRA-113 AC3: one boot→uptime conversion, in moment.ts only", () => {
+  // Copies the shape of surface.test.ts's ConnectionState-comparison guard:
+  // a source grep, with a positive control proving the scanner actually sees
+  // something, run against the production files this ticket touches. The
+  // conversion used to be open-coded here (timeline.ts) reading whichever
+  // `clocks` sample it found first; it is now `toBootNs`/`fromBootMs`, both
+  // in moment.ts, and nothing in this ticket's other owned files should ever
+  // need to say "sleepMs" again.
+  //
+  // index.ts's `ask_system_trace` tool has the identical open-coded
+  // conversion at the same defect (first `clocks` sample found, not the one
+  // in force at the moment asked about) and is NOT included in the scan
+  // below: index.ts is outside this ticket's Owns, and fixing it here would
+  // be exactly the scope creep LEAN MODE asks implementers not to take on
+  // unilaterally. It is named in this ticket's report as an out-of-scope
+  // finding instead.
+  const scanned = ["timeline.ts", "trace.ts", "perfetto.ts"];
+
+  it("moment.ts does mention sleepMs — the positive control for the pattern below", () => {
+    const text = readFileSync(new URL("./moment.ts", import.meta.url), "utf8");
+    expect(text).toMatch(/\bsleepMs\b/);
+  });
+
+  it("none of timeline.ts, trace.ts or perfetto.ts contain sleepMs arithmetic", () => {
+    const offenders: string[] = [];
+    for (const file of scanned) {
+      const text = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+      if (/\bsleepMs\b/.test(text)) offenders.push(file);
+    }
+    expect(offenders, `sleepMs found outside moment.ts in: ${offenders.join(", ")}`).toEqual([]);
   });
 });
