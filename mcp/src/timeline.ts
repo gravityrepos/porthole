@@ -184,7 +184,7 @@ async function coverageOf(
   tracePath: string,
   mtimeMs: number,
 ): Promise<{ coverage: { from: number; to: number } | null; reason?: string }> {
-  const key = `${tracePath} ${mtimeMs}`;
+  const key = `${tracePath} ${mtimeMs}`;
   const cached = coverageCache.get(key);
   if (cached) return cached;
 
