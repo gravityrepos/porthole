@@ -13,6 +13,25 @@ PR that makes the change, not after the fact.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** every MCP tool's answer now returns its human-readable
+  summary and its JSON payload as two separate items in the response's
+  `content` array (`content[0]` is the summary text, `content[1]` is the
+  JSON payload as text) instead of one text block holding both, joined by
+  a blank line (`"<summary>\n\n<json>"`). **If your client parses a tool's
+  answer by finding the first blank line in `content[0].text` and treating
+  everything after it as JSON, that code must change**: read the payload
+  from `content[1].text` and `JSON.parse` it directly — do not search for
+  a delimiter. A tool reporting an error (`isError: true`) still returns
+  exactly one `content` item, as before; check `content.length` (or
+  `isError`) rather than assuming a payload is always present. This
+  removes a class of bug where device data containing a blank line
+  (a device name, a package name, anything interpolated into the summary)
+  could corrupt the split and make a tool's payload unrecoverable — see
+  GRA-169 and GRA-171. 0.1.0 wire compatibility is explicitly not
+  preserved by this change (founder decision, 2026-09-15).
+
 ### Added
 
 - System traces: capture a Perfetto trace on demand and ask it questions

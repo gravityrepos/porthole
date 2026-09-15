@@ -59,73 +59,81 @@ export interface PortholeServer {
  * in-memory transport — rather than grepping this file's source for the
  * properties a tool is supposed to have.
  */
-/**
- * GRA-169: `ok()` (below) finds its payload by the first blank line, and
- * every interpolated summary it builds carries at least one value that
- * arrived over the wire from the device (hello.device, hello.packageName, a
- * lastExited process's own copies of both) with nothing guaranteeing it is
- * single-line. A blank line inside any of them used to re-split the answer
- * at the wrong point: `testing/harness.ts`'s `parsePayload()` (and any real
- * consumer following the same "summary\n\n{json}" convention) slices from
- * the middle of the summary's own prose instead of the start of the JSON,
- * and `JSON.parse` throws — not degraded output, no payload at all, in all
- * three tools identically, since they all build their summaries out of the
- * same handful of interpolation points.
- *
- * The three options this ticket named were: make the split structural
- * (return the payload as its own content block, or behind an unforgeable
- * delimiter), normalise interpolated values at the boundary, or assert the
- * invariant in `ok()`. Structural was ruled out for this ticket
- * specifically: `testing/harness.ts`'s `parsePayload()` (used by every test
- * file that calls a tool through `rig.client`, not just this one)
- * hardcodes the "summary\n\n{json}" shape, and that file is owned by other
- * nodes, not this ticket — changing the wire shape here without changing
- * every reader of it in lockstep would just move the unparseable-payload
- * bug from "adversarial device data" to "every test in the suite", which is
- * not a fix.
- *
- * So: normalise, but at the one chokepoint every tool's answer already
- * passes through (`ok()`'s call to this function), not at each of the
- * dozen places a summary is built — the per-call-site version of this fix
- * is exactly the "cheaper, but only defends the values someone remembered
- * to wrap" shape the ticket warns has failed here repeatedly (GRA-163's own
- * AC1 test caught one such spot by accident). Collapsing at the chokepoint
- * means every existing call site is covered automatically, and so is every
- * future one — nobody has to remember. This turns any run of two or more
- * newlines (optionally with spaces or tabs between them) into a single
- * space, which is the only substring this file ever treats as meaningful
- * ("\n\n", the delimiter `ok()` itself appends), so after normalising, that
- * substring cannot occur inside a summary no matter what the device sent.
- *
- * Module-level and exported, rather than a closure inside
- * `createPortholeServer`, purely so `index.test.ts` can hold this function
- * itself to the standard the ticket asks the fix to meet — collapsing
- * "\n \n" (whitespace between the newlines) and multiple consecutive blank
- * lines, not just the single "\n\n" case a reader might assume is the only
- * shape a blank line takes — instead of only exercising it indirectly
- * through a handful of device fixtures that happen to reach `ok()`.
- *
- * What this still does not defend: anything that reaches a payload *field*
- * rather than a summary is untouched on purpose — payload is
- * `JSON.stringify`'d, which already escapes a raw newline as `\n`, so
- * nothing in the JSON half can ever contain a literal blank line. And this
- * fixes the delimiter, not truthfulness: a value that collapses a blank
- * line into a space is still whatever string the device sent, so two
- * device names that differ only in embedded whitespace now read
- * identically in prose. Nothing here defends against a value engineered to
- * defeat this function with a line-terminator this project has not seen a
- * device use (U+2028/U+2029, or a bare `\r` with no matching `\n`) — those
- * are not blank lines by this function's definition and would need their
- * own test before anyone could claim they are handled.
+/** A tool's `content` array is one text block (summary only, `fail()`'s
+ * shape) or two (summary then payload, `ok()`'s shape). Both blocks are
+ * plain text on the wire; only the count tells a consumer which is which.
  */
-export function collapseBlankLines(text: string): string {
-  let previous: string;
-  let collapsed = text.replace(/\r\n/g, "\n");
-  do {
-    previous = collapsed;
-    collapsed = collapsed.replace(/\n[ \t]*\n/g, " ");
-  } while (collapsed !== previous);
-  return collapsed;
+type ToolContentBlock = { type: "text"; text: string };
+
+/**
+ * GRA-171: builds the `content` array both `ok()` and `fail()` return, so
+ * there is exactly one place a summary and a payload are put together.
+ *
+ * GRA-169 defended this same seam by *normalising*: `ok()` joined summary
+ * and payload with the literal string `"\n\n"` and collapsed every blank
+ * line out of the summary first, because a consumer found the payload by
+ * searching the *text* for that substring — a property of the string, not
+ * of anything the protocol enforced. Interpolate a device value containing
+ * a blank line (`hello.device`, say) into the summary and the search finds
+ * the wrong occurrence, slicing from the middle of the prose instead of the
+ * start of the JSON; `JSON.parse` throws and the payload is gone, not
+ * merely mislabelled. Normalising away every blank line closed that one
+ * failure mode (14 tests, no known gap) but it was still a textual fix for
+ * a textual bug: it bought safety by silently rewriting an author's
+ * intended blank line into a space, and it left `fail()` unguarded, since
+ * `fail()` never called `collapseBlankLines()` — a second chokepoint nobody
+ * had reason to notice was missing.
+ *
+ * GRA-171's structural option was on the table from the start but rejected
+ * for a reason that did not hold: 0.1.0 wire compatibility. The founder's
+ * 2026-09-15 decision that 0.2.0 may change this delimiter removes that
+ * obstacle, so the summary and the payload are now two separate blocks in
+ * the `content` array, never one string joined by a marker. **This is what
+ * "the delimiter cannot occur in data" means concretely: there is no
+ * delimiter for a value to collide with, at any position, in either
+ * block.** A consumer takes `content[0]` for the summary and `content[1]`
+ * for the payload by position — the same way this function decides which
+ * is which by argument count, not by scanning either string for anything.
+ * No text search happens over either block's contents at all, so a value
+ * containing every shape GRA-169 catalogued (CRLF pairs, three to seven
+ * consecutive newlines, whitespace-only lines, U+2028/U+2029, NBSP, form
+ * feed, leading and trailing blank lines, the empty string, or literally
+ * `"\n\n"` itself) is carried verbatim in its own block and never
+ * inspected here. If a future call site ever concatenated the payload back
+ * into the summary string by hand instead of passing it as the `payload`
+ * argument, that call site alone would reintroduce a textual seam — this
+ * function cannot protect against bypassing itself, only against being
+ * used and still failing.
+ *
+ * `collapseBlankLines()` (GRA-169) is deleted rather than kept alongside
+ * this, and that is a deliberate call, not reflex. GRA-168's CRLF
+ * normalisation was kept after GRA-166's scanner made it redundant for
+ * *correctness*, because it still served a second purpose — canonical
+ * output — that removing it would have destroyed. `collapseBlankLines()`
+ * has no second purpose: its only job, on every call site, was defending
+ * the "\n\n" delimiter, and it always cost prose fidelity to do it — a
+ * device value an agent might want verbatim came back with its blank lines
+ * flattened to spaces. With no delimiter left to defend, keeping it would
+ * mean paying that cost for a defence nothing needs any more. That is a
+ * reason to remove it, not merely permission to.
+ *
+ * Module-level and exported, as `collapseBlankLines()` was, so
+ * `index.test.ts` can call this directly with adversarial summaries and
+ * payloads and assert on the `content` array's shape and the payload
+ * block's JSON round-trip — no `vi.mock`/`spyOn` needed, because there is
+ * no module-local binding to intercept: the function under test *is* the
+ * chokepoint, not a wrapper around one.
+ */
+export function joinSummaryAndPayload(summary: string, ...payload: [unknown] | []): ToolContentBlock[] {
+  const blocks: ToolContentBlock[] = [{ type: "text", text: summary }];
+  if (payload.length > 0) {
+    // JSON.stringify(undefined) is the JS value `undefined`, not a string —
+    // the `?? "null"` keeps this block's `text` a real string always (the
+    // MCP content schema requires one), and keeps the payload something
+    // `JSON.parse` can read back rather than a block with no usable text.
+    blocks.push({ type: "text", text: JSON.stringify(payload[0], null, 2) ?? "null" });
+  }
+  return blocks;
 }
 
 export function createPortholeServer(options: PortholeServerOptions = {}): PortholeServer {
@@ -137,35 +145,43 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     version: options.version ?? pkg.version,
   });
 
-  type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+  type ToolResult = { content: ToolContentBlock[]; isError?: boolean };
 
   /**
-   * Summary line first, then the JSON. The summary is often the whole
-   * answer. GRA-169: `collapseBlankLines()` (above) is the actual defence;
-   * the check right after it is the ticket's third option kept in addition
-   * to, not instead of, normalising — it does not widen what is defended (a
-   * bug in `collapseBlankLines()` is the only way to reach it), but it
-   * turns "the split silently lands in the wrong place" into "this throws,
-   * loudly, in whichever call first hits it" if that ever happens — dying
-   * at the source instead of at a consumer.
+   * Summary first, payload second — as two `content` blocks now (see
+   * `joinSummaryAndPayload()` above), not one string joined by a delimiter.
+   * GRA-171: the post-collapse assertion this function used to carry
+   * (`ok(): summary still contains a blank line after
+   * collapseBlankLines()`) is deleted along with `collapseBlankLines()`
+   * itself, and deliberately, not by omission. That assertion guarded one
+   * specific failure of the textual design — the delimiter search finding
+   * the wrong "\n\n" — and GRA-169's own QA had already shown it was
+   * unreachable by any test without a production refactor, because `ok()`
+   * called `collapseBlankLines` by a module-local binding no mock could
+   * intercept. A structural join has no blank-line assumption to violate:
+   * there is no search, so there is nothing for the assertion to catch that
+   * `joinSummaryAndPayload()`'s own direct tests do not already cover by
+   * construction. Keeping an assertion for a failure mode that no longer
+   * exists would be exactly the untested-claim shape this ticket exists to
+   * end, just moved from "untested" to "vacuous".
    */
   function ok(summary: string, payload: unknown): ToolResult {
-    const safeSummary = collapseBlankLines(summary);
-    if (safeSummary.includes("\n\n")) {
-      // Should be unreachable — collapseBlankLines() just removed every
-      // blank line there was. If this ever fires, the one thing standing
-      // between arbitrary device data and every consumer's split point has
-      // a bug, and every tool's payload is silently corrupt right now.
-      throw new Error("ok(): summary still contains a blank line after collapseBlankLines()");
-    }
-    return {
-      content: [{ type: "text", text: `${safeSummary}\n\n${JSON.stringify(payload, null, 2)}` }],
-    };
+    return { content: joinSummaryAndPayload(summary, payload) };
   }
 
+  /**
+   * GRA-171: routes through `joinSummaryAndPayload()` too, with no payload
+   * block (a bare `payload.length > 0` check away from getting one, if an
+   * error ever needs structured detail). Before this ticket `fail()` built
+   * its `content` array by hand and never passed through the chokepoint
+   * `ok()` used for `collapseBlankLines()` — the GRA-169 ticket named this
+   * explicitly as half of why normalisation could not be a complete fix.
+   * With both going through the same function there is exactly one place
+   * a `content` array is assembled, for success or failure alike.
+   */
   function fail(error: unknown): ToolResult {
     const message = error instanceof Error ? error.message : String(error);
-    return { content: [{ type: "text", text: message }], isError: true };
+    return { content: joinSummaryAndPayload(message), isError: true };
   }
 
   async function call<T>(
