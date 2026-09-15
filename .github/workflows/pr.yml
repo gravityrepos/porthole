@@ -252,7 +252,7 @@ jobs:
       # error, the same way the build step above already does for the rest of
       # src/.
       - name: Type-check src/testing/ (tsc --noEmit, second project)
-        run: npm run typecheck:all
+        run: npm run typecheck:src
 
       # GRA-164: unit tests for the parsing check-readme-vitest-counts.mjs
       # relies on (thousands-separator rejection especially). node:test, not
