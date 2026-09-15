@@ -1387,16 +1387,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**951 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**950 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 366 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 359
-passed, 0 failed, 7 skipped), 451 in the MCP server (`cd mcp && npm test` —
-449 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 7 skipped), 450 in the MCP server (`cd mcp && npm test` —
+448 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 951 disagrees with the sum of the three suites' totals stated
+XML, and when 950 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
