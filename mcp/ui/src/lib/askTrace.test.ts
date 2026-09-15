@@ -287,7 +287,7 @@ describe("fetchAskTrace", () => {
   const window: Window = { from: 1234.4, to: 1500.6 };
 
   it("carries the given trace id and the window's rounded from/to, not any other window (ruling 7)", async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(emptyPayload()), { status: 200 }));
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(emptyPayload()), { status: 200 }));
     await fetchAskTrace("trace-abc", window, fetchImpl as unknown as typeof fetch);
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -304,7 +304,7 @@ describe("fetchAskTrace", () => {
       asked: [{ id: "jank", answered: true }],
       findings: [finding({ id: "x", source: "trace" })],
     };
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 }));
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(payload), { status: 200 }));
     const result = await fetchAskTrace("t1", window, fetchImpl as unknown as typeof fetch);
 
     expect(result.kind).toBe("answer");
@@ -315,7 +315,7 @@ describe("fetchAskTrace", () => {
   });
 
   it("returns an error result when the server answers non-200 (self-check (a): /api/findings failing)", async () => {
-    const fetchImpl = vi.fn(async () => new Response("boom", { status: 500 }));
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("boom", { status: 500 }));
     const result = await fetchAskTrace("t1", window, fetchImpl as unknown as typeof fetch);
     expect(result.kind).toBe("error");
     if (result.kind !== "error") throw new Error("expected error");
@@ -323,7 +323,7 @@ describe("fetchAskTrace", () => {
   });
 
   it("returns an error result rather than throwing when fetch itself rejects", async () => {
-    const fetchImpl = vi.fn(async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
       throw new Error("network down");
     });
     const result = await fetchAskTrace("t1", window, fetchImpl as unknown as typeof fetch);
@@ -333,7 +333,7 @@ describe("fetchAskTrace", () => {
   });
 
   it("returns an answer with empty findings and empty ruledOut for an empty findings list and no asked (self-check (a))", async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(emptyPayload()), { status: 200 }));
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(emptyPayload()), { status: 200 }));
     const result = await fetchAskTrace("t1", window, fetchImpl as unknown as typeof fetch);
     expect(result.kind).toBe("answer");
     if (result.kind !== "answer") throw new Error("expected answer");

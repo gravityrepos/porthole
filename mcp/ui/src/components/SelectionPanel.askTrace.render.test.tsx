@@ -46,7 +46,7 @@ function findingsPayload(overrides: Partial<FindingsPayload> = {}): FindingsPayl
 }
 
 function stubFetch(payload: FindingsPayload) {
-  return vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 }));
+  return vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(payload), { status: 200 }));
 }
 
 afterEach(() => {
@@ -155,7 +155,7 @@ describe("SelectionPanel's answer, once a covering trace is chosen", () => {
   });
 
   it("shows the server's error rather than throwing when /api/findings answers 500 (self-check (a))", async () => {
-    const fetchMock = vi.fn(async () => new Response("boom", { status: 500 }));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("boom", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
 
     render(<SelectionPanel hit={frameHit()} traces={[covering()]} selectedTraceId="trace-1" contextWindow={null} />);
