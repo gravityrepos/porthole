@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { extname, resolve, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { isConnected, isHandshaking, type ConnectionState, type DeviceClient, type DeviceEvent } from "./device.js";
-import { askTrace, findTraceProcessor, parseRows, runScript, why, type RunResult } from "./perfetto.js";
+import { askTrace, findTraceProcessor, parseRows, runScript, why, QUESTIONS, type RunResult } from "./perfetto.js";
 import { buildTrace } from "./trace.js";
 import { fromBootMs, fromTraceClockSnapshot, toBootNs } from "./moment.js";
 
@@ -486,6 +486,16 @@ export class TimelineServer {
         type Sourced = (typeof live.findings)[number] & { source: "porthole" | "trace" };
         const findings: Sourced[] = live.findings.map((f) => ({ ...f, source: "porthole" }));
         const notes: string[] = [];
+        // GRA-115 ruling 4: which of the five questions trace_processor
+        // actually answered, so a UI asking "what did the trace rule out"
+        // does not have to infer it from the absence of a `trace-*` finding
+        // -- that guess is wrong for `thread_states`, which always produces
+        // a finding (even a reassuring one) whenever it is answered at all.
+        // Left undefined when no trace was even queried (no `trace=`, no
+        // binary, not attached): "asked nothing" and "asked and got nothing
+        // back" are different states, and this is the field that tells them
+        // apart.
+        let askedQuestions: { id: string; answered: boolean }[] | undefined;
 
         if (traceFile) {
           const binary = findTraceProcessor();
@@ -531,6 +541,16 @@ export class TimelineServer {
             });
             findings.push(...asked.findings.map((f): Sourced => ({ ...f, source: "trace" })));
             notes.push(...asked.unanswered);
+            // Matched against `unanswered`'s own text rather than a second
+            // field threaded out of askTrace: every unanswered reason
+            // already begins with the question's own `asks` sentence
+            // (`runBatch`'s three push sites all format it
+            // `${question.asks} — <reason>`), so this reads an existing
+            // contract instead of adding a new one to perfetto.ts.
+            askedQuestions = QUESTIONS.map((question) => ({
+              id: question.id,
+              answered: !asked.unanswered.some((line) => line.startsWith(`${question.asks} — `)),
+            }));
           }
         }
 
@@ -541,6 +561,7 @@ export class TimelineServer {
             eventsExamined: within.length,
             metrics: live.metrics,
             findings,
+            ...(askedQuestions ? { asked: askedQuestions } : {}),
             notes,
           }),
         );

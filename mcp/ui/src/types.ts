@@ -105,12 +105,22 @@ export interface Finding {
   spanning?: true;
 }
 
-/** `/api/findings`'s whole response body. */
+/** `/api/findings`'s whole response body.
+ *
+ * `asked` (GRA-115 ruling 4) is present only when a `trace=` was resolved and
+ * actually queried: one entry per question `mcp/src/perfetto.ts`'s
+ * `QUESTIONS` asks, saying whether trace_processor answered it at all. It
+ * says nothing about whether the answer became a finding -- a question can
+ * be answered and still produce nothing, which is the negative-answer case
+ * `lib/askTrace.ts`'s `ruledOut` exists to surface. Optional so a caller that
+ * asked with no `trace=`, or an older server, is a real state to render
+ * rather than a shape violation. */
 export interface FindingsPayload {
   window: { from: number; to: number; ms: number };
   eventsExamined: number;
   findings: Finding[];
   notes: string[];
+  asked?: Array<{ id: string; answered: boolean }>;
 }
 
 /** One entry of `/api/traces`'s `traces` array (`mcp/src/timeline.ts`'s

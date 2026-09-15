@@ -425,7 +425,12 @@ export function App() {
             selectedTraceId={selectedTraceId}
             onSelectTrace={setSelectedTraceId}
           />
-          <SelectionPanel hit={hit} />
+          <SelectionPanel
+            hit={hit}
+            traces={traces}
+            selectedTraceId={selectedTraceId}
+            contextWindow={findingsPayload?.window ?? null}
+          />
           <WindowPanel
             summary={summary}
             onAsk={ask}

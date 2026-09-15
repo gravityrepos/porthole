@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent, Hello } from "./device.js";
-import { askTrace, findTraceProcessor, runScript } from "./perfetto.js";
+import { askTrace, findTraceProcessor, QUESTIONS, runScript } from "./perfetto.js";
 import { TimelineServer } from "./timeline.js";
 
 // Where GRA-113's `tracesDir()` (timeline.ts, via `resolveProjectRoot()`)
@@ -942,6 +942,67 @@ describe("GRA-113 AC1: every finding carries window xor spanning, never neither"
         `finding ${JSON.stringify(finding)} must carry exactly one of window/spanning`,
       ).toBe(true);
     }
+  });
+});
+
+describe("GRA-115 ruling 4: /api/findings' asked field", () => {
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
+  const traceId = "asked-fixture";
+
+  beforeEach(async () => {
+    await mkdir(tracesDir, { recursive: true });
+    await writeFile(resolve(tracesDir, `${traceId}.pftrace`), "");
+    timeline.device.saidHello("com.example.shop");
+  });
+
+  afterEach(async () => {
+    await rm(resolve(tracesDir, `${traceId}.pftrace`), { force: true });
+  });
+
+  it("marks every question answered when askTrace reports nothing unanswered", async () => {
+    vi.mocked(askTrace).mockResolvedValueOnce({ findings: [], unanswered: [] });
+
+    const response = await timeline.send(`/api/findings?trace=${traceId}`);
+    const body = JSON.parse(response.body) as { asked?: Array<{ id: string; answered: boolean }> };
+
+    expect(body.asked).toEqual([
+      { id: "jank", answered: true },
+      { id: "thread_states", answered: true },
+      { id: "binder", answered: true },
+      { id: "render", answered: true },
+      { id: "slices", answered: true },
+    ]);
+  });
+
+  it("marks exactly the question named in askTrace's unanswered reasons as not answered", async () => {
+    const failedQuestion = QUESTIONS.find((q) => q.id === "binder")!;
+    vi.mocked(askTrace).mockResolvedValueOnce({
+      findings: [],
+      unanswered: [`${failedQuestion.asks} — trace_processor did not answer within 5000ms querying x; it may be wedged, so nothing after it was retried`],
+    });
+
+    const response = await timeline.send(`/api/findings?trace=${traceId}`);
+    const body = JSON.parse(response.body) as { asked?: Array<{ id: string; answered: boolean }> };
+
+    const byId = new Map(body.asked!.map((q) => [q.id, q.answered]));
+    expect(byId.get("binder")).toBe(false);
+    expect(byId.get("jank")).toBe(true);
+    expect(byId.get("thread_states")).toBe(true);
+    expect(byId.get("render")).toBe(true);
+    expect(byId.get("slices")).toBe(true);
+  });
+
+  it("omits asked entirely when no trace= was given, rather than an empty array", async () => {
+    const response = await timeline.send("/api/findings");
+    const body = JSON.parse(response.body) as Record<string, unknown>;
+    expect("asked" in body).toBe(false);
+  });
+
+  it("omits asked when a trace is named but the app is not attached, since askTrace never ran", async () => {
+    timeline.device.hello = null;
+    const response = await timeline.send(`/api/findings?trace=${traceId}`);
+    const body = JSON.parse(response.body) as Record<string, unknown>;
+    expect("asked" in body).toBe(false);
   });
 });
 
