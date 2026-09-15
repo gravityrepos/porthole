@@ -147,3 +147,78 @@ describe("App issues one /api/findings request per settled view (GRA-114, in the
     expect(findingsCalls).toHaveLength(1);
   });
 });
+
+describe("App survives a failing /api/findings or /api/traces (self-check (a))", () => {
+  it("does not throw when /api/findings answers 500", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).includes("/api/findings")
+          ? new Response("internal error", { status: 500 })
+          : new Response(JSON.stringify({ traces: emptyTraces }), { status: 200 }),
+      ),
+    );
+
+    expect(() => render(<App />)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(300);
+  });
+
+  it("does not throw when /api/traces answers 500", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).includes("/api/traces")
+          ? new Response("internal error", { status: 500 })
+          : new Response(JSON.stringify(emptyFindings), { status: 200 }),
+      ),
+    );
+
+    expect(() => render(<App />)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(300);
+  });
+
+  it("does not throw when /api/findings answers with a finding carrying neither window nor spanning", async () => {
+    const malformed = {
+      ...emptyFindings,
+      findings: [
+        {
+          id: "bad-1",
+          severity: "error",
+          confidence: "observed",
+          title: "malformed",
+          source: "trace",
+          // neither window nor spanning
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).includes("/api/findings")
+          ? new Response(JSON.stringify(malformed), { status: 200 })
+          : new Response(JSON.stringify({ traces: emptyTraces }), { status: 200 }),
+      ),
+    );
+
+    expect(() => render(<App />)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(300);
+  });
+
+  it("does not throw when every listed trace has coverage: null", async () => {
+    const allNull: TraceListing[] = [
+      { id: "a", bytes: 1, recordedAt: "2026-09-15T10:00:00.000Z", coverage: null, reason: "no binary" },
+      { id: "b", bytes: 1, recordedAt: "2026-09-15T09:00:00.000Z", coverage: null, reason: "no clock snapshot" },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).includes("/api/traces")
+          ? new Response(JSON.stringify({ traces: allNull }), { status: 200 })
+          : new Response(JSON.stringify(emptyFindings), { status: 200 }),
+      ),
+    );
+
+    expect(() => render(<App />)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(300);
+  });
+});
