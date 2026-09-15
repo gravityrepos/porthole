@@ -34,6 +34,11 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- `portholeStart`, a single task that installs the debug build, forwards the
+  port, writes `.mcp.json`, fetches `trace_processor` on first need, and
+  opens the timeline — a thin orchestrator over the existing narrow tasks,
+  which stay individually runnable and are now the README's reference table
+  rather than its lead (GRA-174).
 - System traces: capture a Perfetto trace on demand and ask it questions
   through `ask_system_trace` / `capture_system_trace`, backed by five
   curated SQL questions (jank, thread_states, binder, render, slices)

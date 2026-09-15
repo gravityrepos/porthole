@@ -8,6 +8,7 @@ import com.android.build.api.variant.ApplicationAndroidComponentsExtension
 import com.android.build.api.variant.LibraryAndroidComponentsExtension
 import org.gradle.api.NamedDomainObjectContainer
 import org.gradle.api.Project
+import org.gradle.api.provider.Provider
 
 /**
  * Everything that names an AGP type, kept away from [PortholePlugin].
@@ -31,9 +32,35 @@ import org.gradle.api.Project
  */
 internal object AndroidWiring {
 
-    fun application(project: Project, extension: PortholeExtension) {
-        project.extensions.getByType(ApplicationAndroidComponentsExtension::class.java)
-            .finalizeDsl { dsl -> wire(project, extension, dsl.buildTypes, dsl.buildFeatures) }
+    /**
+     * Wires the app module the same way [library] does, and additionally
+     * returns the names of its debug variants — `"debug"` with no flavors,
+     * `"roomDebug"`/`"sqldelightDebug"` with a flavor dimension — for
+     * [PortholePlugin] to hand to `portholeStart` (GRA-174), which needs to
+     * know which `install<Variant>` task to depend on.
+     *
+     * Collected via `onVariants` rather than read off the DSL directly,
+     * because a variant's *name* — the thing `install` tasks are suffixed
+     * with — is AGP's own computation over build types, flavors and their
+     * dimension order, and `onVariants` is the one place that answer is
+     * final. The list is read back through the returned [Provider] rather
+     * than handed over directly, because `onVariants` callbacks are still
+     * firing (once per variant) when this method returns; by the time
+     * anything resolves the provider — building the task graph, well after
+     * this project has finished evaluating — every variant has arrived.
+     */
+    fun application(project: Project, extension: PortholeExtension): Provider<List<String>> {
+        val components = project.extensions.getByType(ApplicationAndroidComponentsExtension::class.java)
+        components.finalizeDsl { dsl -> wire(project, extension, dsl.buildTypes, dsl.buildFeatures) }
+
+        val debugVariantNames = mutableListOf<String>()
+        components.onVariants { variant ->
+            val buildType = variant.buildType
+            if (buildType != null && buildType in extension.debugBuildTypes.get()) {
+                debugVariantNames += variant.name
+            }
+        }
+        return project.provider { debugVariantNames.toList() }
     }
 
     fun library(project: Project, extension: PortholeExtension) {
