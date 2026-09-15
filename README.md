@@ -1458,16 +1458,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**971 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1025 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 386 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 379
-passed, 0 failed, 7 skipped), 451 in the MCP server (`cd mcp && npm test` —
-449 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+[Testing](#testing)): 399 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 391
+passed, 0 failed, 8 skipped), 492 in the MCP server (`cd mcp && npm test` —
+490 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 971 disagrees with the sum of the three suites' totals stated
+XML, and when 1025 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1480,20 +1480,20 @@ surface of `runtime` and `runtime-noop`, because a missing no-op breaks the
 release build of whoever cuts the release rather than whoever added the
 integration.
 
-The JVM's 7 skips on ubuntu are four Windows-shaped `McpConfigTest` cases
+The JVM's 8 skips on ubuntu are four Windows-shaped `McpConfigTest` cases
 (drive-relative, POSIX-shaped-on-Windows, the committed capture's
 resolution, UNC), the machine-local `local.properties` cross-check, and the
-two-test AGP compatibility pair, which needs an SDK and the network and
-skips cleanly without a version to check — none of the seven is a gap in
+three-test AGP compatibility set, which needs an SDK and the network and
+skips cleanly without a version to check — none of the eight is a gap in
 what the suite proves, each is a test that only makes sense on a platform
 this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 (gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 386 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
-pair) and the same 451 server tests with 0 skipped, because it has the
+the same 399 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
+set) and the same 492 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 451/450/1, missing only that capture. The timeline UI is the one suite
+sees 492/491/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
