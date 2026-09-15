@@ -189,7 +189,8 @@ That is the whole minimum: the plugin block above, and this one command.
 opens the timeline in your browser — always in that order, a real Gradle
 `mustRunAfter` chain rather than a naming coincidence, since the last step
 blocks until you stop it. It is not new behaviour: it is `installDebug` (or
-`install<Variant>Debug`, see below), `portholeMcpConfig`,
+`install<Variant>` with flavors — `installRoomDebug`, not
+`installRoomDebugDebug`; see below), `portholeMcpConfig`,
 `portholeTraceProcessor`, and — forwarding the port — either `portholeUi` or
 `portholeConnect`, never both, wired together so the order is not something
 you have to learn. Doing anything unusual still means reaching for one of
@@ -201,8 +202,8 @@ Two things worth knowing before you run it:
 - **More than one debug build variant** (a `productFlavors` block, like the
   sample's `room`/`sqldelight` storage flavors) means `portholeStart` cannot
   guess which one you want installed, and refuses rather than picking. Name
-  the variant AGP would use for `install<Variant>Debug` — not the flavor
-  alone — so the sample's Room flavor is `roomDebug`:
+  the variant itself, the way `install<Variant>` already ends — not the
+  flavor alone — so the sample's Room flavor is `roomDebug`:
   `./gradlew :app:portholeStart -Pporthole.variant=roomDebug`. One variant is
   picked automatically; more than one is always asked for, never guessed.
 - **An agent driving this** — no one at a keyboard to look at a browser
@@ -327,7 +328,7 @@ regenerated after editing `.mcp.json` by hand:
 
 | task | does | reach for it directly when |
 | --- | --- | --- |
-| `install<Variant>Debug` | installs the debug build (AGP's own task, e.g. `installDebug` or, with flavors, `installRoomDebug`) | you only need the build on the device, nothing else |
+| `install<Variant>` | installs the debug build (AGP's own task, e.g. `installDebug` or, with flavors, `installRoomDebug`) | you only need the build on the device, nothing else |
 | `portholeConnect` | `adb forward`s the port and writes the connection file | your agent is doing the looking and you do not want a browser — `portholeStart -Pporthole.open=false` uses this instead of `portholeUi` |
 | `portholeMcpConfig` | writes the MCP server entry into `.mcp.json` | you edited `.mcp.json` by hand and want the entry regenerated, or need `-Pporthole.overwrite=true` |
 | `portholeTraceProcessor` | fetches and verifies Perfetto's `trace_processor`, once | you want it ahead of time, or `-Pporthole.refresh=true` to re-fetch it |

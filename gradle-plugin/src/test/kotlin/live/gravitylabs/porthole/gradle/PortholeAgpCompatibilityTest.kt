@@ -132,7 +132,14 @@ class PortholeAgpCompatibilityTest {
         // configuration failure, long before anything was assembled.
         val output = run(":app:tasks", "--group=${PortholePlugin.GROUP}").output
 
-        for (task in listOf("portholeConnect", "portholeDisconnect", "portholeUi", "portholeMcpConfig")) {
+        for (task in listOf(
+            "portholeConnect",
+            "portholeDisconnect",
+            "portholeUi",
+            "portholeMcpConfig",
+            "portholeTraceProcessor",
+            "portholeStart",
+        )) {
             assertTrue("expected $task in:\n$output", output.contains(task))
         }
     }
