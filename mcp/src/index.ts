@@ -32,7 +32,7 @@ import {
   sessionsRoot as sessionsRootPath,
   type SessionEvent,
 } from "./sessions.js";
-import { buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, writeSavedTrace } from "./save.js";
+import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
@@ -1422,8 +1422,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const helloLike = device.hello ?? device.lastExited?.hello ?? null;
       const hello = (helloLike as unknown as Record<string, unknown>) ?? null;
 
-      const resolvedScenario = scenario ?? defaultScenarioName(span.from, span.to);
-      const outPath = out ?? defaultOutPath(resolveProjectRoot().directory, resolvedScenario);
+      let resolvedScenario: string;
+      let outPath: string;
+      try {
+        resolvedScenario = scenario === undefined ? defaultScenarioName(span.from, span.to) : validateScenario(scenario);
+        outPath = out ?? defaultOutPath(resolveProjectRoot().directory, resolvedScenario);
+      } catch (error) {
+        if (error instanceof InvalidScenarioError) return fail(`save_moment: ${error.message}`);
+        throw error;
+      }
 
       const trace = buildSavedTrace({
         events,

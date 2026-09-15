@@ -32,6 +32,8 @@ import {
   saveFromSessions,
   writeSavedTrace,
   type SavedTrace,
+  validateScenario,
+  InvalidScenarioError,
 } from "./save.js";
 
 /**
@@ -703,6 +705,17 @@ describe("save_moment (MCP tool)", () => {
     expect(savedFile.durationMs).toBe(10_000);
   });
 
+  it("refuses a scenario that would escape .porthole/traces, before writing anything (QA round 1 on GRA-116)", async () => {
+    const { timeline, client } = await buildToolRig(1_000, "device-traversal");
+    const target = timeline.buffer().length + 1;
+    fakeDevice!.emit("recompose", 500, { name: "Cart" });
+    await waitUntil(() => timeline.buffer().length >= target, 10_000);
+
+    const result = await client.callTool("save_moment", { from: 0, to: 1_000, scenario: "../../../../tmp/evil" });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/scenario/);
+  });
+
   it("defaults scenario and out when neither is given", async () => {
     const { timeline, client } = await buildToolRig(1_000, "device-defaults");
     const target = timeline.buffer().length + 1;
@@ -731,5 +744,39 @@ describe("save_moment (MCP tool)", () => {
     const result = await client.callTool("save_moment", { sinceMs: -5 });
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/greater than 0|sinceMs/);
+  });
+});
+
+describe("validateScenario (QA round 1 on GRA-116: the scenario becomes a file name)", () => {
+  it("accepts ordinary names, trimmed", () => {
+    expect(validateScenario("checkout")).toBe("checkout");
+    expect(validateScenario("  cart flow 3  ")).toBe("cart flow 3");
+    expect(validateScenario("moment-100-200")).toBe("moment-100-200");
+    expect(validateScenario("v1.2_final")).toBe("v1.2_final");
+  });
+
+  it("refuses anything that could leave .porthole/traces", () => {
+    const backslash = String.fromCharCode(92); // a shell heredoc ate the literal once already
+    const bad = [
+      "../../../../tmp/evil",
+      `..${backslash}..${backslash}evil`,
+      "a/b",
+      `a${backslash}b`,
+      "..",
+      ".",
+      "...",
+      "",
+      "   ",
+      `x${String.fromCharCode(0)}y`,
+      "a".repeat(121),
+    ];
+    for (const item of bad) {
+      expect(() => validateScenario(item), JSON.stringify(item)).toThrow(InvalidScenarioError);
+    }
+  });
+
+  it("defaultOutPath goes through the same check, so every caller is covered", () => {
+    expect(() => defaultOutPath("/home/dev/app", "../evil")).toThrow(InvalidScenarioError);
+    expect(path.basename(defaultOutPath("/home/dev/app", "ok name"))).toBe("ok name.json");
   });
 });

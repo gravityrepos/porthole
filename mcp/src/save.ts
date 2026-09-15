@@ -74,7 +74,36 @@ export function defaultScenarioName(from: number, to: number): string {
  * and a system trace from the same investigation land next to each other.
  */
 export function defaultOutPath(projectRoot: string, scenario: string): string {
-  return path.join(projectRoot, ".porthole", "traces", `${scenario}.json`);
+  return path.join(projectRoot, ".porthole", "traces", `${validateScenario(scenario)}.json`);
+}
+
+/** Thrown by [validateScenario]; callers turn it into their own refusal (400, `fail()`, exit 2). */
+export class InvalidScenarioError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidScenarioError";
+  }
+}
+
+/**
+ * The scenario becomes a file name under `.porthole/traces/`, and it arrives
+ * from a POST body, a tool argument or a CLI flag — none of which is trusted
+ * to stay inside that directory on its own. GRA-116's QA showed
+ * `"../../../../tmp/evil"` escaping it. Letters, digits, space, dot, dash
+ * and underscore only; no separators of either kind; no name made of dots;
+ * a length that still fits a file name comfortably.
+ */
+export function validateScenario(scenario: string): string {
+  const trimmed = scenario.trim();
+  if (trimmed === "") throw new InvalidScenarioError("scenario must not be empty.");
+  if (trimmed.length > 120) throw new InvalidScenarioError("scenario must be 120 characters or fewer.");
+  if (!/^[A-Za-z0-9 ._-]+$/.test(trimmed)) {
+    throw new InvalidScenarioError(
+      "scenario may contain only letters, digits, spaces, dots, dashes and underscores — no path separators.",
+    );
+  }
+  if (/^\.+$/.test(trimmed)) throw new InvalidScenarioError("scenario must not be made of dots only.");
+  return trimmed;
 }
 
 export interface BuildSavedTraceOptions {
@@ -201,8 +230,15 @@ export async function saveFromSessions(options: SaveFromSessionsOptions): Promis
     to,
   });
 
-  const scenario = options.scenario ?? defaultScenarioName(from, to);
-  const outPath = options.out ?? defaultOutPath(options.projectRoot, scenario);
+  let scenario: string;
+  let outPath: string;
+  try {
+    scenario = options.scenario === undefined ? defaultScenarioName(from, to) : validateScenario(options.scenario);
+    outPath = options.out ?? defaultOutPath(options.projectRoot, scenario);
+  } catch (error) {
+    if (error instanceof InvalidScenarioError) return { code: 2, message: `porthole save: ${error.message}` };
+    throw error;
+  }
   const hello: Record<string, unknown> = {
     packageName: latest.packageName,
     versionName: latest.versionName,

@@ -12,7 +12,7 @@ import { askTrace, findTraceProcessor, parseRows, runScript, why, QUESTIONS, typ
 import { buildTrace } from "./trace.js";
 import { fromBootMs, fromTraceClockSnapshot, toBootNs } from "./moment.js";
 import { UNKNOWN_DEVICE_ID, fillWindowFromDisk, sessionsRoot, type SessionEvent } from "./sessions.js";
-import { buildSavedTrace, defaultOutPath, defaultScenarioName, writeSavedTrace } from "./save.js";
+import { InvalidScenarioError, buildSavedTrace, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 
 const UI_DIR = fileURLToPath(new URL("../ui/dist/", import.meta.url));
 
@@ -752,6 +752,21 @@ export class TimelineServer {
         }
         const scenarioInput =
           typeof body.scenario === "string" && body.scenario.trim() !== "" ? body.scenario.trim() : undefined;
+        // Refused before anything is read or written: the scenario becomes
+        // a file name, and QA round 1 showed "../../../../tmp/evil" escaping
+        // .porthole/traces/ through this route.
+        if (scenarioInput !== undefined) {
+          try {
+            validateScenario(scenarioInput);
+          } catch (error) {
+            if (error instanceof InvalidScenarioError) {
+              res.writeHead(400, { "content-type": "application/json" });
+              res.end(JSON.stringify({ error: error.message }));
+              return;
+            }
+            throw error;
+          }
+        }
 
         // The same merged view every window-taking tool reads (GRA-53's
         // `fillWindowFromDisk`) and the same trace builder `save_moment`

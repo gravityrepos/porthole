@@ -1125,6 +1125,20 @@ describe("POST /api/save (GRA-116)", () => {
     expect(JSON.parse(response.body).error).toBe("Malformed JSON body.");
   });
 
+  it("400s a scenario that would escape .porthole/traces, and writes nothing (QA round 1)", async () => {
+    const escaped = resolve(tracesDir, "..", "..", "..", "..", "tmp", "evil.json");
+    for (const scenario of ["../../../../tmp/evil", "..\\..\\evil", "a/b", "a\\b", "..", "."]) {
+      const response = await timeline.send("/api/save", {
+        method: "POST",
+        body: JSON.stringify({ from: 0, to: 1_000, scenario }),
+      });
+      expect(response.status, scenario).toBe(400);
+      expect(JSON.parse(response.body).error, scenario).toMatch(/scenario/);
+    }
+    expect(existsSync(escaped)).toBe(false);
+    expect(existsSync(resolve(tracesDir, "..", "evil.json"))).toBe(false);
+  });
+
   it("400s a well-formed JSON body that is not an object (an array, a bare number)", async () => {
     const arrayBody = await timeline.send("/api/save", { method: "POST", body: "[1,2,3]" });
     expect(arrayBody.status).toBe(400);
