@@ -1669,10 +1669,49 @@ the porthole installs itself on process start, and every tool returns real data
 upload, and a `state` dump reflected out of a live `ViewModel` that nothing
 registered.
 
+**On a physical device.** One broad pass, 2026-09-15, on a **Pixel 9 Pro Fold**
+(`google/comet_beta/comet:17/CP31.260623.012/16064790:user/release-keys`,
+Android 17 / API 37, 120 Hz). The full record, including what was wrong and
+what was never reached, is in [docs/verified.md](docs/verified.md). Observed
+there, on hardware: every collector returning numbers that hold up to
+inspection (35 HTTP calls of which the 4 deliberate `POST /v1/checkout → 402`
+failures, 28 queries with none on the main thread, 7 WorkManager runs with 4
+retries); `system_context` parsing that device's twelve thermal sensors and
+per-core cpufreq; a real navigation back stack with its arguments resolved;
+cold start at 451 ms; **an ANR declared by the system**, after which
+`porthole_status` named `REASON_ANR` and pointed at
+`CartViewModel.blockTheMainThread(CartViewModel.kt:148)` — the method that was
+actually blocking — and returned the full 136 KB trace on request; and the
+`since your last call` banner surfacing an 8917 ms main-thread block on an
+unrelated tool's next call, against a 9000 ms block. Sessions persisted to
+`.porthole/sessions/` and `porthole report` rendered a saved moment.
+
+**What that pass found wrong.** `findings` takes the frame budget from a
+`device` profile event the runtime emits once at startup, and falls back to
+60 Hz whenever the requested window does not contain it — so the same phone
+reported `budget 8.3ms at 120Hz` for one window and `budget 16.7ms at 60Hz` for
+another, minutes apart, and `porthole report` headed the saved file
+`Google Pixel 9 Pro Fold (60Hz)`. The missed-frame counts are right; the budget
+printed beside them is not. Separately, two Perfetto captures on that device
+carried **no** Porthole atrace labels at all, where a capture on a Pixel 10 Pro
+XL the day before carried them. Both are filed; neither is fixed.
+
+**Not verified on any device:** a blocking GC (no stop-the-world collection
+could be induced — the sample's heap peaks at 24 MB of 256 MB and it has no
+allocation-storm affordance); thermal throttling (not attempted — it is the
+founder's daily phone); Navigation 3's back stack (the sample uses Navigation
+2, and `PortholeBackStack` has no caller outside the runtime); a low-memory
+kill; deep-sleep clock divergence; the timeline UI against device data; a
+second device end to end; a cheap or old device; multi-process apps; and
+Compose versions other than the one in the version catalog.
+
 Redaction was checked the only way worth checking it: the sample sends a bearer
 token, a query-string token and a `Set-Cookie`, all containing the string
-`do-not-log`. Across a megabyte of everything the porthole emitted, it appears
-zero times.
+`do-not-log`. Across a megabyte of everything the porthole emitted on the
+emulator, and across both session trees, both `.pftrace` captures, the saved
+moment, the rendered report, the captured logcat and every saved tool output on
+the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
+times too.
 
 **1395 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
@@ -1751,3 +1790,13 @@ the version catalog. A second physical device is still wanted — not to
 settle the `--app` question above, which is now answered, but because GRA-67
 wants everything in 0.1.0 proved on two physical devices and GRA-111 wants
 real artifacts with provenance from more than one.
+
+**And the `--app` question is now less settled than this paragraph says.** On
+2026-09-15 the same mechanism produced **zero** Porthole labels on a Pixel 9
+Pro Fold, across two ten-second captures — one with the package defaulted, one
+with it named explicitly — while the app was running with the runtime attached
+and being driven. That was checked against the trace itself, not against the
+tag mask: the only `porthole` strings in either capture are the runtime's own
+thread names, with no `porthole: ` section names anywhere. So the honest
+statement is that the mechanism worked on one device and one fingerprint and
+did not work on another; see [docs/verified.md](docs/verified.md).
