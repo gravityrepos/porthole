@@ -1488,3 +1488,201 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     }
   });
 });
+
+// GRA-58: porthole_status's `exits` section and `exitTrace` parameter,
+// through the real tool against a FakeDevice that answers `exit_trace` --
+// not a unit test of a helper function, the behavioural half surface.test.ts
+// cannot cover (it only reads index.ts as text / the schema).
+describe("porthole_status: why the app died (GRA-58)", () => {
+  const exitData = (overrides: Record<string, unknown> = {}) => ({
+    reason: "REASON_ANR",
+    importance: 100,
+    timestamp: 1_700_000_000_000,
+    pss: 12_345,
+    rss: 23_456,
+    versionName: "1.2.3",
+    versionAssumed: false,
+    mainStack: "com.example.shop.Cart.load(Cart.kt:9)\nandroid.app.Activity.performCreate(Activity.java:1)",
+    otherThreadCount: 2,
+    otherThreadStates: { Waiting: 2 },
+    ...overrides,
+  });
+
+  it("reports the most recent exits, newest first, each naming reason/build/top frame", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "exit", t: 1000, data: exitData({ timestamp: 1_700_000_000_000, reason: "REASON_CRASH" }) },
+        { event: "exit", t: 2000, data: exitData({ timestamp: 1_700_000_100_000, reason: "REASON_ANR" }) },
+      ]);
+
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      const exits = (status.json as { exits: { recent: Array<Record<string, unknown>> } }).exits;
+      expect(exits.recent).toHaveLength(2);
+      // Newest first: the second-pushed event (a later `timestamp`) leads.
+      expect(exits.recent[0].reason).toBe("REASON_ANR");
+      expect(exits.recent[0].topAppFrame).toContain("com.example.shop.Cart.load");
+      expect(exits.recent[0].versionName).toBe("1.2.3");
+      expect(exits.recent[1].reason).toBe("REASON_CRASH");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("caps the recent list rather than growing it without bound", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents(
+        Array.from({ length: 15 }, (_, i) => ({
+          event: "exit",
+          t: 1000 + i,
+          data: exitData({ timestamp: 1_700_000_000_000 + i * 1000 }),
+        })),
+      );
+      const status = await rig.client.callTool("porthole_status", {});
+      const exits = (status.json as { exits: { recent: unknown[] } }).exits;
+      expect(exits.recent.length).toBeLessThanOrEqual(10);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("says the API is unavailable below API 30, sourced from hello.sdkInt alone", async () => {
+    const rig = await buildRig({ handlers: { hello: () => ({ ...defaultHello(), sdkInt: 28 }) } });
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const exits = (status.json as { exits: { apiUnavailable: string | null } }).exits;
+      expect(exits.apiUnavailable).toContain("API 30");
+      expect(exits.apiUnavailable).toContain("28");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("says nothing is unavailable at or above API 30", async () => {
+    const rig = await buildRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      const exits = (status.json as { exits: { apiUnavailable: string | null } }).exits;
+      expect(exits.apiUnavailable).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("says the app is not connected because it died, and why, when the last exit is recent", async () => {
+    const rig = await buildRingInState("disconnected", [
+      { event: "exit", t: 1000, data: exitData({ timestamp: Date.now() - 5_000 }) },
+    ]);
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.text).toContain("died");
+      expect(status.text).toContain("REASON_ANR");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("says nothing extra when the most recent exit is old", async () => {
+    const rig = await buildRingInState("disconnected", [
+      { event: "exit", t: 1000, data: exitData({ timestamp: Date.now() - 60 * 60 * 1000 }) },
+    ]);
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.text).not.toContain("died:");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("leaves exitTrace null in the payload when the parameter is omitted", async () => {
+    const rig = await buildRig();
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      expect((status.json as { exitTrace: unknown }).exitTrace).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("fetches the full redacted trace through exit_trace when exitTrace is given", async () => {
+    const rig = await buildRig({
+      handlers: {
+        exit_trace: (params) => ({
+          timestamp: params.timestamp,
+          found: true,
+          text: "\"main\" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)",
+          truncated: false,
+        }),
+      },
+    });
+    try {
+      const status = await rig.client.callTool("porthole_status", { exitTrace: 1_700_000_000_000 });
+      expect(status.isError).toBeFalsy();
+      const exitTrace = (status.json as { exitTrace: { found: boolean; text: string; timestamp: number } })
+        .exitTrace;
+      expect(exitTrace.found).toBe(true);
+      expect(exitTrace.timestamp).toBe(1_700_000_000_000);
+      expect(exitTrace.text).toContain("com.example.shop.Cart.load");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports found:false for a timestamp the device does not recognise, without failing the call", async () => {
+    const rig = await buildRig({
+      handlers: {
+        exit_trace: (params) => ({
+          timestamp: params.timestamp,
+          found: false,
+          error: `no exit recorded for timestamp ${params.timestamp}`,
+        }),
+      },
+    });
+    try {
+      const status = await rig.client.callTool("porthole_status", { exitTrace: 999 });
+      expect(status.isError).toBeFalsy();
+      const exitTrace = (status.json as { exitTrace: { found: boolean; error: string } }).exitTrace;
+      expect(exitTrace.found).toBe(false);
+      expect(exitTrace.error).toContain("999");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("rejects an empty exitTrace before the handler ever runs", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", { exitTrace: "" as unknown as number });
+      expect(result.isError).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("rejects a malformed (non-numeric) exitTrace before the handler ever runs", async () => {
+    const rig = await buildRig();
+    try {
+      const result = await rig.client.callTool("porthole_status", {
+        exitTrace: "not-a-timestamp" as unknown as number,
+      });
+      expect(result.isError).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  function defaultHello() {
+    return {
+      protocol: 1,
+      packageName: "com.example.shop",
+      processName: "com.example.shop",
+      versionName: "1.0.0-test",
+      device: "Test Device",
+      sdkInt: 34,
+      startedAt: DEFAULT_STARTED_AT_MS,
+      collectors: ["recompositions"],
+    };
+  }
+});

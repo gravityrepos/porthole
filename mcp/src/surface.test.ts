@@ -241,6 +241,36 @@ describe("the entry point", () => {
   });
 });
 
+// GRA-58: porthole_status gains `exitTrace` rather than a sixteenth tool —
+// the schema-level half of that; index.test.ts exercises the handler itself
+// against a FakeDevice.
+describe("porthole_status's exitTrace parameter", () => {
+  it("declares exitTrace as an optional positive integer, not a hand-rolled copy of the window shape", async () => {
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const tool = tools.find((t) => t.name === "porthole_status");
+      expect(tool, "porthole_status is not registered").toBeDefined();
+      const props = (tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] })
+        .properties ?? {};
+      const required = (tool?.inputSchema as { required?: string[] }).required ?? [];
+      expect(props.exitTrace, "porthole_status has no exitTrace parameter").toBeDefined();
+      expect(required, "exitTrace must be optional").not.toContain("exitTrace");
+
+      const exitTrace = props.exitTrace as { type?: string };
+      expect(exitTrace.type).toBe("integer");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("says what it fetches and how it is capped", () => {
+    const tool = toolSource("porthole_status");
+    expect(tool).toContain("exitTrace");
+    expect(tool).toMatch(/256\s*KB/);
+  });
+});
+
 describe("the server version", () => {
   it("is read from the package rather than retyped", () => {
     // The same drift that put a stale npm package name in the Gradle plugin.

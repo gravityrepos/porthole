@@ -46,10 +46,39 @@ them they cover:
 | `ask_system_trace` | puts a fixed set of questions to a captured trace, to rule causes in or out |
 | `save_moment` | turns a window of what already happened into a named trace file, no recording required |
 | `open_timeline` | a live timeline UI in the browser |
-| `porthole_status` | whether any of the above can currently reach the device |
+| `porthole_status` | whether any of the above can currently reach the device — and, now, why it died last time |
 
 Everything is debug-only. Release builds link a no-op artifact with identical
 signatures, so the calls stay in your code and compile to nothing.
+
+### Why it died
+
+The process holding the ring buffer is the process that crashed, so the ring
+never has the answer to "why did it just die". `porthole_status` does: an
+`exits` section carries the most recent process deaths Android recorded for
+this app — `ActivityManager.getHistoricalProcessExitReasons`, read once per
+launch — each with its reason (`REASON_ANR`, `REASON_CRASH`, and so on), when
+it happened, the build that died (or the running build, flagged as assumed,
+when the death predates anything the record itself names), and — for an ANR
+or a native crash — the top frame of the main thread's stack. The same deaths
+show up in `findings` at `error` severity (`note` for a user-requested exit;
+nothing for a background `REASON_OTHER` kill), naming the reason, the build
+and that same top frame.
+
+Below Android 11 (API 30) `exits.apiUnavailable` says so rather than the
+section silently reading empty. When nothing is currently connected and the
+most recent exit is recent, `porthole_status`'s summary leads with it — "not
+connected because it died" is a more useful first sentence than a generic
+troubleshooting checklist.
+
+The event itself carries a *summary* of an ANR/native-crash trace, not the
+whole blob: the main thread's stack, app frames first (the same ordering
+`blocking` uses), plus a count of the other threads and the states they were
+in. The full trace — up to 256 KB, with a note if it was cut short — is one
+more call away: `porthole_status {"exitTrace": <timestamp>}`, the `timestamp`
+copied from an entry in `exits`. Both the summary and the full trace go
+through the same redaction every other captured string does, before either
+ever leaves the process.
 
 ## Layout
 
@@ -408,8 +437,8 @@ logs and device context all need nothing at all.
 ## What the timeline shows
 
 Lanes, sharing one clock: recompositions and state writes, dropped frames and
-main-thread stalls, navigation, http, db, work, memory, device context, and your
-own logcat at warning and above.
+main-thread stalls, navigation, http, db, work, memory, device context, process
+exits, and your own logcat at warning and above.
 
 A few of them are worth knowing about because the number means something
 specific. Dropped frames are counted in refreshes, so a 400ms freeze is not "one

@@ -359,6 +359,71 @@ describe("findingsOf", () => {
     ];
     expect(find(events).map((f) => f.id)).toEqual(["db-on-main-thread", "http-still-open"]);
   });
+
+  // exit-findings (GRA-58): one finding per reason class, matching the
+  // ticket's own severity table.
+  describe("exit events", () => {
+    const exitEvent = (reason: string, extra: Record<string, unknown> = {}) =>
+      event("exit", 1000, { reason, timestamp: 1_700_000_000_000, ...extra });
+
+    it.each([
+      "REASON_ANR",
+      "REASON_CRASH",
+      "REASON_CRASH_NATIVE",
+      "REASON_LOW_MEMORY",
+      "REASON_EXCESSIVE_RESOURCE_USAGE",
+    ])("calls %s an error, observed", (reason) => {
+      const findings = find([exitEvent(reason)]);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatchObject({ severity: "error", confidence: "observed" });
+      expect(findings[0].title).toContain(reason);
+    });
+
+    it("calls a user-requested exit a note", () => {
+      const findings = find([exitEvent("REASON_USER_REQUESTED")]);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe("note");
+    });
+
+    it.each(["REASON_OTHER", "REASON_SIGNALED"])(
+      "produces no finding at all for %s",
+      (reason) => {
+        expect(find([exitEvent(reason)])).toEqual([]);
+      },
+    );
+
+    it("names the reason, the build, and the top app frame", () => {
+      const findings = find([
+        exitEvent("REASON_ANR", {
+          versionName: "1.2.3",
+          versionAssumed: false,
+          mainStack: "com.example.shop.Cart.load(Cart.kt:9)\nandroid.app.Activity.performCreate(Activity.java:1)",
+        }),
+      ]);
+      expect(findings[0].title).toContain("REASON_ANR");
+      expect(findings[0].title).toContain("1.2.3");
+      expect(findings[0].title).toContain("com.example.shop.Cart.load(Cart.kt:9)");
+      expect(findings[0].title).not.toContain("(assumed)");
+    });
+
+    it("marks an assumed version rather than presenting it as certain", () => {
+      const findings = find([exitEvent("REASON_CRASH", { versionName: "9.9.9", versionAssumed: true })]);
+      expect(findings[0].title).toContain("9.9.9 (assumed)");
+    });
+
+    it("says an unknown build rather than omitting the clause", () => {
+      const findings = find([exitEvent("REASON_CRASH")]);
+      expect(findings[0].title).toContain("an unknown build");
+    });
+
+    it("still sorts an exit error before a note", () => {
+      const findings = find([
+        exitEvent("REASON_USER_REQUESTED", { timestamp: 1 }),
+        exitEvent("REASON_ANR", { timestamp: 2 }),
+      ]);
+      expect(findings.map((f) => f.severity)).toEqual(["error", "note"]);
+    });
+  });
 });
 
 describe("the new metric keys against an older baseline", () => {

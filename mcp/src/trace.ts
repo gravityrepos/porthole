@@ -58,13 +58,14 @@ export interface Trace {
   events?: DeviceEvent[];
 }
 
-const num = (value: unknown, fallback = 0): number => {
+/** Exported for `index.ts`'s `exits` section (GRA-58): the same loose coercion every event field here already gets, so a device's numeric fields don't need retyping at a second call site. */
+export const num = (value: unknown, fallback = 0): number => {
   if (typeof value === "number") return value;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const str = (value: unknown, fallback = ""): string =>
+export const str = (value: unknown, fallback = ""): string =>
   typeof value === "string" ? value : value == null ? fallback : String(value);
 
 /**
@@ -476,9 +477,58 @@ export function findingsOf(
     }
   }
 
+  // exit-findings (GRA-58): a death the device reported, at the severity the
+  // ticket named explicitly — ANR, crash, native crash, low memory and
+  // excessive resource usage are `error` (each means the system killed the
+  // app, for a reason worth an agent's attention); a user-requested exit is
+  // a `note` (informational: the app is not running, but nothing is wrong).
+  // Everything else — REASON_OTHER, a signal, a background kill — produces
+  // no finding at all: those are the normal shape of an app's process being
+  // recycled, not evidence of anything.
+  const exits = events.filter((e) => e.event === "exit");
+  for (const exit of exits) {
+    const reason = str(exit.data.reason);
+    const severity: Severity | undefined = EXIT_ERROR_REASONS.has(reason)
+      ? "error"
+      : reason === "REASON_USER_REQUESTED"
+        ? "note"
+        : undefined;
+    if (!severity) continue;
+
+    const versionName = exit.data.versionName != null ? str(exit.data.versionName) : null;
+    const versionAssumed = exit.data.versionAssumed === true;
+    const build = versionName ? `${versionName}${versionAssumed ? " (assumed)" : ""}` : "an unknown build";
+    const topFrame = str(exit.data.mainStack).split("\n")[0] || undefined;
+
+    findings.push({
+      id: `exit-${num(exit.data.timestamp)}`,
+      severity,
+      confidence: "observed",
+      title: `${reason} — ${build}` + (topFrame ? ` — ${topFrame}` : ""),
+      detail: str(exit.data.description) || undefined,
+      during: markAt(marks, exit.t),
+      evidence: {
+        reason,
+        versionName,
+        versionAssumed,
+        timestamp: num(exit.data.timestamp),
+        ...(topFrame ? { topFrame } : {}),
+      },
+    });
+  }
+
   const order: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
   return findings.sort((a, b) => order[a.severity] - order[b.severity]);
 }
+
+/** `error`-severity exit reasons (GRA-58#exit-findings) — see `findingsOf`'s own comment for the rest of the mapping. */
+const EXIT_ERROR_REASONS = new Set([
+  "REASON_ANR",
+  "REASON_CRASH",
+  "REASON_CRASH_NATIVE",
+  "REASON_LOW_MEMORY",
+  "REASON_EXCESSIVE_RESOURCE_USAGE",
+]);
 
 export function buildTrace(options: {
   scenario: string;
