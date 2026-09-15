@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe as suite, expect, it } from "vitest";
 import type { DeviceEvent } from "./device.js";
-import { describe, fromBootMs, momentOf } from "./moment.js";
+import { describe, fromBootMs, fromTraceClockSnapshot, momentOf, toBoot, toBootNs } from "./moment.js";
 
 const at = (t: number, event: string, data: Record<string, unknown> = {}): DeviceEvent =>
   ({ t, seq: t, event, data }) as DeviceEvent;
@@ -109,5 +109,76 @@ suite("the summary", () => {
 
   it("says plainly when there was no navigation at all", () => {
     expect(describe(momentOf([at(10, "frame", {})], 10))).toContain("No navigation recorded");
+  });
+});
+
+suite("toBootNs (GRA-113): the reverse trip, for scoping a trace query", () => {
+  it("round-trips through fromBootMs", () => {
+    // The stall at Porthole 5_600 is boot-time 10_600 (session slept 5s
+    // before it began — see the "arriving from another clock" suite above).
+    // Going forward then back should land exactly where it started.
+    const bootNs = toBootNs(session, 5_600);
+    expect(bootNs).toBe(10_600 * 1e6);
+    expect(fromBootMs(session, bootNs / 1e6)?.at).toBe(5_600);
+  });
+
+  it("uses the sample in force at the moment asked about, not whichever it finds first", () => {
+    // Mirrors fromBootMs's own "does not apply the later offset to an
+    // earlier moment" test, in the opposite direction. The open-coded
+    // version this replaced read whichever `clocks` sample the search found
+    // first, which — for a session with more than one sample — is a
+    // different bug than fromBootMs's (that one always used the newest);
+    // this pins that the fix is the same *shape* of fix, not a coincidence
+    // that happens to pass on a one-sample session.
+    const dozed = [
+      ...session,
+      at(30_000, "clocks", { uptimeMs: 30_000, bootMs: 95_000, wallMs: 2, sleepMs: 65_000 }),
+    ];
+    expect(toBootNs(dozed, 10_600)).toBe((10_600 + 5_000) * 1e6);
+    expect(toBootNs(dozed, 95_000)).toBe((95_000 + 65_000) * 1e6);
+  });
+
+  it("assumes no accumulated sleep rather than refusing, when the run has no clocks sample yet", () => {
+    const noClocks = session.filter((e) => e.event !== "clocks");
+    expect(toBootNs(noClocks, 10_600)).toBe(10_600 * 1e6);
+  });
+});
+
+suite("toBoot (GRA-113): toBootNs's fuller answer, for a caller that reports the offset back", () => {
+  it("is toBootNs's ns, plus the sleepMs and sample it used to get there", () => {
+    const full = toBoot(session, 5_600);
+    expect(full.ns).toBe(toBootNs(session, 5_600));
+    expect(full.sleepMs).toBe(5_000);
+    expect(full.sampledAt).toBe(0); // the session's one `clocks` sample, at t=0
+  });
+
+  it("picks a different sample's sleepMs for a moment on the other side of a doze, same as toBootNs's own ns does", () => {
+    const dozed = [
+      ...session,
+      at(30_000, "clocks", { uptimeMs: 30_000, bootMs: 95_000, wallMs: 2, sleepMs: 65_000 }),
+    ];
+    expect(toBoot(dozed, 10_600)).toMatchObject({ sleepMs: 5_000, sampledAt: 0 });
+    expect(toBoot(dozed, 95_000)).toMatchObject({ sleepMs: 65_000, sampledAt: 30_000 });
+  });
+
+  it("reports sleepMs 0 and a null sampledAt rather than refusing, when there is no clocks sample yet", () => {
+    const noClocks = session.filter((e) => e.event !== "clocks");
+    expect(toBoot(noClocks, 10_600)).toEqual({ ns: 10_600 * 1e6, sleepMs: 0, sampledAt: null });
+  });
+});
+
+suite("fromTraceClockSnapshot (GRA-113): coverage's offset, read from a trace instead of a session", () => {
+  it("applies the same {boot, monotonic} offset fromBootMs would, taken from the trace's own snapshot", () => {
+    // A device that slept 12,272.83s before this trace was captured — the
+    // hardware-verified figure from this project's own hard-won facts.
+    const sleepNs = 12_272_830_000_000;
+    const snapshot = { bootNs: 542_876_016_852_014, monotonicNs: 542_876_016_852_014 - sleepNs };
+    const at = snapshot.bootNs + 1_000_000; // 1ms into the trace
+    expect(fromTraceClockSnapshot(snapshot, at)).toBe(Math.round((at - sleepNs) / 1e6));
+  });
+
+  it("agrees with a zero offset when boot and monotonic were sampled equal", () => {
+    const snapshot = { bootNs: 1_000_000_000, monotonicNs: 1_000_000_000 };
+    expect(fromTraceClockSnapshot(snapshot, 1_500_000_000)).toBe(1_500);
   });
 });

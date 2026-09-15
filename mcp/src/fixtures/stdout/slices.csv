@@ -1,201 +1,201 @@
-"name","COUNT","SUM(dur)","SUM(self_dur)"
-"input",178,315828253,1687705
-"VRI[MainActivity]",178,314140548,22411651
-"AndroidOwner:onTouch",143,285167471,275502265
-"traversal",6,152978986,20392476
-"Compiling baseline",960,129474531,119777837
-"Choreographer#doFrame 226666108",1,117408776,35261
-"Compose:recompose",4,89886955,51935824
-"animation",76,43156173,24349664
-"clientTransactionExecuted",8,41962421,575205
-"binder transaction",55,40287737,40287737
-"Background concurrent mark compact GC",1,35141172,565181
-"Choreographer#doFrame 226665975",1,27295573,243750
-"Choreographer#doFrame - resynced to 226665977 in 23.1ms",1,27051823,9296
-"MarkingPhase",1,19368178,293753
-"Choreographer#scheduleVsyncLocked",197,19004990,19004990
-"MarkRoots",2,16161328,13046
-"activityResume",2,14871277,3529350
-"wait",4,14650338,14650338
-"measure",4,13960103,254217
-"AndroidOwner:onMeasure",4,13705886,10700187
-"MarkRootsCheckpoint",2,13277500,1281223
-"ProcessMarkStackNonNull",2,11996277,11996277
-"Compose:applyChanges",4,11349192,8977393
-"activityDestroy",2,10970546,2349555
-"Recomposer:recompose",10,10129008,1227106
-"CompactionPhase",1,10055417,4652005
-"ScopedCodeCacheWrite",1939,9762265,9762265
-"layout",2,9620416,9378098
-"Choreographer#doFrame 226666371",1,9125027,19948
-"activityStart",2,8776875,3253541
-"allocateBuffers",4,8124662,354245
-"allocate",10,7759115,645729
-"Recomposer:animation",9,7663049,6986356
-"deliverInputEvent src=0x1002 eventTimeNano=341019045000000 id=0xfb05b0cc",1,7629036,207161
-"ViewPostImeInputStage id=0xfb05b0cc",1,7367422,364584
-"Choreographer#doFrame 226666963",1,7095495,14844
-"deliverInputEvent src=0x1002 eventTimeNano=341019947000000 id=0xf538b150",1,6944193,305390
-"draw-VRI[MainActivity]",5,6684843,616510
-"Choreographer#doFrame 226672599",1,6633516,74844
-"ViewPostImeInputStage id=0xf538b150",1,6555703,494011
-"Choreographer#doFrame 226667369",1,6180078,16875
-"deliverInputEvent src=0x1002 eventTimeNano=341020880000000 id=0xd8c34d99",1,6158698,356849
-"deliverInputEvent src=0x1002 eventTimeNano=341021069000000 id=0xe6929cad",1,5789922,334012
-"ViewPostImeInputStage id=0xd8c34d99",1,5749219,441199
-"Record View#draw()",3,5696302,4560444
-"Choreographer#doFrame 226675355",1,5621067,52473
-"deliverInputEvent src=0x1002 eventTimeNano=341021828164329 id=0xe98e9125",1,5608880,210182
-"performDestroy:com.example.shop.ui.MainActivity",2,5607604,3569295
-"Choreographer#doFrame 226672347",1,5559453,35234
-"Drawing  0.00  0.00 1080.00 2404.00",3,5446069,458909
-"ViewPostImeInputStage id=0xe6929cad",1,5441145,317786
-"deliverInputEvent src=0x1002 eventTimeNano=341022672000000 id=0xf642bb54",1,5418073,276146
-"CompactMovingSpace",1,5403412,5403412
-"ViewPostImeInputStage id=0xe98e9125",1,5384297,1414922
-"Choreographer#doFrame 226675159",1,5157422,25261
-"ViewPostImeInputStage id=0xf642bb54",1,5090313,467240
-"Choreographer#doFrame 226669872",1,5079167,34923
-"setSurface",5,5031643,4551329
-"deliverInputEvent src=0x1002 eventTimeNano=341021743000000 id=0xdf2f4393",1,4970885,362838
-"Choreographer#doFrame 226674795",1,4881042,20000
-"Choreographer#doFrame 226672515",1,4816250,59115
-"JIT compiling boolean androidx.compose.ui.input.pointer.Node.buildCache(androidx.collection.LongSparseArray, androidx.compose.ui.layout.LayoutCoordinates, androidx.compose.ui.input.pointer.InternalPointerEvent, boolean) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,4759662,29245
-"deliverInputEvent src=0x1002 eventTimeNano=341023684500000 id=0xf287f33c",1,4748646,373021
-"deliverInputEvent src=0x1002 eventTimeNano=341023629771994 id=0xfc328515",1,4695416,315260
-"virtual void art::MemMapArenaPool::TrimMaps()",55,4657035,4657035
-"TrimMaps",54,4648277,284732
-"JIT compiling void kotlinx.coroutines.DispatchedTask.run() (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk!10",1,4638307,46406
-"ViewPostImeInputStage id=0xdf2f4393",1,4522031,540052
-"deliverInputEvent src=0x1002 eventTimeNano=341018075000000 id=0xe74f62af",1,4422526,101928
-"ViewPostImeInputStage id=0xfc328515",1,4367291,302942
-"ViewPostImeInputStage id=0xf287f33c",1,4360755,312917
-"ViewPostImeInputStage id=0xe74f62af",1,4289869,548359
-"Choreographer#doFrame 226669077",1,4245104,23984
-"Choreographer#doFrame 226672823",1,4212838,39141
-"Choreographer#doFrame 226670292",1,4114740,44349
-"deliverInputEvent src=0x1002 eventTimeNano=341024427000000 id=0xc6dc0e9c",1,4093906,322395
-"performCreate:com.example.shop.ui.MainActivity",2,4083932,3718906
-"Choreographer#doFrame 226670348",1,4073073,42213
-"Choreographer#doFrame 226674907",1,4006015,33281
-"TextLayout:initLayout",19,4001379,761403
-"flush commands",3,3984218,5338
-"Vulkan finish frame",3,3978880,247760
-"Choreographer#doFrame 226670236",1,3966172,71016
-"deliverInputEvent src=0x1002 eventTimeNano=341021928000000 id=0xcfa1b7e0",1,3963151,294011
-"Choreographer#doFrame 226670432",1,3954479,36979
-"deliverInputEvent src=0x1002 eventTimeNano=341018088500000 id=0xf61c04fe",1,3901328,79557
-"deliverInputEvent src=0x1002 eventTimeNano=341019182915942 id=0xc6454e77",1,3881432,304634
-"Choreographer#doFrame 226676323",1,3815209,24740
-"deliverInputEvent src=0x1002 eventTimeNano=341021803000000 id=0xf5ad748f",1,3811459,113151
-"Choreographer#doFrame 226674851",1,3796640,56120
-"ViewPostImeInputStage id=0xf61c04fe",1,3780339,348490
-"ViewPostImeInputStage id=0xf5ad748f",1,3690755,230520
-"Choreographer#doFrame 226669021",1,3687161,30339
-"Choreographer#doFrame 226672767",1,3682344,33490
-"ViewPostImeInputStage id=0xc6dc0e9c",1,3662865,677396
-"ViewPostImeInputStage id=0xcfa1b7e0",1,3657682,228854
-"Choreographer#doFrame 226673910",1,3599349,30000
-"Choreographer#doFrame 226672711",1,3590573,30390
-"ViewPostImeInputStage id=0xc6454e77",1,3559740,281745
-"deliverInputEvent src=0x1002 eventTimeNano=341021894830993 id=0xe8537388",1,3557787,303881
-"Compose:onRemembered",2,3547890,3397160
-"deliverInputEvent src=0x1002 eventTimeNano=341021753190331 id=0xe67091ad",1,3542969,228100
-"Choreographer#doFrame 226676267",1,3510860,24011
-"deliverInputEvent src=0x1002 eventTimeNano=341023554771997 id=0xdeaceefd",1,3441328,270781
-"deliverInputEvent src=0x1002 eventTimeNano=341020084790994 id=0xc60fa8e4",1,3430677,372187
-"deliverInputEvent src=0x1002 eventTimeNano=341020101457660 id=0xec08ccd9",1,3411901,346301
-"JIT compiling androidx.compose.ui.input.pointer.PointerInputEventData androidx.compose.ui.input.pointer.MotionEventAdapter.createPointerInputEventData(androidx.compose.ui.input.pointer.PositionCalculator, android.view.MotionEvent, int, boolean) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,3401589,41928
-"Choreographer#doFrame 226673966",1,3370469,21511
-"deliverInputEvent src=0x1002 eventTimeNano=341024520000000 id=0xd7ba750f",1,3366927,456798
-"Choreographer#doFrame 226676603",1,3366198,26224
-"deliverInputEvent src=0x1002 eventTimeNano=341023518000000 id=0xeed25419",1,3343047,72786
-"deliverInputEvent src=0x1002 eventTimeNano=341020126457659 id=0xdf3992dd",1,3337604,368490
-"Choreographer#doFrame 226672459",1,3312265,46405
-"Constructing StaticLayout",21,3306409,3306409
-"Choreographer#doFrame 226676547",1,3300209,33595
-"Choreographer#doFrame 226672403",1,3295730,25991
-"Choreographer#doFrame 226670404",1,3286928,37006
-"Choreographer#doFrame 226667845",1,3275390,23984
-"deliverInputEvent src=0x1002 eventTimeNano=341020136000000 id=0xf1438e30",1,3249739,108749
-"ViewPostImeInputStage id=0xe8537388",1,3239844,256745
-"ViewPostImeInputStage id=0xe67091ad",1,3229869,328671
-"ViewPostImeInputStage id=0xeed25419",1,3221615,319193
-"Choreographer#doFrame 226667873",1,3206172,23230
-"Choreographer#doFrame 226673854",1,3205443,25677
-"deliverInputEvent src=0x1002 eventTimeNano=341019225000000 id=0xe1aac582",1,3172812,409088
-"deliverInputEvent src=0x1002 eventTimeNano=341024505700996 id=0xd871ce96",1,3167058,417761
-"Choreographer#doFrame 226673770",1,3166953,24557
-"ViewPostImeInputStage id=0xdeaceefd",1,3164271,198203
-"deliverInputEvent src=0x1002 eventTimeNano=341019163000000 id=0xd0a49347",1,3155964,437995
-"ViewPostImeInputStage id=0xf1438e30",1,3130651,187344
-"Choreographer#doFrame 226669900",1,3111172,28621
-"deliverInputEvent src=0x1002 eventTimeNano=341020064500000 id=0xedc07aeb",1,3109922,148776
-"deliverInputEvent src=0x1002 eventTimeNano=341023538105331 id=0xf38441d2",1,3106172,249193
-"deliverInputEvent src=0x1002 eventTimeNano=341021874500000 id=0xf9188640",1,3098203,321615
-"JIT compiling androidx.compose.ui.input.pointer.InternalPointerEvent androidx.compose.ui.input.pointer.PointerInputChangeEventProducer.produce(androidx.compose.ui.input.pointer.PointerInputEvent, androidx.compose.ui.input.pointer.PositionCalculator) (kind=Baseline) from /data/app/~~wD5JHxPfhfj3_ApwoWhDuw==/com.example.shop-2AmueZ8CP3sWl7HqCOkBQg==/base.apk",1,3097552,51615
-"Choreographer#doFrame 226675047",1,3074141,35183
-"Choreographer#doFrame 226667453",1,3071666,17161
-"Choreographer#doFrame 226671722",1,3069271,18073
-"deliverInputEvent src=0x1002 eventTimeNano=341022768000000 id=0xec0a4222",1,3068333,443567
-"deliverInputEvent src=0x1002 eventTimeNano=341021861497661 id=0xcbd0d0f3",1,3061797,250807
-"ViewPostImeInputStage id=0xec08ccd9",1,3052318,222813
-"ViewPostImeInputStage id=0xc60fa8e4",1,3047240,233594
-"deliverInputEvent src=0x1002 eventTimeNano=341019959413433 id=0xd598fba6",1,3036172,275052
-"FullSuspendCheck",15,3012916,3012916
-"Choreographer#doFrame 226671638",1,3008333,18672
-"deliverInputEvent src=0x1002 eventTimeNano=341022787358661 id=0xc99e967d",1,3005416,471847
-"ThreadListFlip",2,3000990,32500
-"Choreographer#doFrame 226676519",1,2982969,20573
-"ViewPostImeInputStage id=0xdf3992dd",1,2957968,235338
-"ViewPostImeInputStage id=0xedc07aeb",1,2950729,221172
-"deliverInputEvent src=0x1002 eventTimeNano=341018232915980 id=0xfddc77e4",1,2944557,185546
-"Choreographer#doFrame 226674963",1,2942109,15000
-"deliverInputEvent src=0x1002 eventTimeNano=341023506000000 id=0xc8271c2f",1,2940391,163074
-"Choreographer#doFrame 226670180",1,2916848,41874
-"ViewPostImeInputStage id=0xd7ba750f",1,2888229,367213
-"Choreographer#doFrame 226671582",1,2877500,22084
-"deliverInputEvent src=0x1002 eventTimeNano=341024604000000 id=0xf381cb4b",1,2870000,404766
-"Choreographer#doFrame 226671526",1,2854714,20964
-"ViewPostImeInputStage id=0xf38441d2",1,2845495,288698
-"Choreographer#doFrame 226667593",1,2838594,21641
-"Choreographer#doFrame 226675215",1,2829114,33072
-"deliverInputEvent src=0x1002 eventTimeNano=341021767000000 id=0xd203215a",1,2826458,214896
-"deliverInputEvent src=0x1002 eventTimeNano=341022853000000 id=0xd6582b4b",1,2820807,410964
-"Choreographer#doFrame 226669928",1,2810755,23750
-"deliverInputEvent src=0x1002 eventTimeNano=341018241249313 id=0xda64f5a0",1,2805260,164634
-"MarkConcurrentRoots",3,2801250,2741745
-"ViewPostImeInputStage id=0xcbd0d0f3",1,2800495,239532
-"Choreographer#doFrame 226674107",1,2799947,20259
-"Choreographer#doFrame 226672683",1,2779401,28437
-"deliverInputEvent src=0x1002 eventTimeNano=341022754025329 id=0xefffe23c",1,2769089,447447
-"Choreographer#doFrame 226671666",1,2768828,20782
-"ViewPostImeInputStage id=0xf9188640",1,2767110,217032
-"Choreographer#doFrame 226667425",1,2764323,17006
-"deliverInputEvent src=0x1002 eventTimeNano=341024589034326 id=0xc739be9e",1,2763516,429870
-"ViewPostImeInputStage id=0xfddc77e4",1,2750130,200495
-"ViewPostImeInputStage id=0xe1aac582",1,2745131,650522
-"Choreographer#doFrame 226676379",1,2732943,19818
-"ViewPostImeInputStage id=0xd871ce96",1,2729922,317656
-"Choreographer#doFrame 226671610",1,2728542,20807
-"Choreographer#doFrame 226672571",1,2723125,34037
-"deliverInputEvent src=0x1002 eventTimeNano=341019968104665 id=0xf8bf5670",1,2720912,166668
-"ViewPostImeInputStage id=0xd598fba6",1,2711302,242031
-"Choreographer#doFrame 226675103",1,2703386,17214
-"ViewPostImeInputStage id=0xd0a49347",1,2702969,302631
-"deliverInputEvent src=0x1002 eventTimeNano=341021057500000 id=0xeff653ca",1,2701119,427734
-"deliverInputEvent src=0x1002 eventTimeNano=341022729025330 id=0xfa554530",1,2699922,447005
-"Choreographer#doFrame 226670124",1,2691693,23151
-"deliverInputEvent src=0x1002 eventTimeNano=341021035681993 id=0xee69bc80",1,2689635,369792
-"Choreographer#doFrame 226676099",1,2679427,25364
-"Choreographer#doFrame 226672907",1,2677266,16276
-"deliverInputEvent src=0x1002 eventTimeNano=341018116249318 id=0xc6c98061",1,2675052,72004
-"Choreographer#doFrame 226672655",1,2660130,10807
-"Choreographer#doFrame 226672879",1,2654661,33854
-"Choreographer#doFrame 226675299",1,2648047,20390
-"ViewPostImeInputStage id=0xc8271c2f",1,2648020,302578
-"deliverInputEvent src=0x1002 eventTimeNano=341024580700993 id=0xeb47173e",1,2647683,386277
-"DrawFrames 226665975",1,2644714,403358
-"ViewPostImeInputStage id=0xda64f5a0",1,2631927,201979
-"Choreographer#doFrame 226670040",1,2631640,20598
-"Choreographer#doFrame 226669956",1,2617891,27501
+"name","COUNT","SUM(dur)","SUM(self_dur)","MIN(ts)","MAX(ts)"
+"Compiling baseline",1345,182184820,168560693,542876666683889,542882679400248
+"AndroidOwner:onTouch",39,158621489,148955452,542879020483709,542884060805119
+"input",59,144796900,618251,542879032303527,542882802298009
+"VRI[MainActivity]",59,144178649,6617368,542879032319672,542882802301889
+"traversal",5,134051224,12639451,542877049243864,542877229406260
+"Choreographer#doFrame 226566530",1,111104402,12292,542877086995582,542877086995582
+"Compose:recompose",4,79707396,47225760,542877052032249,542877225583838
+"binder transaction",68,52576957,52576957,542876693532587,542886854199887
+"clientTransactionExecuted",10,39384011,1494452,542877037040426,542877233034697
+"Choreographer#doFrame 226566456",1,21931485,11642,542877049238056,542877049238056
+"animation",22,15637945,8069299,542877210465452,542882575299649
+"wait",4,14741876,14741876,542877081542666,542877248885192
+"measure",4,13749584,215781,542877064875608,542877183224202
+"ScopedCodeCacheWrite",2721,13679856,13679856,542876672089540,542882680092097
+"AndroidOwner:onMeasure",4,13533803,10144613,542877064933030,542877183255583
+"deliverInputEvent src=0x1002 eventTimeNano=340679577000000 id=0xc2f22ce2",1,12613020,100886,542882543558009,542882543558009
+"ViewPostImeInputStage id=0xc2f22ce2",1,12454713,721354,542882543643894,542882543643894
+"activityDestroy",2,11151068,3099871,542877200043317,542877217853499
+"Compose:applyChanges",4,10917813,8627372,542877061781937,542877228632327
+"deliverInputEvent src=0x1002 eventTimeNano=340676053000000 id=0xcab4b3a0",1,10289609,236379,542879019603032,542879019603032
+"ViewPostImeInputStage id=0xcab4b3a0",1,9909870,933152,542879019865766,542879019865766
+"activityStart",2,9632005,3616223,542877039995374,542877077683525
+"JIT compiling boolean androidx.compose.ui.input.pointer.Node.buildCache(androidx.collection.LongSparseArray, androidx.compose.ui.layout.LayoutCoordinates, androidx.compose.ui.input.pointer.InternalPointerEvent, boolean) (kind=Baseline) from /data/app/~~6aFvaIEH5yseJkxNTX1b5w==/com.example.shop-c0PFiCz96-8m-W0yiZ1Tcg==/base.apk",1,7920312,29297,542882661814415,542882661814415
+"Choreographer#doFrame 226568311",1,7681901,13255,542882627176967,542882627176967
+"activityResume",2,7465937,3224089,542877046032171,542877081665088
+"layout",2,7451511,7258620,542877066468681,542877183388447
+"deliverInputEvent src=0x1002 eventTimeNano=340679655000000 id=0xe52dccf1",1,7431067,210129,542882627269389,542882627269389
+"Choreographer#doFrame 226568156",1,7380339,18828,542882568978399,542882568978399
+"Choreographer#doFrame 226567936",1,7326224,46718,542879249362928,542879249362928
+"ViewPostImeInputStage id=0xe52dccf1",1,7212058,210703,542882627299102,542882627299102
+"deliverInputEvent src=0x1002 eventTimeNano=340676279203304 id=0xe399c0c1",1,6563125,436510,542879249521886,542879249521886
+"void art::ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool)",1,6517500,4547317,542876443940686,542876443940686
+"Choreographer#doFrame 226567978",1,6479270,58124,542879265802720,542879265802720
+"Choreographer#doFrame 226567894",1,6349532,54688,542879232686339,542879232686339
+"Choreographer#doFrame 226567768",1,6298906,47135,542879183079152,542879183079152
+"Choreographer#doFrame 226568346",1,6235130,15078,542882644040118,542882644040118
+"Choreographer#scheduleVsyncLocked",68,6231641,6231641,542877044895426,542882796704389
+"Choreographer#doFrame 226567642",1,6206901,49088,542879132780714,542879132780714
+"deliverInputEvent src=0x1002 eventTimeNano=340679598991665 id=0xe3b5554f",1,6153881,70756,542882569084857,542882569084857
+"ViewPostImeInputStage id=0xe399c0c1",1,6110417,300469,542879249572954,542879249572954
+"draw-VRI[MainActivity]",5,6108750,783957,542877068159671,542877229438187
+"performDestroy:com.example.shop.ui.MainActivity",2,6049948,3934765,542877200070192,542877217858135
+"ViewPostImeInputStage id=0xe3b5554f",1,6030495,316771,542882569153790,542882569153790
+"Choreographer#doFrame 226567684",1,6029506,40313,542879149182068,542879149182068
+"JIT compiling boolean java.util.concurrent.ConcurrentHashMap$KeySetView.contains(java.lang.Object) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,6021328,62525,542876666641858,542876666641858
+"Choreographer#doFrame 226567852",1,5998334,50105,542879216156313,542879216156313
+"Recomposer:recompose",4,5946407,534193,542877210637510,542879282485350
+"deliverInputEvent src=0x1002 eventTimeNano=340679674002996 id=0xf5cca10c",1,5927604,302292,542882644112123,542882644112123
+"Choreographer#doFrame 226568388",1,5847187,18255,542882660359337,542882660359337
+"Choreographer#doFrame 226568514",1,5688854,17656,542882710498321,542882710498321
+"ViewPostImeInputStage id=0xf5cca10c",1,5618932,137395,542882644131993,542882644131993
+"deliverInputEvent src=0x1002 eventTimeNano=340676262536638 id=0xd09f077d",1,5575807,362944,542879232830845,542879232830845
+"deliverInputEvent src=0x1002 eventTimeNano=340676212536640 id=0xfca52878",1,5530859,354844,542879183224855,542879183224855
+"deliverInputEvent src=0x1002 eventTimeNano=340679690669662 id=0xc2a83ae8",1,5504479,320937,542882660481811,542882660481811
+"Choreographer#doFrame 226568640",1,5494922,17213,542882760574493,542882760574493
+"deliverInputEvent src=0x1002 eventTimeNano=340676295869970 id=0xd786149c",1,5435313,421875,542879265978657,542879265978657
+"deliverInputEvent src=0x1002 eventTimeNano=340679740669660 id=0xe349bb92",1,5428620,331198,542882710564363,542882710564363
+"deliverInputEvent src=0x1002 eventTimeNano=340676162536642 id=0xeaf3a0f9",1,5408281,350521,542879132916912,542879132916912
+"deliverInputEvent src=0x1002 eventTimeNano=340677571000000 id=0xfbb8e53f",1,5332240,194297,542880538280585,542880538280585
+"deliverInputEvent src=0x1002 eventTimeNano=340676179203308 id=0xc687bdfe",1,5295130,368072,542879149307589,542879149307589
+"deliverInputEvent src=0x1002 eventTimeNano=340676245869972 id=0xcba85325",1,5280027,319428,542879216305818,542879216305818
+"ViewPostImeInputStage id=0xd09f077d",1,5196171,279530,542879232880272,542879232880272
+"deliverInputEvent src=0x1002 eventTimeNano=340679790669658 id=0xf34df9e7",1,5178281,238308,542882760681967,542882760681967
+"ViewPostImeInputStage id=0xc2a83ae8",1,5174844,240182,542882660535717,542882660535717
+"deliverInputEvent src=0x1002 eventTimeNano=340681085000000 id=0xf634afcf",1,5170365,216719,542884052712228,542884052712228
+"ViewPostImeInputStage id=0xfca52878",1,5163047,280313,542879183267251,542879183267251
+"allocateBuffers",4,5160392,339950,542877066452822,542877183492301
+"ViewPostImeInputStage id=0xe349bb92",1,5089661,154505,542882710587436,542882710587436
+"ViewPostImeInputStage id=0xfbb8e53f",1,5084011,381354,542880538359960,542880538359960
+"ViewPostImeInputStage id=0xeaf3a0f9",1,5044896,280834,542879132958839,542879132958839
+"Choreographer#doFrame 226566764",1,5006927,19063,542877225334958,542877225334958
+"ViewPostImeInputStage id=0xd786149c",1,4999636,270912,542879266027459,542879266027459
+"Choreographer#doFrame 226568556",1,4977500,15312,542882727374076,542882727374076
+"ViewPostImeInputStage id=0xcba85325",1,4946198,279661,542879216349568,542879216349568
+"Choreographer#doFrame 226568598",1,4938620,15703,542882743786368,542882743786368
+"ViewPostImeInputStage id=0xf34df9e7",1,4929948,203516,542882760710665,542882760710665
+"Choreographer#doFrame 226568472",1,4923672,16224,542882694017800,542882694017800
+"ViewPostImeInputStage id=0xc687bdfe",1,4912943,260104,542879149413214,542879149413214
+"ViewPostImeInputStage id=0xf634afcf",1,4900677,555129,542884052786968,542884052786968
+"allocate",10,4811458,422188,542877066689515,542877185151442
+"deliverInputEvent src=0x1002 eventTimeNano=340679757336326 id=0xf96b020d",1,4694922,318881,542882727464910,542882727464910
+"Record View#draw()",3,4657293,3913804,542877068778812,542877229458655
+"deliverInputEvent src=0x1002 eventTimeNano=340679774002992 id=0xcf8e0059",1,4627370,301771,542882743912878,542882743912878
+"deliverInputEvent src=0x1002 eventTimeNano=340679723000000 id=0xf8416302",1,4606770,333852,542882694123035,542882694123035
+"performCreate:com.example.shop.ui.MainActivity",2,4594610,4243594,542877042371598,542877079344879
+"Choreographer#doFrame 226567810",1,4525703,21485,542879198908813,542879198908813
+"Choreographer#doFrame 226567726",1,4389818,20912,542879166059256,542879166059256
+"ViewPostImeInputStage id=0xf96b020d",1,4367057,218958,542882727496186,542882727496186
+"Drawing  0.00  0.00 1080.00 2404.00",3,4324089,462239,542877069865556,542877230675687
+"ViewPostImeInputStage id=0xcf8e0059",1,4316354,161797,542882743954832,542882743954832
+"ViewPostImeInputStage id=0xf8416302",1,4262683,209220,542882694185300,542882694185300
+"deliverInputEvent src=0x1002 eventTimeNano=340679833000000 id=0xc81af144",1,4203984,178124,542882797796655,542882797796655
+"deliverInputEvent src=0x1002 eventTimeNano=340676229203306 id=0xe6781815",1,4109506,72266,542879198981443,542879198981443
+"Choreographer#doFrame 226568269",1,4103385,13255,542882610358790,542882610358790
+"Choreographer#doFrame 226567474",1,4046458,44427,542879065735975,542879065735975
+"ViewPostImeInputStage id=0xe6781815",1,4027162,154792,542879199017719,542879199017719
+"ViewPostImeInputStage id=0xc81af144",1,4018594,164192,542882797817488,542882797817488
+"deliverInputEvent src=0x1002 eventTimeNano=340676195869974 id=0xc81c79d7",1,3949427,66588,542879166143996,542879166143996
+"TextLayout:initLayout",19,3931977,546197,542877139256208,542877228169879
+"Choreographer#doFrame 226567411",1,3930729,10052,542879040207042,542879040207042
+"ViewPostImeInputStage id=0xc81c79d7",1,3870417,209583,542879166180063,542879166180063
+"deliverInputEvent src=0x1002 eventTimeNano=340679640669664 id=0xd00086f6",1,3859115,256666,542882610418347,542882610418347
+"Choreographer#doFrame 226567516",1,3600000,49114,542879082405167,542879082405167
+"ViewPostImeInputStage id=0xd00086f6",1,3597318,121094,542882610449623,542882610449623
+"Compose:onRemembered",2,3566536,3419843,542877062443916,542877164552692
+"Choreographer#doFrame 226567600",1,3538151,43334,542879115745298,542879115745298
+"Constructing StaticLayout",21,3463541,3463541,542877139355114,542877228184984
+"deliverInputEvent src=0x1002 eventTimeNano=340676092500000 id=0xc7172a1f",1,3411953,341484,542879065839334,542879065839334
+"Choreographer#doFrame 226567432",1,3411745,30052,542879048939516,542879048939516
+"JIT compiling void android.app.job.JobServiceEngine.jobFinished(android.app.job.JobParameters, boolean) (kind=Baseline) from /system/framework/framework.jar",1,3293360,28490,542876694571988,542876694571988
+"Choreographer#doFrame 226568430",1,3201745,11407,542882677024102,542882677024102
+"flush commands",3,3167397,6459,542877069884254,542877230775426
+"Vulkan finish frame",3,3160938,180784,542877069885530,542877230776650
+"deliverInputEvent src=0x1002 eventTimeNano=340676112536644 id=0xdeb00649",1,3122579,213490,542879082477771,542879082477771
+"Choreographer#doFrame 226568731",1,3109349,8750,542882793639311,542882793639311
+"ViewPostImeInputStage id=0xc7172a1f",1,3062110,229245,542879065866443,542879065866443
+"deliverInputEvent src=0x1002 eventTimeNano=340679707336328 id=0xc0bd9a51",1,3017943,54635,542882677108295,542882677108295
+"deliverInputEvent src=0x1002 eventTimeNano=340679823000000 id=0xed044100",1,3014349,37969,542882793684102,542882793684102
+"RGXRemoveRenderTarget",4,2982838,2982838,542877195969463,542877221061963
+"deliverInputEvent src=0x1002 eventTimeNano=340676307000000 id=0xee63cc6c",1,2981641,168516,542879272561053,542879272561053
+"ViewPostImeInputStage id=0xed044100",1,2970208,92708,542882793702644,542882793702644
+"deliverInputEvent src=0x1002 eventTimeNano=340676079203312 id=0xfc7b4524",1,2965651,198829,542879049019490,542879049019490
+"JIT compiling void java.util.concurrent.ThreadPoolExecutor.<init>(int, int, long, java.util.concurrent.TimeUnit, java.util.concurrent.BlockingQueue) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,2958750,27136,542877681725166,542877681725166
+"ViewPostImeInputStage id=0xc0bd9a51",1,2957474,124141,542882677125248,542882677125248
+"Choreographer#doFrame 226568682",1,2947812,6041,542882777018764,542882777018764
+"ViewPostImeInputStage id=0xdeb00649",1,2901875,238099,542879082499308,542879082499308
+"deliverInputEvent src=0x1002 eventTimeNano=340676145869976 id=0xdeebfa4a",1,2884297,220469,542879115849152,542879115849152
+"JIT compiling byte[] java.lang.StringUTF16.newBytesFor(int) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,2867187,18749,542876675398551,542876675398551
+"deliverInputEvent src=0x1002 eventTimeNano=340679807336324 id=0xc602f391",1,2845703,100600,542882777066056,542882777066056
+"Choreographer#doFrame 226568206",1,2833359,3620,542882585414493,542882585414493
+"TrimMaps",38,2811905,278880,542877044882614,542882680146420
+"Choreographer#doFrame 226567558",1,2764245,24558,542879099492277,542879099492277
+"ViewPostImeInputStage id=0xfc7b4524",1,2759583,159713,542879049042537,542879049042537
+"ViewPostImeInputStage id=0xc602f391",1,2738333,106744,542882777139858,542882777139858
+"deliverInputEvent src=0x1002 eventTimeNano=340679615669665 id=0xf59f72e1",1,2722891,69088,542882585477097,542882585477097
+"ViewPostImeInputStage id=0xee63cc6c",1,2688021,238724,542879272811574,542879272811574
+"ViewPostImeInputStage id=0xdeebfa4a",1,2656094,172188,542879115875480,542879115875480
+"ViewPostImeInputStage id=0xf59f72e1",1,2645156,250000,542882585518686,542882585518686
+"Compiling optimized",14,2603283,2508047,542877063353369,542879045546131
+"virtual void art::MemMapArenaPool::TrimMaps()",38,2533025,2533025,542877044883916,542882680149441
+"Choreographer#doFrame 226566552",1,2449635,88801,542877210269359,542877210269359
+"deliverInputEvent src=0x1002 eventTimeNano=340676070869979 id=0xcc6c7c21",1,2446927,50886,542879040302745,542879040302745
+"DrawFrames 226566530",1,2421223,210077,542877192921807,542877192921807
+"deliverInputEvent src=0x1002 eventTimeNano=340676129000000 id=0xf4af15f0",1,2388230,72762,542879099628943,542879099628943
+"ViewPostImeInputStage id=0xcc6c7c21",1,2350781,217890,542879040359490,542879040359490
+"Choreographer#doFrame 226568248",1,2324297,9765,542882601932149,542882601932149
+"Choreographer#doFrame 226568227",1,2305911,4453,542882593610665,542882593610665
+"ViewPostImeInputStage id=0xf4af15f0",1,2300338,149974,542879099676131,542879099676131
+"Choreographer#doFrame - resynced to 226566714 in 20.4ms",1,2258047,9374,542877210460270,542877210460270
+"VerifyClass androidx.profileinstaller.ProfileInstaller",1,2237526,803671,542877682968265,542877682968265
+"deliverInputEvent src=0x1002 eventTimeNano=340679632336331 id=0xd7aed3ea",1,2223151,31354,542882601969285,542882601969285
+"deliverInputEvent src=0x1002 eventTimeNano=340677571000000 id=0xc67f962d",1,2219922,243750,542880545290559,542880545290559
+"deliverInputEvent src=0x1002 eventTimeNano=340679624002998 id=0xd8ed9a5f",1,2219219,24063,542882593629180,542882593629180
+"ViewPostImeInputStage id=0xd8ed9a5f",1,2192578,38671,542882593638347,542882593638347
+"ViewPostImeInputStage id=0xd7aed3ea",1,2189245,30912,542882601979675,542882601979675
+"JIT compiling boolean java.io.UnixFileSystem.createFileExclusively0(java.lang.String) (kind=Optimized) from /apex/com.android.art/javalib/core-oj.jar",1,2027369,3358,542877689473500,542877689473500
+"deliverInputEvent src=0x1002 eventTimeNano=340681085000000 id=0xd0fc96b0",1,2017761,70443,542884060593999,542884060593999
+"JIT compiling void java.lang.StringUTF16.inflate(byte[], int, byte[], int, int) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,2004219,17969,542876678527301,542876678527301
+"void art::ProfileSaver::GetClassesAndMethodsHelper::CollectClasses(Thread *)",1,1970183,296433,542876444193238,542876444193238
+"ViewPostImeInputStage id=0xc67f962d",1,1964141,241094,542880545325689,542880545325689
+"ViewPostImeInputStage id=0xd0fc96b0",1,1939297,240026,542884060638739,542884060638739
+"DrawFrames 226566764",1,1897161,183960,542877230248916,542877230248916
+"dispatchApplyInsets",2,1895260,1895260,542877063751676,542877168359385
+"setSurface",5,1870704,1175861,542877066367457,542877220865895
+"waitForever",3,1838047,1838047,542877070731911,542877232116129
+"performResume:com.example.shop.ui.MainActivity",2,1837942,1827082,542877046035400,542877081669541
+"Compose:onForgotten",2,1739791,1708176,542877202315583,542877218916390
+"VRI[MainActivity]-relayoutWindow#first=true/resize=true/vis=false/params=true/force=false/seqId=0",2,1687787,1113987,542877065517379,542877182376650
+"void art::ProfileSaver::GetClassesAndMethodsHelper::CollectInternal(Handle<mirror::ClassLoader>) [kBootClassLoader = false]",3,1673750,1673750,542876444201259,542876444216337
+"JIT compiling int java.util.concurrent.ConcurrentHashMap$CollectionView.size() (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,1534401,33880,542876672906494,542876672906494
+"performStop:com.example.shop.ui.MainActivity",2,1515808,1515808,542877198248551,542877217230478
+"JIT compiling void android.app.Activity.dispatchActivityPaused() (kind=Baseline) from /system/framework/framework.jar",1,1479610,2761,542877041714332,542877041714332
+"JIT compiling android.view.MotionEvent android.view.MotionEvent.obtain() (kind=Baseline) from /system/framework/framework.jar!3",1,1458932,32552,542879019394204,542879019394204
+"JIT compiling void android.app.job.JobInfo.<init>(android.os.Parcel) (kind=Baseline) from /system/framework/framework.jar",1,1450286,11614,542876700800270,542876700800270
+"auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const",3,1431171,1173229,542877069893760,542877230834958
+"DrawFrames 226566456",1,1429609,307160,542877069348786,542877069348786
+"purgePendingResources",1,1327735,1327735,542876701498108,542876701498108
+"VerifyClass androidx.compose.foundation.gestures.DragGestureDetectorKt",1,1294792,1020521,542879027166339,542879027166339
+"JIT compiling void android.view.MotionEvent.<init>() (kind=Baseline) from /system/framework/framework.jar!3",1,1285521,17761,542879020881443,542879020881443
+"Landroidx/profileinstaller/ProfileInstaller$1;",1,1265937,175182,542877683148005,542877683148005
+"Lock contention on ClassLinker classes lock (owner tid: 18446744073709551615)",25,1264372,1264372,542877101150036,542877683186208
+"JIT compiling boolean android.view.ViewGroup.dispatchTouchEvent(android.view.MotionEvent) (kind=Baseline) from /system/framework/framework.jar!3",1,1247604,5417,542879035430949,542879035430949
+"JIT compiling void jdk.internal.math.FloatingDecimal$BinaryToASCIIBuffer.dtoa(int, long, int, boolean) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,1176146,3359,542877085120478,542877085120478
+"waiting for GPU completion 2",1,1152500,4218,542877232113838,542877232113838
+"VRI[MainActivity]-relayoutWindow#first=false/resize=false/vis=true/params=false/force=false/seqId=0",1,1133334,997371,542877196886754,542877196886754
+"JIT compiling void java.util.zip.ZipFile$Source.initCEN(int) (kind=Baseline) from /apex/com.android.art/javalib/core-oj.jar",1,1112683,3699,542877111064957,542877111064957
+"JIT compiling java.lang.Object android.content.ComponentName$1.createFromParcel(android.os.Parcel) (kind=Baseline) from /system/framework/framework.jar",1,1057083,13333,542876702283395,542876702283395
+"MSG_WINDOW_FOCUS_CHANGED",2,1048568,562968,542877077030869,542877215754827
+"VerifyClass androidx.compose.foundation.text.BasicTextFieldKt",1,1026615,797731,542877127374098,542877127374098
+"VerifyClass live.gravitylabs.porthole.protocol.SetupEntry",1,998490,692031,542876666110556,542876666110556
+"QueueSubmit",3,997994,171534,542877070342900,542877231391833
+"JIT compiling void android.view.ViewRootImpl.processRawInputEvent(android.view.InputEvent) (kind=Baseline) from /system/framework/framework.jar!3",1,979557,12734,542879023228188,542879023228188
+"ViewRootImpl#setFrameRateCategory no preference, reason unknown, -",4,977865,977865,542880190372408,542884093467827
+"JIT compiling boolean android.content.Intent.migrateExtraStreamToClipData(android.content.Context) (kind=Baseline) from /system/framework/framework.jar",1,975912,3255,542877058343056,542877058343056
+"JIT compiling void android.text.StaticLayout.calculateEllipsis(int, int, android.text.MeasuredParagraph, int, float, android.text.TextUtils$TruncateAt, int, float, android.text.TextPaint, boolean) (kind=Baseline) from /system/framework/framework.jar!3",1,971875,3125,542877180606572,542877180606572
+"activityPause",2,952447,134009,542877037481416,542877072406494
+"Recomposer:animation",3,949011,862552,542877210482874,542879282087433
+"MSG_INITIAL_TOUCH_BOOST_TIMEOUT",4,944897,276876,542879305754204,542884093431577
+"VerifyClass androidx.profileinstaller.DeviceProfileWriter",1,944740,767579,542877687743864,542877687743864
+"VerifyClass io.ktor.client.plugins.api.ClientPluginBuilder",1,929063,912476,542877110034905,542877110034905

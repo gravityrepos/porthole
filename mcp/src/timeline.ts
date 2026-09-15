@@ -1,14 +1,16 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { restartApp } from "./adb.js";
+import { restartApp, resolveProjectRoot } from "./adb.js";
 import http from "node:http";
 import { readFile } from "node:fs/promises";
+import { readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { extname, resolve, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { isConnected, isHandshaking, type ConnectionState, type DeviceClient, type DeviceEvent } from "./device.js";
-import { askTrace, findTraceProcessor } from "./perfetto.js";
+import { askTrace, findTraceProcessor, parseRows, runScript, why, type RunResult } from "./perfetto.js";
 import { buildTrace } from "./trace.js";
+import { fromBootMs, fromTraceClockSnapshot, toBootNs } from "./moment.js";
 
 const UI_DIR = fileURLToPath(new URL("../ui/dist/", import.meta.url));
 
@@ -66,6 +68,184 @@ const VITE_DEV_PORT = 5273;
 /** Loopback spellings of one port, as they appear in a `Host` header. */
 function loopbackAuthorities(port: number): string[] {
   return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
+}
+
+/**
+ * Where captures live: flat, under the project root. GRA-113's own open
+ * question asked whether a `.pftrace` should instead file under the session
+ * it covers once sessions are on disk (GRA-53) — answered "stay flat" for
+ * now; `/api/traces` is the one place that would have to change.
+ */
+function tracesDir(): string {
+  return resolve(resolveProjectRoot().directory, ".porthole", "traces");
+}
+
+/**
+ * A `trace=` value has to look like a name this server minted itself —
+ * `id`s come only from what `/api/traces` just listed — before anything
+ * touches the filesystem or a subprocess with it. No path separator of
+ * either flavour is even a legal character, which is what refuses
+ * `../../../etc/passwd` and `..\..\..\Windows\win.ini` alike: neither `/`
+ * nor `\` is in the class below, so both fail here and never reach `resolve`.
+ */
+const TRACE_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * `id` → a real `.pftrace` inside the traces directory, or null for anything
+ * that is not exactly that (GRA-113 AC5). The regex above is already enough
+ * to refuse a traversal outright, since it admits no separator to traverse
+ * with; the `resolve`-and-prefix check is the same belt-and-suspenders
+ * pattern this file already uses for the static UI (see `target` below), and
+ * catches the id of a file that simply does not exist, which the regex alone
+ * cannot.
+ */
+function resolveTraceFile(id: string): string | null {
+  if (!TRACE_ID_PATTERN.test(id)) return null;
+  const dir = resolve(tracesDir());
+  const resolved = resolve(dir, `${id}.pftrace`);
+  if (resolved !== `${dir}${sep}${id}.pftrace`) return null;
+  try {
+    if (!statSync(resolved).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return resolved;
+}
+
+interface TraceListing {
+  id: string;
+  bytes: number;
+  recordedAt: string;
+  coverage: { from: number; to: number } | null;
+  reason?: string;
+}
+
+/** A trace's coverage never changes for a given `(path, mtime)`, so it is computed at most once per file no matter how many times `/api/traces` is polled — GRA-82's pattern applied to a new endpoint rather than re-litigated for it. */
+const coverageCache = new Map<string, { coverage: { from: number; to: number } | null; reason?: string }>();
+
+/** trace_processor's own budget for this: bounds and a clock snapshot are cheap next to loading a whole trace to answer the five questions, so a much shorter fuse than `askTrace`'s 60s is enough to call a hang a hang. */
+const COVERAGE_TIMEOUT_MS = 20_000;
+
+/**
+ * `start_ts`/`end_ts` and a clock snapshot, in one invocation — one trace
+ * load, whatever `/api/traces` asks about next. Two plain `SELECT`s of
+ * nothing but numbers, so splitting the output on the blank line between
+ * statements (which `matchBatch` in perfetto.ts deliberately does NOT do for
+ * the five questions, because a slice name can contain one) is safe here:
+ * nothing in this query's result can contain an embedded newline.
+ */
+const COVERAGE_SQL =
+  'SELECT start_ts, end_ts FROM trace_bounds;\n' +
+  'SELECT clock_id, clock_value, ts FROM clock_snapshot WHERE clock_id IN (3, 6) ORDER BY snapshot_id LIMIT 2;';
+
+function readCoverage(result: RunResult): { coverage: { from: number; to: number } | null; reason?: string } {
+  if (result.spawnError) {
+    return { coverage: null, reason: `trace_processor could not run: ${result.spawnError.message}` };
+  }
+  if (result.timedOut) {
+    return {
+      coverage: null,
+      reason: `trace_processor did not answer within ${result.elapsedMs}ms; it may be wedged`,
+    };
+  }
+  if (result.code !== 0) {
+    return { coverage: null, reason: `trace_processor could not read this file: ${why(result.stderr, undefined)}` };
+  }
+
+  const [boundsBlock, clockBlock] = result.stdout.trim().split(/\r?\n\r?\n/);
+  const bounds = parseRows(boundsBlock ?? "");
+  const clocks = parseRows(clockBlock ?? "");
+  const boot = clocks.find((r) => String(r.clock_id) === "6");
+  const monotonic = clocks.find((r) => String(r.clock_id) === "3");
+  const startTs = Number(bounds[0]?.start_ts);
+  const endTs = Number(bounds[0]?.end_ts);
+
+  if (!boot || !monotonic) {
+    return {
+      coverage: null,
+      reason: "the trace has no clock snapshot, so its window cannot be placed on the device's uptime clock",
+    };
+  }
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || (startTs === 0 && endTs === 0)) {
+    return { coverage: null, reason: "the trace has no bounds — trace_processor read it as empty" };
+  }
+
+  const snapshot = { bootNs: Number(boot.clock_value), monotonicNs: Number(monotonic.clock_value) };
+  return {
+    coverage: {
+      from: fromTraceClockSnapshot(snapshot, startTs),
+      to: fromTraceClockSnapshot(snapshot, endTs),
+    },
+  };
+}
+
+async function coverageOf(
+  binary: string,
+  tracePath: string,
+  mtimeMs: number,
+): Promise<{ coverage: { from: number; to: number } | null; reason?: string }> {
+  const key = `${tracePath} ${mtimeMs}`;
+  const cached = coverageCache.get(key);
+  if (cached) return cached;
+
+  const result = await runScript(binary, ["query", "-f", "-", tracePath], COVERAGE_SQL, COVERAGE_TIMEOUT_MS);
+  const answer = readCoverage(result);
+  coverageCache.set(key, answer);
+  return answer;
+}
+
+/**
+ * `<project root>/.porthole/traces/*.pftrace`, as `id`/`bytes`/`recordedAt`/
+ * `coverage` (GRA-113). Missing or unreadable directory, or one with nothing
+ * `.pftrace` in it, is an empty list rather than an error — the same
+ * "absence is not exceptional" choice `findTraceProcessor` and
+ * `resolveSdkDir` already make elsewhere in this codebase.
+ *
+ * Sequential, not `Promise.all` over the list: `coverageOf` spawns
+ * trace_processor, and running several at once against a socket-driven
+ * server that also has a live device attached is exactly the kind of
+ * resource spike GRA-82 exists to avoid. One at a time also means the cache
+ * above is never asked to answer for a file mid-computation from a second
+ * concurrent request.
+ */
+async function listTraces(): Promise<TraceListing[]> {
+  const dir = tracesDir();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  const files = names
+    .filter((name) => extname(name) === ".pftrace")
+    .map((name) => {
+      const path = resolve(dir, name);
+      const stats = statSync(path);
+      return { id: name.slice(0, -".pftrace".length), path, bytes: stats.size, mtimeMs: stats.mtimeMs };
+    });
+
+  const binary = findTraceProcessor();
+  const out: TraceListing[] = [];
+  for (const file of files) {
+    const { coverage, reason } = binary
+      ? await coverageOf(binary, file.path, file.mtimeMs)
+      : {
+          coverage: null,
+          reason:
+            "trace_processor_shell was not found, so this trace's coverage could not be read. " +
+            "`./gradlew portholeTraceProcessor` fetches it.",
+        };
+    out.push({
+      id: file.id,
+      bytes: file.bytes,
+      recordedAt: new Date(file.mtimeMs).toISOString(),
+      coverage,
+      ...(reason ? { reason } : {}),
+    });
+  }
+  // Newest first: the trace someone just captured is the one they are asking about.
+  return out.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
 }
 
 /**
@@ -259,12 +439,41 @@ export class TimelineServer {
        * observed and what was merely adjacent. Each carries its source so a
        * reader can tell which tool is making the claim.
        */
+      // GRA-113: what captures exist, and the uptime window each one covers,
+      // so a caller can ask "does any trace have anything to say about what
+      // is on screen right now" without opening one. The ids this returns
+      // are the only ones `/api/findings?trace=` will accept.
+      if (path === "/api/traces") {
+        const traces = await listTraces();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ traces }));
+        return;
+      }
+
       if (path === "/api/findings") {
         const query = new URL(req.url ?? "/", "http://localhost");
         const events = this.events;
         const to = numberParam(query.searchParams.get("to")) ?? events[events.length - 1]?.t ?? 0;
         const from = numberParam(query.searchParams.get("from")) ?? events[0]?.t ?? 0;
         const within = events.filter((e) => e.t >= from && e.t <= to);
+
+        // GRA-113 AC5: `trace` is an id from `GET /api/traces`, never a
+        // filesystem path handed straight to trace_processor_shell. An id
+        // that does not resolve to a real file inside the traces directory —
+        // a traversal shape, an unknown name, an empty value — is refused
+        // right here, before anything else in this handler runs and in
+        // particular before anything is spawned.
+        const traceId = query.searchParams.get("trace");
+        const traceFile = traceId === null ? null : resolveTraceFile(traceId);
+        if (traceId !== null && traceFile === null) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `Not a known trace id: ${JSON.stringify(traceId)}. See GET /api/traces.`,
+            }),
+          );
+          return;
+        }
 
         const live = buildTrace({
           scenario: "live",
@@ -278,8 +487,7 @@ export class TimelineServer {
         const findings: Sourced[] = live.findings.map((f) => ({ ...f, source: "porthole" }));
         const notes: string[] = [];
 
-        const tracePath = query.searchParams.get("trace");
-        if (tracePath) {
+        if (traceFile) {
           const binary = findTraceProcessor();
           const app = this.device.hello?.packageName;
           if (!binary) {
@@ -301,10 +509,13 @@ export class TimelineServer {
                 : "Not attached to an app, so there is no process to scope the trace to.",
             );
           } else {
-            // The window is in Porthole's clock; the trace is stamped in the
-            // boot clock, and the two differ by however long the device slept.
-            const sample = within.find((e) => e.event === "clocks") ?? events.find((e) => e.event === "clocks");
-            const sleepMs = sample ? Number(sample.data.sleepMs) || 0 : 0;
+            // GRA-113: the one conversion, both directions, both through
+            // moment.ts — `toBootNs` to scope the query in the trace's own
+            // clock, `fromBootMs` (wrapped as `toUptimeMs` below) to place
+            // whatever it answers back on Porthole's. This replaced an
+            // open-coded version here that read whichever `clocks` sample it
+            // found first rather than the one in force at `from`/`to`.
+            const toUptimeMs = (bootNs: number) => fromBootMs(events, bootNs / 1e6)?.at ?? null;
             // askTrace now spawns asynchronously (GRA-82), so this await is new
             // here. It is safe: the admission gate above runs to completion
             // synchronously, before this handler's first await of any kind, so
@@ -312,10 +523,11 @@ export class TimelineServer {
             // a check that already finished.
             const asked = await askTrace({
               binary,
-              trace: tracePath,
+              trace: traceFile,
               packageName: app,
-              fromNs: (from + sleepMs) * 1e6,
-              toNs: (to + sleepMs) * 1e6,
+              fromNs: toBootNs(events, from),
+              toNs: toBootNs(events, to),
+              toUptimeMs,
             });
             findings.push(...asked.findings.map((f): Sourced => ({ ...f, source: "trace" })));
             notes.push(...asked.unanswered);

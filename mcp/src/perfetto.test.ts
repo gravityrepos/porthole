@@ -150,6 +150,116 @@ describe("reading a real capture", () => {
     // putting two things next to each other it must say `correlated`.
     for (const f of findings) expect(f.confidence).toBe("observed");
   });
+
+  // GRA-113: these fixtures are UI exports, not trace_processor's own stdout
+  // (perfetto-stdout.test.ts's are), so they carry no MIN(ts)/MAX(ts) at
+  // all — and interpret() here is called with no converter either. Both are
+  // legitimate reasons a finding cannot be placed, and the ticket's own rule
+  // is that either one degrades to `spanning: true`, never to a finding with
+  // neither field.
+  it("falls back to spanning when it has no ts data and no converter to place a window with", () => {
+    expect(findings.length).toBeGreaterThan(0);
+    for (const f of findings) {
+      expect(f.spanning, `${f.id} should be spanning (no ts, no converter)`).toBe(true);
+      expect(f.window, `${f.id} should carry no window alongside spanning`).toBeUndefined();
+    }
+  });
+});
+
+describe("interpret + toUptimeMs: placing a window (GRA-113)", () => {
+  // A converter that mimics fromBootMs's own arithmetic exactly (uptime =
+  // bootNs/1e6 - offsetMs), so the numbers below are easy to hand-check —
+  // moment.test.ts is what actually proves fromBootMs/toBootNs correct.
+  const offsetMs = 5_000;
+  const toUptimeMs = (bootNs: number) => bootNs / 1e6 - offsetMs;
+
+  it("places trace-frame-deadline from the missed rows' own MIN(ts)/MAX(ts)", () => {
+    const findings = interpret(
+      {
+        jank: [
+          { jank_type: "App Deadline Missed", COUNT: "1", "MIN(dur)": "1", "MAX(dur)": "1", "AVG(dur)": "1", "MIN(ts)": "10000000", "MAX(ts)": "20000000" },
+        ],
+      },
+      toUptimeMs,
+    );
+    const finding = findings.find((f) => f.id === "trace-frame-deadline");
+    expect(finding?.window).toEqual({ from: 10 - offsetMs, to: 20 - offsetMs });
+    expect(finding?.spanning).toBeUndefined();
+  });
+
+  it("thread_states stays spanning even with a converter available — it has no ts to place with", () => {
+    const findings = interpret(
+      {
+        thread_states: [
+          { thread_name: "main", is_main_thread: "1", state: "R", io_wait: "[NULL]", COUNT: "1", "SUM(dur)": "1000000" },
+        ],
+      },
+      toUptimeMs,
+    );
+    const finding = findings.find((f) => f.id === "trace-main-thread-contention");
+    expect(finding?.spanning).toBe(true);
+    expect(finding?.window).toBeUndefined();
+  });
+
+  it("places the blocking-binder finding from only the blocking target's own group, not every target's", () => {
+    const findings = interpret(
+      {
+        binder: [
+          { target: "system_server", COUNT: "1", "SUM(dur)": "9000000", "MAX(dur)": "9000000", "MIN(ts)": "100000000", "MAX(ts)": "100000000" },
+          { target: "chatty_process", COUNT: "50", "SUM(dur)": "5000000", "MAX(dur)": "100000", "MIN(ts)": "1000000000", "MAX(ts)": "9000000000" },
+        ],
+      },
+      toUptimeMs,
+    );
+    const finding = findings.find((f) => f.id === "trace-binder");
+    expect(finding?.title).toContain("system_server");
+    // Only the blocking target's own instant — not widened by the chatty
+    // target's much larger MIN(ts)/MAX(ts) spread.
+    expect(finding?.window).toEqual({ from: 100 - offsetMs, to: 100 - offsetMs });
+  });
+
+  it("places the chatter-binder finding across every target's envelope", () => {
+    const findings = interpret(
+      {
+        binder: [
+          { target: "a", COUNT: "10", "SUM(dur)": "3000000", "MAX(dur)": "100000", "MIN(ts)": "100000000", "MAX(ts)": "200000000" },
+          { target: "b", COUNT: "10", "SUM(dur)": "3000000", "MAX(dur)": "100000", "MIN(ts)": "300000000", "MAX(ts)": "400000000" },
+        ],
+      },
+      toUptimeMs,
+    );
+    const finding = findings.find((f) => f.id === "trace-binder");
+    expect(finding?.severity).toBe("note"); // chatter, not blocking
+    expect(finding?.window).toEqual({ from: 100 - offsetMs, to: 400 - offsetMs });
+  });
+
+  it("places trace-render across every render row's envelope", () => {
+    const findings = interpret(
+      {
+        render: [
+          { name: "flush commands", thread_name: "RenderThread", COUNT: "5", "SUM(dur)": "6000000", "MIN(ts)": "50000000", "MAX(ts)": "150000000" },
+        ],
+      },
+      toUptimeMs,
+    );
+    const finding = findings.find((f) => f.id === "trace-render");
+    expect(finding?.window).toEqual({ from: 50 - offsetMs, to: 150 - offsetMs });
+  });
+
+  it("falls back to spanning when the converter cannot place a moment, even with real ts data present", () => {
+    const cannotPlace = () => null;
+    const findings = interpret(
+      {
+        jank: [
+          { jank_type: "App Deadline Missed", COUNT: "1", "MIN(dur)": "1", "MAX(dur)": "1", "AVG(dur)": "1", "MIN(ts)": "10000000", "MAX(ts)": "20000000" },
+        ],
+      },
+      cannotPlace,
+    );
+    const finding = findings.find((f) => f.id === "trace-frame-deadline");
+    expect(finding?.spanning).toBe(true);
+    expect(finding?.window).toBeUndefined();
+  });
 });
 
 /**

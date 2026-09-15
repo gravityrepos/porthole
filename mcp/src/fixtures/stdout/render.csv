@@ -1,31 +1,31 @@
-"name","thread_name","COUNT","SUM(dur)"
-"Drawing  0.00  0.00 1080.00 2404.00","RenderThread",3,5446069
-"setSurface","RenderThread",5,5031643
-"flush commands","RenderThread",3,3984218
-"Vulkan finish frame","RenderThread",3,3978880
-"DrawFrames 226665975","RenderThread",1,2644714
-"DrawFrames 226666108","RenderThread",1,2354766
-"binder transaction","hwuiTask0",4,2252813
-"auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,2192734
-"waitForever","GPU completion",3,2000703
-"DrawFrames 226666371","RenderThread",1,1940286
-"waiting for GPU completion 2","GPU completion",1,1494584
-"QueueSubmit","RenderThread",3,1046823
-"queueBuffer","RenderThread",6,1038777
-"binder transaction","hwuiTask1",2,713152
-"disconnect","RenderThread",2,582917
-"BindImageMemory2","RenderThread",3,504349
-"TAKick: 19","RenderThread",1,494401
-"waiting for GPU completion 1","GPU completion",1,404010
-"auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,360808
-"TQ_KickNoSync: 15","RenderThread",1,353542
-"AtlasTextOp","RenderThread",16,324037
-"frameCommit success=1","RenderThread",2,282213
-"CircularRRectOp","RenderThread",20,281645
-"allocateBuffers","RenderThread",2,220130
-"~GraphicBuffer","RenderThread",4,219090
-"free","RenderThread",4,210938
-"freeBuffer","RenderThread",4,175078
-"notifyFramePending","RenderThread",8,168593
-"onFrameAvailable - VRI[MainActivity]#2(f:0,a:0)","RenderThread",1,133646
-"syncFrameState","RenderThread",3,131485
+"name","thread_name","COUNT","SUM(dur)","MIN(ts)","MAX(ts)"
+"Drawing  0.00  0.00 1080.00 2404.00","RenderThread",3,4324089,542877069865556,542877230675687
+"flush commands","RenderThread",3,3167397,542877069884254,542877230775426
+"Vulkan finish frame","RenderThread",3,3160938,542877069885530,542877230776650
+"DrawFrames 226566530","RenderThread",1,2421223,542877192921807,542877192921807
+"DrawFrames 226566764","RenderThread",1,1897161,542877230248916,542877230248916
+"setSurface","RenderThread",5,1870704,542877066367457,542877220865895
+"waitForever","GPU completion",3,1838047,542877070731911,542877232116129
+"binder transaction","hwuiTask1",4,1755364,542877047299775,542877084949306
+"auto skgpu::ganesh::OpsTask::onExecute(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,1431171,542877069893760,542877230834958
+"DrawFrames 226566456","RenderThread",1,1429609,542877069348786,542877069348786
+"waiting for GPU completion 2","GPU completion",1,1152500,542877232113838,542877232113838
+"QueueSubmit","RenderThread",3,997994,542877070342900,542877231391833
+"queueBuffer","RenderThread",6,761094,542877070491911,542877231947275
+"disconnect","RenderThread",5,631224,542877196540088,542877221506025
+"BindImageMemory2","RenderThread",3,577317,542877069649567,542877230448760
+"auto skgpu::ganesh::OpsTask::onPrepare(GrOpFlushState *)::(anonymous class)::operator()() const","RenderThread",3,519140,542877069891468,542877230785348
+"AtlasTextOp","RenderThread",16,479869,542877193660348,542877230952275
+"TAKick: 16","RenderThread",1,476954,542877231408030,542877231408030
+"waiting for GPU completion 1","GPU completion",1,394818,542877195227067,542877195227067
+"~GraphicBuffer","RenderThread",9,367084,542877196545765,542877221539749
+"waiting for GPU completion 0","GPU completion",1,308281,542877070729437,542877070729437
+"TQ_KickNoSync: 12","RenderThread",1,306068,542877194654723,542877194654723
+"CircularRRectOp","RenderThread",20,261171,542877193644932,542877230950088
+"free","RenderThread",9,251795,542877196546989,542877221540635
+"allocateBuffers","RenderThread",2,227761,542877066452822,542877183290374
+"freeBuffer","RenderThread",9,207656,542877196547874,542877221541312
+"frameCommit success=1","RenderThread",2,173698,542877070659827,542877195216364
+"notifyFramePending","RenderThread",8,130025,542877047554671,542877228862353
+"CreateGraphicsPipeline","RenderThread",1,114401,542877194285947,542877194285947
+"CreateGraphicsPipeline-CacheLookup","RenderThread",1,113307,542877194286598,542877194286598

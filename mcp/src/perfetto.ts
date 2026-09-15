@@ -46,12 +46,33 @@ export interface Question {
   sql: string;
 }
 
+/**
+ * GRA-113: which of these five can carry a `window` on the findings they
+ * produce, versus which can only ever be `spanning`.
+ *
+ * `jank`, `binder`, `render` and `slices` group real, individually-timestamped
+ * occurrences — a slice, a binder transaction, a frame's own deadline record —
+ * so `MIN(ts)`/`MAX(ts)` alongside their existing `GROUP BY` is the envelope
+ * those occurrences actually happened in, not an invented one. They are
+ * **point-placeable**, and their SQL below carries those two columns through
+ * to `interpret()`.
+ *
+ * `thread_states` is different in kind, not just missing a column: it answers
+ * "how much of the window did the main thread spend in each state", which is
+ * a duration summed across however many disjoint stretches the scheduler
+ * visited that state — there is no `ts` a single row could add that would
+ * mean anything, because the row is not about one occurrence. This is the
+ * ticket's own example of a finding that must never be drawn as a point, and
+ * every finding `interpret()` derives from it (`trace-main-thread-contention`)
+ * is unconditionally **spanning**.
+ */
 export const QUESTIONS: Question[] = [
   {
     id: "jank",
     asks: "which frames missed their deadline, and by how much",
     sql: `SELECT jank_type, COUNT(*) AS COUNT, MIN(dur) AS "MIN(dur)",
-                 MAX(dur) AS "MAX(dur)", AVG(dur) AS "AVG(dur)"
+                 MAX(dur) AS "MAX(dur)", AVG(dur) AS "AVG(dur)",
+                 MIN(ts) AS "MIN(ts)", MAX(ts) AS "MAX(ts)"
           FROM actual_frame_timeline_slice
           JOIN process USING(upid)
           WHERE ts >= $from AND ts <= $to AND process.name = $package
@@ -78,7 +99,8 @@ export const QUESTIONS: Question[] = [
     sql: `INCLUDE PERFETTO MODULE android.binder;
           SELECT COALESCE(server_process, 'unknown') AS target,
                  COUNT(*) AS COUNT, SUM(client_dur) AS "SUM(dur)",
-                 MAX(client_dur) AS "MAX(dur)"
+                 MAX(client_dur) AS "MAX(dur)",
+                 MIN(client_ts) AS "MIN(ts)", MAX(client_ts) AS "MAX(ts)"
           FROM android_binder_txns
           WHERE client_ts >= $from AND client_ts <= $to
             AND client_process = $package
@@ -88,7 +110,8 @@ export const QUESTIONS: Question[] = [
     id: "render",
     asks: "what the render thread and the GPU were doing",
     sql: `INCLUDE PERFETTO MODULE slices.with_context;
-          SELECT name, thread_name, COUNT(*) AS COUNT, SUM(dur) AS "SUM(dur)"
+          SELECT name, thread_name, COUNT(*) AS COUNT, SUM(dur) AS "SUM(dur)",
+                 MIN(ts) AS "MIN(ts)", MAX(ts) AS "MAX(ts)"
           FROM thread_slice
           WHERE ts >= $from AND ts <= $to
             AND process_name = $package
@@ -107,7 +130,8 @@ export const QUESTIONS: Question[] = [
                    s.dur - COALESCE(
                      (SELECT SUM(child.dur) FROM slice AS child WHERE child.parent_id = s.id), 0
                    )
-                 ) AS "SUM(self_dur)"
+                 ) AS "SUM(self_dur)",
+                 MIN(s.ts) AS "MIN(ts)", MAX(s.ts) AS "MAX(ts)"
           FROM thread_slice AS s
           WHERE s.ts >= $from AND s.ts <= $to AND s.process_name = $package
           GROUP BY 1 ORDER BY SUM(s.dur) DESC LIMIT 200`,
@@ -150,10 +174,54 @@ const NOT_YOUR_CODE: Array<{ match: RegExp; what: string; note: string }> = [
 ];
 
 /**
+ * boot-clock ns → device uptime ms, the direction `moment.ts`'s `fromBootMs`
+ * converts in. `interpret` is pure and knows nothing about a device session
+ * on its own — this is how a caller that does (`askTrace`, via `timeline.ts`,
+ * which holds the live event buffer `fromBootMs` reads its `clocks` samples
+ * from) hands that knowledge in. Returns null for a moment it cannot place,
+ * same as `fromBootMs` itself.
+ */
+export type ToUptimeMs = (bootNs: number) => number | null;
+
+/**
+ * The envelope of a set of rows' own `MIN(ts)`/`MAX(ts)`, converted through
+ * `toUptimeMs` — or undefined when there is nothing to place a window with:
+ * no rows, rows from a question that never selected `ts` at all (the
+ * `thread_states` case QUESTIONS' own comment explains), or a caller that
+ * gave `interpret` no way to convert boot-clock ns in the first place. Any of
+ * those is `place` below's cue to fall back to `spanning: true` — never a
+ * finding with neither.
+ */
+function rowsWindow(
+  rows: Array<Record<string, unknown>>,
+  toUptimeMs: ToUptimeMs | undefined,
+): Finding["window"] {
+  if (!toUptimeMs || rows.length === 0) return undefined;
+  const mins = rows.map((r) => r["MIN(ts)"]).filter((v) => v !== undefined && v !== null);
+  const maxs = rows.map((r) => r["MAX(ts)"]).filter((v) => v !== undefined && v !== null);
+  if (mins.length === 0 || maxs.length === 0) return undefined;
+
+  const from = toUptimeMs(Math.min(...mins.map(n)));
+  const to = toUptimeMs(Math.max(...maxs.map(n)));
+  return from === null || to === null ? undefined : { from, to };
+}
+
+/** `window` when one could be placed, `spanning: true` when it could not — the two states GRA-113 AC1 allows, and the only two a finding may ever carry. */
+function place(window: Finding["window"]): Pick<Finding, "window" | "spanning"> {
+  return window ? { window } : { spanning: true };
+}
+
+/**
  * Turns the rows into findings, in the same vocabulary the rest of the tools
  * use — including declining to claim causation from adjacency.
+ *
+ * `toUptimeMs` is optional and, when omitted, every finding below still comes
+ * out `spanning: true` rather than lacking a placement entirely: a caller
+ * that has not wired up a converter (an older test fixture, `interpret`
+ * exercised directly) gets an honest "cannot be placed", never a silently
+ * missing field.
  */
-export function interpret(rows: Rows): Finding[] {
+export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs): Finding[] {
   const findings: Finding[] = [];
 
   // --- what the frame timeline says --------------------------------------
@@ -169,6 +237,7 @@ export function interpret(rows: Rows): Finding[] {
         .join(", ")}`,
       detail: `Worst frame ${ms(worstMiss)}ms. This is Android's own classification, not an inference.`,
       evidence: { worstMs: ms(worstMiss) },
+      ...place(rowsWindow(missed, toUptimeMs)),
     });
   }
 
@@ -192,6 +261,8 @@ export function interpret(rows: Rows): Finding[] {
         ? "Something else on the device was holding the cores. The app's own work is not the whole story."
         : `And not blocked on I/O (${ioMs}ms). Whatever made it late, it was work the app itself was doing.`,
       evidence: { runnableMs, ioMs },
+      // Always spanning — see QUESTIONS' own comment on `thread_states`.
+      spanning: true,
     });
   }
 
@@ -210,6 +281,7 @@ export function interpret(rows: Rows): Finding[] {
       detail: rule.note,
       count: matched.reduce((sum, r) => sum + n(r.COUNT), 0),
       evidence: { totalMs: total },
+      ...place(rowsWindow(matched, toUptimeMs)),
     });
   }
 
@@ -236,6 +308,9 @@ export function interpret(rows: Rows): Finding[] {
           : `Busiest: ${worst.target}. Short and frequent rather than blocking.`,
         count: binder.reduce((sum, r) => sum + n(r.COUNT), 0),
         evidence: { totalMs: total, worstMs, worstTarget: String(worst.target ?? "") },
+        // The blocking case names one target's own group of calls; chatter
+        // summarises every target, so its window is the envelope of all of them.
+        ...place(rowsWindow(blocking ? [worst] : binder, toUptimeMs)),
       });
     }
   }
@@ -256,6 +331,7 @@ export function interpret(rows: Rows): Finding[] {
         "and `recompositions` will have nothing to say about any of them.",
       count: render.reduce((sum, r) => sum + n(r.COUNT), 0),
       evidence: { totalMs: total, worst: String(worst.name ?? "") },
+      ...place(rowsWindow(render, toUptimeMs)),
     });
   }
 
@@ -366,7 +442,7 @@ function byVersionDescending(a: string, b: string): number {
  * timestamped `file.cc:NN` chatter. Taking the first line reported "Loading
  * trace: 0.00 MB" as the reason a question failed, which is not a reason.
  */
-function why(stderr: string | undefined, error: Error | undefined): string {
+export function why(stderr: string | undefined, error: Error | undefined): string {
   const lines = (stderr ?? "")
     .split(/\r?\n/)
     .map((l) => l.replace(/^\[[\d.]+\]\s+\S+?\.cc:\d+\s*/, "").trim())
@@ -777,6 +853,12 @@ export interface AskTraceOptions {
   toNs: number;
   /** Overrides the 60s default. A retry after a failing question gets a fresh budget, not a shared one. */
   timeoutMs?: number;
+  /**
+   * How a point-placeable finding's boot-clock ns gets onto the caller's
+   * uptime clock (GRA-113). Omitted, every finding `interpret` produces comes
+   * back `spanning: true` instead of `window` — never neither.
+   */
+  toUptimeMs?: ToUptimeMs;
 }
 
 /** Whatever runs one script and reports back — real for production, fake in tests. */
@@ -886,5 +968,5 @@ export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const { modules, questions } = hoistModules(QUESTIONS);
   const { rows, unanswered } = await runBatch(questions, modules, { ...options, timeoutMs }, runScript);
-  return { findings: interpret(rows), unanswered };
+  return { findings: interpret(rows, options.toUptimeMs), unanswered };
 }

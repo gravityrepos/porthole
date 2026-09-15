@@ -458,6 +458,28 @@ not emit query events for the act of looking. It refuses anything that is not a
 single SELECT, WITH, or a PRAGMA with no assignment in it. That is enforced on
 the device rather than assumed from the socket being loopback.
 
+### Timeline server API
+
+`GET /api/findings` is the one place a trace-derived finding and a Porthole
+finding sit in one list, on one severity vocabulary, each carrying a `source`.
+Add `?trace=<id>` to merge in what a system trace has to say about the same
+window; the id has to be one `GET /api/traces` just listed — an arbitrary
+filesystem path is refused, before anything is spawned.
+
+`GET /api/traces` lists what is under `.porthole/traces/`: `id` (the file name,
+without `.pftrace`), `bytes`, `recordedAt`, and `coverage` — the uptime window
+the capture covers, `{ from, to }` in the same clock every finding's own
+`window` is in, or `null` with a `reason` when trace_processor could not read
+it (missing binary, no clock snapshot). It is how a caller finds out whether a
+trace has anything to say about what is on screen right now without opening
+it.
+
+Every finding either carries a `window` in that clock or is marked
+`spanning: true` for one that is a property of the whole window asked about
+rather than a moment inside it — a thread-state aggregate summed across
+however many stretches the scheduler visited that state, say. Drawing either
+as a point under one frame would invent a precision neither one has.
+
 ## Capturing a run with nobody watching
 
 The timeline is for a person looking at their own app. On CI there is nobody
@@ -1591,16 +1613,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1179 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1229 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 424 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 416
-passed, 0 failed, 8 skipped), 621 in the MCP server (`cd mcp && npm test` —
-619 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 671 in the MCP server (`cd mcp && npm test` —
+668 passed, 0 failed, 3 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1179 disagrees with the sum of the three suites' totals stated
+XML, and when 1229 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1619,14 +1641,14 @@ resolution, UNC), the machine-local `local.properties` cross-check, and the
 three-test AGP compatibility set, which needs an SDK and the network and
 skips cleanly without a version to check — none of the eight is a gap in
 what the suite proves, each is a test that only makes sense on a platform
-this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
-(gated on a cached `trace_processor` capture no CI runner has — gitignored
+this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA-113's real-coverage check
+(both gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 424 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 621 server tests with 0 skipped, because it has the
+set) and the same 671 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 621/620/1, missing only that capture. The timeline UI is the one suite
+sees 671/669/2, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
