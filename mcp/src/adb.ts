@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
@@ -352,6 +352,143 @@ export function runAdb(args: string[], serial?: string): AdbResult {
     };
   }
   return { ok: true, output };
+}
+
+/**
+ * How long `runAdbAsync` waits before presuming an adb child is wedged.
+ *
+ * 150s, not `capture_system_trace`'s own 120s maximum: a caller recording a
+ * near-maximum-length trace overrides this per-call to `seconds * 1000` plus
+ * a startup buffer (see `index.ts`), so this default only ever governs the
+ * short calls — the pull and the on-device cleanup — where anything near a
+ * minute already means adb itself, not the recording, is stuck.
+ */
+const DEFAULT_ADB_TIMEOUT_MS = Number(process.env.PORTHOLE_ADB_TIMEOUT_MS) || 150_000;
+
+/** "One per few seconds", per the ticket: not so chatty it drowns stderr, not so sparse a caller watching the log wonders if the server is still alive. */
+const DEFAULT_ADB_TICK_MS = 5_000;
+
+/** Writes one line to stderr — never stdout, which on this server is the MCP transport's own JSON-RPC channel. */
+function defaultAdbProgress(elapsedMs: number, args: string[]): void {
+  process.stderr.write(
+    `[porthole] adb ${args[0] ?? ""} still running after ${Math.round(elapsedMs / 1000)}s...\n`,
+  );
+}
+
+export interface RunAdbAsyncOptions {
+  serial?: string;
+  /**
+   * Overrides `findAdb()` — the same seam `perfetto.ts`'s `runScript` takes
+   * as a plain parameter rather than resolving `trace_processor_shell`
+   * itself, for the same reason: a test can hand this a real, controllable
+   * process (`cmd.exe`, `/bin/sh`, or a stand-in "adb" on PATH) without a
+   * real device or a real SDK on the machine running the suite.
+   */
+  binary?: string;
+  timeoutMs?: number;
+  /** Fires every `tickMs` while the child is still running. Default writes progress to stderr; a caller wanting a different message overrides it, not the ticking. */
+  onProgress?: (elapsedMs: number, args: string[]) => void;
+  tickMs?: number;
+}
+
+/**
+ * `runAdb`'s async twin: `spawn`, awaited, standing in for `spawnSync`.
+ *
+ * `capture_system_trace`'s three adb calls — the recording, the pull, and
+ * the on-device cleanup — used to run through `runAdb` above, which blocks
+ * Node's single thread for as long as the child takes. At the tool's own
+ * 120s maximum that froze the whole MCP server for over two minutes: nothing
+ * read the device socket, nothing answered another tool call, and the
+ * timeline WebSocket went silent. This is the way back, and it is
+ * deliberately the same shape GRA-82 already proved out for
+ * `trace_processor_shell` in `perfetto.ts`'s `runScript` — `spawn` instead
+ * of `spawnSync`, a `setTimeout` that kills the child and reports how long
+ * it waited, one shared helper rather than a second way to run a child
+ * process asynchronously.
+ *
+ * Progress is reported on stderr, not returned, because nothing here knows
+ * whether anyone is listening for it — it exists so a long recording does
+ * not look identically alive and wedged from the outside.
+ */
+export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): Promise<AdbResult> {
+  const {
+    serial,
+    binary = findAdb(),
+    timeoutMs = DEFAULT_ADB_TIMEOUT_MS,
+    onProgress = defaultAdbProgress,
+    tickMs = DEFAULT_ADB_TICK_MS,
+  } = options;
+  const prefix = serial ? ["-s", serial] : [];
+  const fullArgs = [...prefix, ...args];
+
+  return new Promise((resolvePromise) => {
+    const start = Date.now();
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const child = spawn(binary, fullArgs);
+
+    const ticker = setInterval(() => {
+      if (!settled) onProgress(Date.now() - start, fullArgs);
+    }, tickMs);
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+
+    const finish = (result: AdbResult) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(ticker);
+      clearTimeout(timer);
+      resolvePromise(result);
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    // The binary itself did not run (ENOENT, EACCES, ...) — same wording as
+    // the sync version above, so a caller cannot tell which path answered.
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        output: `Could not run adb (${error.message}). Set ANDROID_HOME, or put adb on your PATH.`,
+      });
+    });
+
+    child.on("close", (code) => {
+      if (timedOut) {
+        finish({
+          ok: false,
+          output:
+            `adb did not finish within ${timeoutMs}ms running '${fullArgs.join(" ")}'; ` +
+            "it may be wedged, so it was killed rather than left to hang.",
+        });
+        return;
+      }
+      const output = (stdout + stderr).trim();
+      if (code !== 0) {
+        finish({
+          ok: false,
+          output:
+            output.includes("more than one") && !serial
+              ? `${output}\nStart the UI with --serial <id>; 'adb devices' lists them.`
+              : output || `adb exited ${code}`,
+        });
+        return;
+      }
+      finish({ ok: true, output });
+    });
+  });
 }
 
 /**

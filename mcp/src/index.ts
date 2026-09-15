@@ -7,7 +7,7 @@ import { z } from "zod";
 import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { resolveProjectRoot, resolveSdkDir, runAdb } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir, runAdb, runAdbAsync } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf, toBoot } from "./moment.js";
 import {
   CPU_PROBE,
@@ -43,6 +43,15 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HOST = process.env.PORTHOLE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
 const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
+
+/**
+ * GRA-89: how much longer than the plan's own recording duration
+ * `capture_system_trace` gives the on-device `perfetto` invocation before
+ * presuming it wedged — adb's own connect/attach overhead plus whatever
+ * margin covers a slow device, on top of the `-t Ns` the command itself
+ * asked to run for.
+ */
+const CAPTURE_ADB_TIMEOUT_BUFFER_MS = 30_000;
 
 export interface PortholeServerOptions {
   /** Injected in tests; a real one is created in `createPortholeServer` otherwise. */
@@ -1507,7 +1516,24 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const apps = packages?.length ? packages : device.hello ? [device.hello.packageName] : [];
       const plan = planCapture({ seconds, categories, apps });
 
-      const recorded = runAdb(captureArgs(plan), serial);
+      // GRA-89: async, awaited spawn for all three adb calls below, not
+      // `runAdb`'s `spawnSync` — that used to freeze the whole MCP server
+      // for the entire recording (up to two minutes at this tool's own
+      // 120s maximum): nothing read the device socket, nothing answered
+      // another tool call, and the timeline WebSocket went silent for as
+      // long as each call took. The recording gets its own, longer timeout
+      // (the plan's own duration plus room for adb's own startup and
+      // teardown) rather than `runAdbAsync`'s short default, which exists
+      // for calls — the pull, the cleanup — that are supposed to be quick.
+      const recorded = await runAdbAsync(captureArgs(plan), {
+        serial,
+        timeoutMs: plan.seconds * 1000 + CAPTURE_ADB_TIMEOUT_BUFFER_MS,
+        onProgress: (elapsedMs) =>
+          process.stderr.write(
+            `[porthole] capture_system_trace: recording, ${Math.round(elapsedMs / 1000)}s of ` +
+              `${plan.seconds}s elapsed...\n`,
+          ),
+      });
       if (!recorded.ok) {
         return fail(
           `Could not record: ${recorded.output}\n` +
@@ -1521,9 +1547,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       mkdirSync(dir, { recursive: true });
       const local = join(dir, plan.devicePath.split("/").pop() as string);
 
-      const pulled = runAdb(["pull", plan.devicePath, local], serial);
+      const pulled = await runAdbAsync(["pull", plan.devicePath, local], { serial });
       // Tidy up regardless: the device's trace directory is not ours to fill.
-      runAdb(["shell", "rm", "-f", plan.devicePath], serial);
+      await runAdbAsync(["shell", "rm", "-f", plan.devicePath], { serial });
 
       if (!pulled.ok) return fail(`Recorded, but could not pull it: ${pulled.output}`);
 
@@ -1533,7 +1559,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         bytes,
         seconds: plan.seconds,
         categories: plan.categories,
-        portholeLabels: countPortholeLabels(readFileSync(local)),
+        // GRA-89: streamed in chunks by countPortholeLabels itself now, not
+        // a whole-file readFileSync handed to it — see systrace.ts.
+        portholeLabels: await countPortholeLabels(local),
         notes: plan.notes,
       };
       return ok(describeCapture(result), result);

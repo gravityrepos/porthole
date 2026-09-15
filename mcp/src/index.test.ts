@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -2059,4 +2059,157 @@ describe("porthole_status: why the app died (GRA-58)", () => {
       collectors: ["recompositions"],
     };
   }
+});
+
+/**
+ * The dispatcher a fake "adb" child process runs, before Node ever attempts
+ * to load its own first CLI argument as a module.
+ *
+ * `setupFakeAdb` below points `findAdb()` at a hard link to the *real*
+ * `node` binary, named `adb`/`adb.exe`, and sets `NODE_OPTIONS=--require=…`
+ * to this file. `--require` preloads run before Node tries to resolve its
+ * own argv[1] as an entry module, and — critically — Node has already
+ * rewritten argv[1] into an absolute path by that point (`path.resolve`
+ * against argv[1] as given, before any file even needs to exist), so this
+ * reads the SUBCOMMAND back off that path's *basename* rather than
+ * comparing it for exact equality against "pull"/"shell". Everything this
+ * does is synchronous, ending in `process.exit()`, specifically so Node
+ * never reaches the point of actually trying to load that resolved path as
+ * a module — which would fail, loudly, since "pull" and "shell" are not
+ * real files.
+ *
+ * `sleepSync` blocks *this child process* for real — proven against a real
+ * OS process is the whole point, matching perfetto.test.ts's own reason for
+ * driving `runScript` against `cmd.exe`/`/bin/sh` rather than a hand-rolled
+ * fake — but it never touches the MCP server's own event loop, which is the
+ * property GRA-89's test actually needs: the parent process spawned this
+ * child with `runAdbAsync` and is free to do other work for as long as this
+ * sleeps.
+ */
+const FAKE_ADB_PRELOAD_SOURCE = `
+const fs = require("fs");
+const path = require("path");
+
+function sleepSync(ms) {
+  const sab = new SharedArrayBuffer(4);
+  const view = new Int32Array(sab);
+  Atomics.wait(view, 0, 0, ms);
+}
+
+const raw = process.argv.slice(1);
+const resolved = raw.length > 0 ? [path.basename(raw[0]), ...raw.slice(1)] : raw;
+let a = resolved;
+if (a[0] === "-s") a = a.slice(2);
+
+if (a[0] === "pull") {
+  fs.writeFileSync(a[2], "porthole: fake-adb-pulled-trace\\n");
+  process.stdout.write(a[1] + ": 1 file pulled.\\n");
+  process.exit(0);
+}
+if (a[0] === "shell" && a[1] === "rm") {
+  process.exit(0);
+}
+if (a[0] === "shell" && a[1] === "perfetto") {
+  const tIndex = a.indexOf("-t");
+  const durationToken = tIndex >= 0 ? a[tIndex + 1] : "1s";
+  const seconds = parseInt(durationToken, 10) || 1;
+  sleepSync(seconds * 1000);
+  process.exit(0);
+}
+process.stderr.write("fake-adb: unhandled args " + JSON.stringify(a) + "\\n");
+process.exit(17);
+`;
+
+interface FakeAdb {
+  sdkDir: string;
+  preloadPath: string;
+  cleanup(): void;
+}
+
+/** A controllable stand-in for adb, wired up so `findAdb()` finds it the normal way. */
+function setupFakeAdb(): FakeAdb {
+  const root = mkdtempSync(path.join(tmpdir(), "porthole-fakeadb-"));
+  const platformTools = path.join(root, "platform-tools");
+  mkdirSync(platformTools, { recursive: true });
+  const binaryName = process.platform === "win32" ? "adb.exe" : "adb";
+  const binaryPath = path.join(platformTools, binaryName);
+  try {
+    // A hard link, not a copy: same bytes, no ~90MB copy per test run. Falls
+    // back to copying only if the temp directory is not on the same volume
+    // as the running node binary, which a hard link cannot span.
+    linkSync(process.execPath, binaryPath);
+  } catch {
+    copyFileSync(process.execPath, binaryPath);
+  }
+
+  const preloadPath = path.join(root, "fake-adb-preload.cjs");
+  writeFileSync(preloadPath, FAKE_ADB_PRELOAD_SOURCE);
+
+  return {
+    sdkDir: root,
+    preloadPath,
+    cleanup() {
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("GRA-89: capture_system_trace does not block the server while it runs", () => {
+  it("keeps answering porthole_status and buffering pushed events during a multi-second capture, against a fake adb", async () => {
+    const fakeAdb = setupFakeAdb();
+    const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
+    const savedSdkDir = process.env.PORTHOLE_SDK_DIR;
+    const savedNodeOptions = process.env.NODE_OPTIONS;
+    // PORTHOLE_SDK_DIR wins over local.properties and ANDROID_HOME
+    // unconditionally in resolveSdkDir() (see adb.ts), so this is enough to
+    // make findAdb() return the fake binary regardless of what is really
+    // installed on the machine running the suite. NODE_OPTIONS only affects
+    // processes spawned *after* this point — never the already-running test
+    // process itself — so it is safe to set here and clear in `finally`.
+    process.env.PORTHOLE_SDK_DIR = fakeAdb.sdkDir;
+    process.env.NODE_OPTIONS = `--require=${fakeAdb.preloadPath}`;
+
+    const rig = await buildRig();
+    try {
+      const seconds = 3;
+      const started = Date.now();
+      const capturePromise = rig.client.callTool("capture_system_trace", { seconds, outputDir });
+
+      // The fake device is "recording" for `seconds` real seconds in a
+      // separate OS process (see FAKE_ADB_PRELOAD_SOURCE's sleepSync) while
+      // `capturePromise` is still pending. Both calls below must complete
+      // in a small fraction of that time — the only way that is possible is
+      // if `capture_system_trace`'s adb calls are not blocking this
+      // process's one event loop, which is GRA-89's whole point. A
+      // regression back to `runAdb`'s `spawnSync` would freeze this whole
+      // process for the recording's duration, and these calls would not
+      // return until after it did.
+      const status = await rig.client.callTool("porthole_status", {});
+      const statusElapsedMs = Date.now() - started;
+      expect(status.isError).toBeFalsy();
+      expect(statusElapsedMs).toBeLessThan(1_500);
+
+      await rig.pushEvents([{ event: "recompose", t: 5_000, data: { name: "Cart" } }]);
+      const eventsElapsedMs = Date.now() - started;
+      const bufferedDuringCapture = rig.timeline.buffer().length;
+      expect(eventsElapsedMs).toBeLessThan(1_500);
+      expect(bufferedDuringCapture).toBeGreaterThan(0);
+
+      const capture = await capturePromise;
+      const totalElapsedMs = Date.now() - started;
+      expect(capture.isError).toBeFalsy();
+      expect(capture.json).toMatchObject({ seconds });
+      // Confirms the fake adb's sleep really ran for the requested duration
+      // rather than the capture short-circuiting some other way.
+      expect(totalElapsedMs).toBeGreaterThanOrEqual(seconds * 1000 - 250);
+    } finally {
+      if (savedSdkDir === undefined) delete process.env.PORTHOLE_SDK_DIR;
+      else process.env.PORTHOLE_SDK_DIR = savedSdkDir;
+      if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = savedNodeOptions;
+      await rig.close();
+      fakeAdb.cleanup();
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
