@@ -158,6 +158,26 @@ jobs:
           path: '**/build/test-results/'
           if-no-files-found: warn
 
+      # GRA-164: unit tests for the parsing this check relies on (thousands-
+      # separator rejection especially — see the checker's own file for
+      # why). Needs no JUnit XML, no build output, nothing this job
+      # produces — it is pure text-parsing tests against literal strings —
+      # so it runs unconditionally rather than `if: always()`.
+      - name: Test the README JVM check's own parsing
+        run: python3 tools/test_check_readme_test_counts.py
+
+      # GRA-164: the summary step above prints a number a human has to read
+      # and copy into README.md by hand, which is exactly how README.md's
+      # JVM figure went stale three times in one day. This reads the same
+      # XML and fails the build instead, naming README's figure next to the
+      # suite's the moment they disagree. This job only ever runs on
+      # ubuntu-latest, so the full split always applies here; the script
+      # also compiles a Windows/macOS branch for when an implementer runs it
+      # by hand off this job, same reasoning as the `node` job's check below.
+      - name: Check README JVM test count
+        if: always()
+        run: python3 tools/check-readme-test-counts.py
+
       # The heavier HTML reports stay failure-only, unchanged from before
       # this ticket: they are for a human digging into a red build, not for
       # the every-PR signal AC1 asks for, and uploading them unconditionally
@@ -214,6 +234,16 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      # GRA-164: unit tests for the parsing check-readme-vitest-counts.mjs
+      # relies on (thousands-separator rejection especially). node:test, not
+      # vitest, and deliberately not wired through `npm test` — see the test
+      # file's own header for why it must stay off vitest's include globs.
+      # Needs no JUnit XML — pure text-parsing tests against literal
+      # strings — so it can run right after the dependencies it imports
+      # (node:fs, node:url, node:path, node:os — all built in) exist.
+      - name: Test the README server/UI check's own parsing
+        run: node --test scripts/check-readme-vitest-counts.test.mjs
 
       # `npm test` at the mcp root runs only the server-side vitest suite —
       # it does not reach mcp/ui's tests at all, silently, because its script
@@ -315,6 +345,24 @@ jobs:
           name: vitest-test-results-${{ matrix.os }}
           path: mcp/test-results/
           if-no-files-found: warn
+
+      # GRA-164: same defect as the Gradle job's summary step above — a
+      # number a human has to copy into README.md by hand goes stale, and
+      # README's server/UI figures had. This reads the JUnit XML this job
+      # just wrote and fails instead of printing. It runs on all three legs
+      # of this matrix, but README's passed/failed/skipped split names
+      # ubuntu-latest specifically (the skip set is not the same on every
+      # platform), so the script only compares the total on windows-latest
+      # and macos-latest and says so rather than failing for a reason that
+      # has nothing to do with drift. Run from mcp/ (this job's working
+      # directory) — the script resolves README.md and the XML relative to
+      # its own path, not the cwd.
+      - name: Check README server test count
+        if: always()
+        run: node scripts/check-readme-vitest-counts.mjs server
+      - name: Check README timeline-UI test count
+        if: always()
+        run: node scripts/check-readme-vitest-counts.mjs ui
 
       - run: npm run lint
 

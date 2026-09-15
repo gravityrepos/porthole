@@ -60,5 +60,8 @@ desktop.ini
 # vercel cli, which writes the project and org id here on first deploy
 .vercel/
 
+# python bytecode cache, from running tools/test_check_readme_test_counts.py
+__pycache__/
+
 # site/api is deliberately NOT ignored. It is Dokka output, committed on
 # purpose, because the host that serves it cannot build it. See the README.
