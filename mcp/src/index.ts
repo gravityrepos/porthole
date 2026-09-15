@@ -157,6 +157,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   // directory is current every time a tool runs — cheap, since `open()` is a
   // no-op once the directory has not changed.
   const watermark = new Watermark();
+  /** Set by `resolveWindowSince` on a first-ever `since: "last"` call, consumed by `ok()` (AC5). */
+  let pendingFirstEverNote: string | null = null;
+  const FIRST_EVER_NOTE =
+    'First call this session: "since": "last" has nothing to start from yet, so this is the ' +
+    "whole buffer, the same default as before since existed. ";
 
   const server = new McpServer({
     name: "porthole",
@@ -497,6 +502,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // not exist. `firstEver: true` is what lets the caller say so.
       const span = resolveWindow({});
       if (span) await watermark.recordExamined(span.to);
+      // AC5's "says so": noted here, once, and consumed by `ok()` for
+      // whichever tool made this call — not narrated per tool, so the six
+      // other window-taking tools cannot each forget it.
+      if (span) pendingFirstEverNote = FIRST_EVER_NOTE;
       return span ? { ...span, sinceLast: true, firstEver: true } : null;
     }
 
@@ -612,7 +621,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   ): Promise<{ summary: string; payload: unknown }> {
     await watermark.open(currentWatermarkDir());
     const { banner, sinceLast } = await errorBanner();
-    const withBanner = banner ? `${banner}\n${summary}` : summary;
+    const firstEver = pendingFirstEverNote;
+    pendingFirstEverNote = null;
+    const narrated = firstEver ? `${firstEver}${summary}` : summary;
+    const withBanner = banner ? `${banner}\n${narrated}` : narrated;
     const withSinceLast =
       payload !== null && typeof payload === "object" && !Array.isArray(payload)
         ? { ...(payload as Record<string, unknown>), sinceLast }
@@ -890,13 +902,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         : classified.skippedNote
           ? ` (${classified.skippedNote})`
           : "";
-      // AC5: "since: 'last' on a first-ever call behaves as the current
-      // default and says so" — this is the "says so".
-      const firstEverNote = span.firstEver
-        ? 'First call this session: "since": "last" has nothing to start from yet, so this is the ' +
-          "whole buffer, the same default as before since existed. "
-        : "";
-
       const payload = {
         window: { from: span.from, to: span.to, ms: span.ms },
         // The merged (disk + memory) recorded extent, clipped to the window
@@ -926,7 +931,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       if (findings.length === 0) {
         return ok(
           notice +
-            firstEverNote +
             (shortfall > span.ms * 0.5
               ? `Almost none of that window is in the buffer${missing} This is not a quiet app; ` +
                 "it is a question the buffer cannot answer."
@@ -948,7 +952,6 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       return ok(
         notice +
-          firstEverNote +
           `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
           `Worst: ${worst.title} [${worst.confidence}].${missing}${classificationNote}`,
         payload,

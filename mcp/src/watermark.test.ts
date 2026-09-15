@@ -287,6 +287,19 @@ describe("buildBanner", () => {
     expect(banner).toMatch(/…and \d+ more kinds?/);
   });
 
+  it("the cap is the coordinator's literal number, two lines and 240 characters — not whatever the constant says today", () => {
+    // QA round 1 raised the constant to 1000 and nothing went red: the test
+    // above measures against the constant, so it moves with it. This one
+    // pins the number the ruling named.
+    expect(BANNER_MAX_CHARS).toBe(240);
+    const many = Array.from({ length: 40 }, (_, i) =>
+      finding({ id: `k${i}`, title: `finding number ${i} with a moderately long descriptive title` }),
+    );
+    const banner = buildBanner(many) as string;
+    expect(banner.length).toBeLessThanOrEqual(240);
+    expect(banner.split("\n").length).toBeLessThanOrEqual(2);
+  });
+
   it("the mutation-obvious case: a single very ordinary finding stays comfortably under the cap unmodified", () => {
     // A constant "true" cap check would still pass every test above; this
     // pins the untruncated shape too, so a mutant that always truncates (or
@@ -431,6 +444,23 @@ describe("GRA-55 acceptance criteria", () => {
     } finally {
       await rigA.close();
       await rigB.close();
+    }
+  });
+
+  it("AC5, on a tool other than findings: the first-ever call says so too, and only once", async () => {
+    // QA round 1: the narration lived in `findings` alone, so the other six
+    // window-taking tools defaulted silently. It is now attached in `ok()`.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([blocked(1_000)]);
+      const first = await rig.client.callTool("timeline", {});
+      expect(first.isError).toBeFalsy();
+      expect(first.text).toMatch(/first call this session/i);
+      const second = await rig.client.callTool("timeline", {});
+      expect(second.isError).toBeFalsy();
+      expect(second.text).not.toMatch(/first call this session/i);
+    } finally {
+      await rig.close();
     }
   });
 });
