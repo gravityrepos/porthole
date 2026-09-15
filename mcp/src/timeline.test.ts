@@ -13,6 +13,7 @@ import { WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent, Hello } from "./device.js";
 import { askTrace, findTraceProcessor, QUESTIONS, runScript } from "./perfetto.js";
 import { TimelineServer } from "./timeline.js";
+import { readTrace } from "./args.js";
 
 // Where GRA-113's `tracesDir()` (timeline.ts, via `resolveProjectRoot()`)
 // looks for this file's whole run — a throwaway temp directory, never the
@@ -121,10 +122,10 @@ interface Harness {
   origin: string;
   device: FakeDevice;
   server: TimelineServer;
-  /** A request with exact control over the request line and every header. */
+  /** A request with exact control over the request line, every header, and (GRA-116) an optional raw body. */
   send(
     path: string,
-    options?: { method?: string; headers?: Record<string, string> },
+    options?: { method?: string; headers?: Record<string, string>; body?: string },
   ): Promise<Answer>;
   stop(): void;
 }
@@ -172,6 +173,7 @@ async function start(): Promise<Harness> {
           },
         );
         request.on("error", reject);
+        if (options.body !== undefined) request.write(options.body);
         request.end();
       });
     },
@@ -1068,5 +1070,185 @@ describe("GRA-113 AC3: one boot→uptime conversion, in moment.ts only", () => {
       if (ARITHMETIC.test(text)) offenders.push(file);
     }
     expect(offenders, `sleepMs arithmetic found outside moment.ts in: ${offenders.join(", ")}`).toEqual([]);
+  });
+});
+
+/**
+ * GRA-116: "keep the last N seconds, from where you are already looking" --
+ * the UI's own save gesture, server-side. Ruling 2's own words: the handler
+ * builds events through the same `fillWindowFromDisk` merge and
+ * `buildSavedTrace`/`writeSavedTrace` pair `save_moment` already calls (no
+ * second implementation of either), and is hardened exactly like
+ * `/api/tools/restart` -- POST only, the origin/host gate that already runs
+ * ahead of every route (see "who the server answers" above), a malformed
+ * body is a 400, and `from >= to` is a 400.
+ */
+describe("POST /api/save (GRA-116)", () => {
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
+  const written: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(written.splice(0).map((file) => rm(file, { force: true })));
+  });
+
+  it("refuses every method but POST, same shape as /api/tools/restart", async () => {
+    for (const method of ["GET", "PUT", "DELETE"]) {
+      const response = await timeline.send("/api/save", { method });
+      expect(response.status, method).toBe(405);
+      expect(response.headers.allow, method).toBe("POST");
+    }
+  });
+
+  it("refuses a cross-origin POST the same way every other route does (GRA-78)", async () => {
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      headers: { origin: "https://evil.example.com" },
+      body: JSON.stringify({ from: 0, to: 1000 }),
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("400s a missing body -- no from/to to act on", async () => {
+    const response = await timeline.send("/api/save", { method: "POST" });
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body).error).toContain("from");
+  });
+
+  it("400s an explicitly empty body the same way -- not a JSON.parse crash, an honest 'from and to are required'", async () => {
+    const response = await timeline.send("/api/save", { method: "POST", body: "" });
+    expect(response.status).toBe(400);
+  });
+
+  it("400s malformed JSON, in one line", async () => {
+    const response = await timeline.send("/api/save", { method: "POST", body: "{not json" });
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body).error).toBe("Malformed JSON body.");
+  });
+
+  it("400s a scenario that would escape .porthole/traces, and writes nothing (QA round 1)", async () => {
+    // Every escape below stays inside the throwaway project root's parent
+    // chain only as far as `.porthole/` and the root itself, so "nothing
+    // written" is checked as "these two listings did not change" rather than
+    // as the absence of a fixed path outside anything this test owns — a
+    // mutation run once left such a file behind on the developer's machine,
+    // and a stale artifact must not be able to fail a later run.
+    const dotPorthole = resolve(tracesDir, "..");
+    const before = [
+      existsSync(tracesDir) ? readdirSync(tracesDir).sort() : null,
+      readdirSync(dotPorthole).sort(),
+      readdirSync(PROJECT_ROOT).sort(),
+    ];
+    for (const scenario of ["../evil", "..\\evil", "a/b", "a\\b", "..", "."]) {
+      const response = await timeline.send("/api/save", {
+        method: "POST",
+        body: JSON.stringify({ from: 0, to: 1_000, scenario }),
+      });
+      expect(response.status, scenario).toBe(400);
+      expect(JSON.parse(response.body).error, scenario).toMatch(/scenario/);
+    }
+    const after = [
+      existsSync(tracesDir) ? readdirSync(tracesDir).sort() : null,
+      readdirSync(dotPorthole).sort(),
+      readdirSync(PROJECT_ROOT).sort(),
+    ];
+    expect(after).toEqual(before);
+  });
+
+  it("400s a well-formed JSON body that is not an object (an array, a bare number)", async () => {
+    const arrayBody = await timeline.send("/api/save", { method: "POST", body: "[1,2,3]" });
+    expect(arrayBody.status).toBe(400);
+    const numberBody = await timeline.send("/api/save", { method: "POST", body: "42" });
+    expect(numberBody.status).toBe(400);
+  });
+
+  it("400s when from is missing", async () => {
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ to: 1000 }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("400s when to is missing", async () => {
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 0 }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("400s from >= to, both the equal and the reversed case", async () => {
+    const equal = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 1000, to: 1000 }),
+    });
+    expect(equal.status).toBe(400);
+    const reversed = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 1000, to: 500 }),
+    });
+    expect(reversed.status).toBe(400);
+  });
+
+  it("still writes a trace for a window with no events at all -- an empty window is not an error", async () => {
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 0, to: 1000, scenario: "gra116-empty-fixture" }),
+    });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { out: string; scenario: string; findings: number };
+    written.push(body.out);
+    expect(body.scenario).toBe("gra116-empty-fixture");
+    expect(body.findings).toBe(0);
+    // GRA-54's own reader -- no second, hand-rolled JSON.parse of this file.
+    await expect(readTrace(body.out)).resolves.toMatchObject({ scenario: "gra116-empty-fixture" });
+  });
+
+  it("writes a file under the project root that GRA-54's own reader (readTrace) parses back", async () => {
+    timeline.device.saidHello("com.example.shop");
+    timeline.device.emit("event", event(1, "recompose", { screen: "cart" }));
+    timeline.device.emit("event", event(2, "recompose", { screen: "cart" }));
+
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 0, to: 10, scenario: "gra116-write-fixture" }),
+    });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { out: string; scenario: string; clippedMs: unknown; findings: number };
+    written.push(body.out);
+    expect(body.out).toBe(resolve(tracesDir, "gra116-write-fixture.json"));
+    expect(existsSync(body.out)).toBe(true);
+
+    const trace = await readTrace(body.out);
+    expect(trace.scenario).toBe("gra116-write-fixture");
+  });
+
+  it("defaults scenario/out exactly the way save_moment does when scenario is omitted", async () => {
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 100, to: 200 }),
+    });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { out: string; scenario: string };
+    written.push(body.out);
+    expect(body.scenario).toBe("moment-100-200");
+    expect(body.out).toBe(resolve(tracesDir, "moment-100-200.json"));
+  });
+
+  it("reports an honest clippedMs for a window reaching earlier than anything actually recorded", async () => {
+    timeline.device.saidHello("com.example.shop");
+    // The earliest thing this server has seen is t=1000 -- asking from 0
+    // must say so rather than silently writing a shorter trace.
+    timeline.device.emit("event", event(1000, "recompose", { screen: "cart" }));
+    timeline.device.emit("event", event(1500, "recompose", { screen: "cart" }));
+
+    const response = await timeline.send("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ from: 0, to: 1500, scenario: "gra116-clip-fixture" }),
+    });
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body) as { out: string; clippedMs: { start: number; end: number } };
+    written.push(body.out);
+    expect(body.clippedMs).toEqual({ start: 1000, end: 0 });
   });
 });

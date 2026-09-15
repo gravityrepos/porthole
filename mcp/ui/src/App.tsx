@@ -14,6 +14,7 @@ import { summariseWindow } from "./lib/analysis";
 import { FindingsLoader } from "./lib/findingsLoader";
 import { usePersistent } from "./lib/persist";
 import type { Hit } from "./lib/laneData";
+import { DEFAULT_LOOKBACK_SECONDS, saveRequestBody, saveWindow } from "./lib/save";
 import { useSetup } from "./lib/setup";
 import { centreOn, fitView } from "./timeline/geometry";
 import type { ConnectionState, FindingsPayload, Hello, TraceListing, ViewWindow } from "./types";
@@ -196,8 +197,19 @@ export function App() {
   const [showFramework, setShowFramework] = usePersistent("framework", false);
   const [hit, setHit] = useState<Hit | null>(null);
   const [askLabel, setAskLabel] = useState("ask agent");
-  const [copyLabel, setCopyLabel] = useState("copy trace");
   const [restartLabel, setRestartLabel] = useState("restart app");
+
+  // GRA-116: "keep the last N seconds, from where you are already looking".
+  // Persisted the same way `following`/`showFramework` are -- a developer who
+  // just set their preferred lookback should not have it forgotten on the
+  // next reload.
+  const [lookbackSeconds, setLookbackSeconds] = usePersistent(
+    "lookbackSeconds",
+    DEFAULT_LOOKBACK_SECONDS,
+  );
+  const [saveLabel, setSaveLabel] = useState("keep");
+  const [savePath, setSavePath] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // GRA-114: hoisted out of InsightsPanel. One FindingsLoader, constructed
   // once, so the findings lane and the panel read the same fetch instead of
@@ -317,19 +329,43 @@ export function App() {
     [copy, store, view],
   );
 
-  const copyTrace = useCallback(
-    () =>
-      void copy(
-        JSON.stringify(
-          store.events.filter((event) => event.t >= summary.from && event.t <= summary.to),
-          null,
-          2,
-        ),
-        setCopyLabel,
-        "copy trace",
-      ),
-    [copy, store, summary],
-  );
+  // GRA-116: replaces the old **copy trace** control (an unbounded JSON blob
+  // on the clipboard) with the real thing -- a named trace file on disk,
+  // through the same save path `save_moment` already uses server-side.
+  const save = useCallback(async () => {
+    const newestEventT = store.events.length > 0 ? store.events[store.events.length - 1].t : null;
+    const window = saveWindow({ following, view, lookbackSeconds, newestEventT });
+    if (!window) {
+      setSaveError("Nothing buffered yet to save.");
+      setSavePath(null);
+      return;
+    }
+    setSaveLabel("saving");
+    setSaveError(null);
+    try {
+      const response = await fetch("/api/save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(saveRequestBody(window)),
+      });
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        const message = (body as { error?: unknown }).error;
+        setSaveError(typeof message === "string" ? message : "The save failed.");
+        setSavePath(null);
+        setSaveLabel("save failed");
+      } else {
+        setSavePath((body as { out: string }).out);
+        setSaveError(null);
+        setSaveLabel("kept");
+      }
+    } catch (error) {
+      setSaveError((error as Error).message);
+      setSavePath(null);
+      setSaveLabel("save failed");
+    }
+    setTimeout(() => setSaveLabel("keep"), 1800);
+  }, [store, following, view, lookbackSeconds]);
 
   // Restarting throws away whatever the app was doing, so it asks first. The
   // confirm lives here rather than in the header, which should not have to know
@@ -375,6 +411,12 @@ export function App() {
           }}
           onAsk={ask}
           askLabel={askLabel}
+          lookbackSeconds={lookbackSeconds}
+          onLookbackSecondsChange={setLookbackSeconds}
+          onSave={() => void save()}
+          saveLabel={saveLabel}
+          savePath={savePath}
+          saveError={saveError}
         />
         {/* GRA-96 AC3: right below the connection state, not buried in a
             panel — a mismatched build should be the first thing read, since
@@ -431,12 +473,7 @@ export function App() {
             selectedTraceId={selectedTraceId}
             contextWindow={findingsPayload?.window ?? null}
           />
-          <WindowPanel
-            summary={summary}
-            onAsk={ask}
-            onCopyTrace={copyTrace}
-            copyLabel={copyLabel}
-          />
+          <WindowPanel summary={summary} onAsk={ask} />
         </aside>
       </div>
     </div>

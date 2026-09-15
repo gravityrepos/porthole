@@ -3,8 +3,9 @@
 // @vitest-environment happy-dom -- see App.render.test.tsx's top comment for
 // why happy-dom over jsdom, and why it is opted into per-file rather than as
 // the package default.
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Header } from "./Header";
 import type { ConnectionState } from "../types";
 
@@ -24,7 +25,11 @@ import type { ConnectionState } from "../types";
  * present and the thing at stake is its colour and wording. So this one
  * renders Header for real rather than inspecting a returned element.
  */
-function renderHeader(connection: ConnectionState, eventsPerSecond = 0) {
+function renderHeader(
+  connection: ConnectionState,
+  eventsPerSecond = 0,
+  overrides: Partial<ComponentProps<typeof Header>> = {},
+) {
   render(
     <Header
       connection={connection}
@@ -41,6 +46,13 @@ function renderHeader(connection: ConnectionState, eventsPerSecond = 0) {
       onRestart={vi.fn()}
       restartLabel="restart app"
       askLabel="ask agent"
+      lookbackSeconds={30}
+      onLookbackSecondsChange={vi.fn()}
+      onSave={vi.fn()}
+      saveLabel="keep"
+      savePath={null}
+      saveError={null}
+      {...overrides}
     />,
   );
 }
@@ -84,5 +96,80 @@ describe("Header's connection pill (GRA-167 AC3, closing GRA-161)", () => {
     renderHeader("disconnected");
     const label = screen.getByText(/^disconnected$/i);
     expect(label.style.color).toBe("var(--danger)");
+  });
+});
+
+/**
+ * GRA-116: the "keep" control, the result-path display and the error state.
+ *
+ * The window/lookback maths itself is `lib/save.ts`'s job (see save.test.ts)
+ * -- this only proves Header's own JSX: the control is present and wired to
+ * `onSave`/`onLookbackSecondsChange`, the N-input's relevance to `following`,
+ * and that a `savePath`/`saveError` prop actually renders what ruling 1
+ * promises (a selectable path, the fixed GRA-57 note, one error line) rather
+ * than silently not being read.
+ */
+describe("Header's keep control (GRA-116)", () => {
+  afterEach(cleanup);
+
+  it("shows a keep control that calls onSave when clicked", () => {
+    const onSave = vi.fn();
+    renderHeader("connected", 0, { onSave });
+    fireEvent.click(screen.getByText("keep"));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the lookback input while following, defaulting to the given value, and reports whole-second changes", () => {
+    const onLookbackSecondsChange = vi.fn();
+    renderHeader("connected", 0, { following: true, lookbackSeconds: 30, onLookbackSecondsChange });
+    const input = screen.getByLabelText("seconds to keep") as HTMLInputElement;
+    expect(input.value).toBe("30");
+    fireEvent.change(input, { target: { value: "45" } });
+    expect(onLookbackSecondsChange).toHaveBeenCalledWith(45);
+  });
+
+  it("hides the lookback input when not following -- the ruler already decides the window, nothing to configure", () => {
+    renderHeader("connected", 0, { following: false });
+    expect(screen.queryByLabelText("seconds to keep")).toBeNull();
+  });
+
+  it("ignores a non-numeric or non-positive lookback edit rather than forwarding garbage to onLookbackSecondsChange", () => {
+    const onLookbackSecondsChange = vi.fn();
+    renderHeader("connected", 0, { following: true, onLookbackSecondsChange });
+    const input = screen.getByLabelText("seconds to keep");
+    fireEvent.change(input, { target: { value: "abc" } });
+    fireEvent.change(input, { target: { value: "-5" } });
+    fireEvent.change(input, { target: { value: "0" } });
+    expect(onLookbackSecondsChange).not.toHaveBeenCalled();
+  });
+
+  it("renders no result row and no alert before any save has happened", () => {
+    renderHeader("connected");
+    // The whole row, not just the elements inside it -- an empty wrapper
+    // rendering unconditionally would pass the two checks below without
+    // actually gating anything, which is exactly what this line is here to
+    // catch (measured: mutating the row's own condition to `true` left both
+    // inner checks green).
+    expect(screen.queryByTestId("save-result")).toBeNull();
+    expect(screen.queryByLabelText("saved trace path")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the written path, selectable, plus the GRA-57 note, when savePath is set", () => {
+    renderHeader("connected", 0, { savePath: "/project/.porthole/traces/moment-1-2.json" });
+    const pathField = screen.getByLabelText("saved trace path") as HTMLInputElement;
+    expect(pathField.value).toBe("/project/.porthole/traces/moment-1-2.json");
+    expect(pathField.readOnly).toBe(true);
+    // Ruling 1's exact sentence -- GRA-57 is not in 0.2.0, so every save
+    // through this control is the Porthole half only.
+    expect(screen.getByText("Porthole half only; no system trace was attached.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows exactly the given error, as an alert, and no path row, when saveError is set", () => {
+    renderHeader("connected", 0, { saveError: "Nothing buffered yet to save." });
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("Nothing buffered yet to save.");
+    expect(screen.queryByLabelText("saved trace path")).toBeNull();
   });
 });

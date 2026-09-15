@@ -781,6 +781,24 @@ $ porthole sessions
   com.example.shop emulator-5554     started 2026-09-14T09:11:40.000Z t=[0,190442] events=4120  980.1KB .porthole/sessions/com.example.shop_emulator-5554_10000
 ```
 
+The timeline UI has the same gesture built into its header: **keep** saves
+the window you are already looking at, through the same save path. Zoomed
+or panned away from the live edge, it saves exactly the visible window, to
+the millisecond the ruler shows; following the live edge, there is no fixed
+window to save, so it saves a lookback of N seconds ending now — a small
+input next to the button, defaulting to 30. Either way it writes through
+`POST /api/save` (`{from, to, scenario?}` in uptime ms, hardened the way
+`/api/tools/restart` is: POST only, the same origin check every route on
+this server already applies, a 400 on a malformed body or `from >= to`)
+into the same `buildSavedTrace`/`writeSavedTrace` pair above, so the
+result is the same trace format either way. The header shows the path it
+wrote, selectable and copyable — the next thing you do with it is paste it
+at the agent — plus one line: this saves the Porthole half only, since the
+system trace ring (GRA-57) is not in 0.2.0. It replaces the old
+**copy trace** control, which put every event in the window on the
+clipboard as an unbounded JSON blob `capture`'s own tools never read — two
+controls claiming to save the window was worse than one.
+
 ## System traces
 
 Porthole watches one process. Most of what goes wrong is inside it, but not
@@ -1656,16 +1674,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**1328 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1362 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 424 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 416
-passed, 0 failed, 8 skipped), 675 in the MCP server (`cd mcp && npm test` —
-672 passed, 0 failed, 3 skipped), and 229 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 229 passed, 0 failed, 0
+passed, 0 failed, 8 skipped), 693 in the MCP server (`cd mcp && npm test` —
+690 passed, 0 failed, 3 skipped), and 245 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 245 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1328 disagrees with the sum of the three suites' totals stated
+XML, and when 1362 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1689,10 +1707,10 @@ this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 424 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 675 server tests with 0 skipped, because it has the
+set) and the same 693 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 675/673/2, missing only that capture. The timeline UI is the one suite
-whose split does not move: 229/229/0 on every leg.
+sees 693/691/2, missing only that capture. The timeline UI is the one suite
+whose split does not move: 245/245/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
