@@ -215,6 +215,12 @@ PR that makes the change, not after the fact.
 - `porthole_status`'s `exitTrace` now accepts the ISO-8601 timestamp
   `exits.recent` itself prints (`at`), not only the epoch-milliseconds
   `timestamp` it already accepted (GRA-188).
+- An event arriving between a reconnect's `hello` and the on-disk session
+  writer finishing its own disk I/O no longer gets pushed onto the live
+  timeline ring and then wiped by that `hello`'s delayed ring-clear; the
+  writer also no longer drops (or, on a removed sessions root, throws an
+  unhandled rejection over) an event that arrives before it has finished
+  opening (GRA-191).
 - `capture_system_trace` no longer freezes the rest of the MCP server for
   the length of a recording — its three `adb` calls run through an
   asynchronous, awaited spawn instead of a blocking one — and its label

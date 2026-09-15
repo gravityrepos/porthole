@@ -3,7 +3,7 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_RETENTION,
   SessionWriter,
@@ -22,6 +22,16 @@ import {
   sessionsRoot,
   type SessionEvent,
 } from "./sessions.js";
+
+// GRA-191: wraps the real writeFile in a spy rather than replacing it — every
+// existing test still gets real disk writes, and the one test below that
+// needs meta.json's own write to fail with ENOENT can make it do so for a
+// single call without touching anything else `sessions.ts` (or this file's
+// own fixtures) does with the filesystem.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 
 const HELLO = {
   packageName: "com.example.shop",
@@ -88,6 +98,50 @@ describe("SessionWriter", () => {
     // any session directory inside it — append() before open() had nowhere
     // to write and must not have invented somewhere.
     expect(await readdir(root)).toEqual([]);
+  });
+
+  // GRA-191 self-check (a): append() after close().
+  it("does nothing after close() — the same 'nowhere to put this' shape as before open() ever ran", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    writer.close();
+    expect(() => writer.append(event(0, 1_000))).not.toThrow();
+    await writer.flush();
+    const content = await readFile(path.join(dir, "events.ndjson"), "utf8").catch(() => "");
+    expect(content).toBe("");
+  });
+
+  // GRA-191 self-check (a): close() must not be a one-way door — a reconnect
+  // has to be able to resume appending, even to the same identity.
+  it("a reconnect's open() un-closes the writer, including for the same identity, so appending resumes after close()", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    writer.close();
+    await writer.open(HELLO); // same identity: the idempotent early-return path
+    writer.append(event(0, 1_000));
+    await writer.flush();
+    const content = await readFile(path.join(dir, "events.ndjson"), "utf8");
+    expect(content.trim().split("\n")).toHaveLength(1);
+  });
+
+  // GRA-191 self-check (a): open() on a root that cannot be created.
+  it("open() rejects, cleanly, when its directory cannot be created (a file occupies the path)", async () => {
+    const parent = await tmpRoot();
+    const blockedRoot = path.join(parent, "blocked");
+    await writeFile(blockedRoot, "not a directory"); // occupies the path open() needs to mkdir
+    const writer = new SessionWriter(blockedRoot, 60_000);
+    await expect(writer.open(HELLO)).rejects.toThrow();
+    // Documented, not silently wrong: `dir` is set (optimistically, before
+    // the mkdir that failed) and `opening` is already false again (the
+    // `finally` in open() ran), so append() takes the "dir is set" branch
+    // and queues rather than drops -- a caller that retries open() (or a
+    // real reconnect that gets a working root next time) still has
+    // somewhere for these to land once mkdir actually succeeds.
+    expect(() => writer.append(event(0, 1_000))).not.toThrow();
   });
 
   it("queues on append() and only writes on flush() — never inline (AC4's premise)", async () => {
@@ -276,6 +330,206 @@ describe("SessionWriter", () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// GRA-191 QA follow-up: three mutations survived round one
+// ---------------------------------------------------------------------------
+
+describe("SessionWriter: GRA-191 QA follow-up", () => {
+  /**
+   * Gates `SessionWriter.prototype.flush`'s first call — the one `open()`
+   * itself makes, before `dir` is ever set — so a test can act deterministically
+   * while `open()` is provably still in flight, instead of racing real disk
+   * I/O. Returns `release` (call it to let the gated flush proceed) and a
+   * `calls` counter. Because `open()`'s synchronous prefix (everything up to
+   * its own first `await`) runs to completion before the caller gets control
+   * back, `calls` is already 1 by the time `writer.open(hello)` returns its
+   * promise — no polling needed to know the gate has been reached.
+   */
+  function gateFirstFlush(): { release: () => void; calls: () => number } {
+    const originalFlush = SessionWriter.prototype.flush;
+    let count = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(SessionWriter.prototype, "flush").mockImplementation(function (this: SessionWriter) {
+      count++;
+      if (count === 1) return gate.then(() => originalFlush.call(this));
+      return originalFlush.call(this);
+    });
+    return { release, calls: () => count };
+  }
+
+  it("preserves arrival order across the open()-in-flight queue and later appends, once flushed (queue order)", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000); // long interval: nothing flushes on its own
+    const gate = gateFirstFlush();
+
+    try {
+      const openPromise = writer.open(HELLO);
+      expect(gate.calls()).toBe(1);
+      expect(writer.currentDir()).toBeNull(); // open() has not reached `this.dir = dir` yet
+
+      // Three events queued before open() has a directory at all.
+      writer.append(event(0, 1_000));
+      writer.append(event(1, 1_100));
+      writer.append(event(2, 1_200));
+
+      gate.release();
+      await openPromise; // open()'s own trailing flush writes the three above
+
+      // Two more, appended normally once open() has resolved.
+      writer.append(event(3, 1_300));
+      writer.append(event(4, 1_400));
+      await writer.flush();
+
+      const dir = writer.currentDir()!;
+      const lines = (await readFile(path.join(dir, "events.ndjson"), "utf8")).trim().split("\n");
+      expect(lines.map((l) => JSON.parse(l).seq)).toEqual([0, 1, 2, 3, 4]);
+    } finally {
+      vi.mocked(SessionWriter.prototype.flush).mockRestore();
+    }
+  });
+
+  it("close() flushes whatever is still queued, with no explicit flush() call first", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000); // long interval: only close()'s own flush should act
+    await writer.open(HELLO);
+    const dir = writer.currentDir()!;
+    writer.append(event(0, 1_000));
+
+    writer.close(); // no flush() call before this
+
+    // flush() chains onto the same `this.flushing` promise close()'s own
+    // (fire-and-forget) call started, so awaiting it here resolves only
+    // after that flush has actually finished — deterministic, not a sleep.
+    await writer.flush();
+
+    const content = await readFile(path.join(dir, "events.ndjson"), "utf8").catch(() => "");
+    const lines = content.trim().length > 0 ? content.trim().split("\n") : [];
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toMatchObject({ seq: 0, t: 1_000 });
+  });
+
+  it("doFlush surfaces a non-ENOENT error (EACCES) instead of swallowing it", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000));
+
+    const eacces = Object.assign(new Error("EACCES: permission denied, open 'meta.json'"), {
+      code: "EACCES",
+    });
+    vi.mocked(writeFile).mockRejectedValueOnce(eacces);
+
+    // The writer's contract for a real (non-ENOENT) failure: the flush()
+    // promise rejects rather than resolving silently. Only a vanished root
+    // (ENOENT) is nothing-to-flush; anything else is a real problem the
+    // caller needs to see.
+    await expect(writer.flush()).rejects.toThrow(/EACCES/);
+  });
+
+  // QA verified by hand: a profile event that arrives while `open()` is
+  // still in flight — before `this.meta` exists — must still end up in
+  // meta.json once open()'s own trailing flush writes it, not silently
+  // miss the capture for having landed too early.
+  it("a profile event appended before open() resolves is still captured into meta.json", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    const gate = gateFirstFlush();
+
+    try {
+      const openPromise = writer.open(HELLO);
+      expect(gate.calls()).toBe(1);
+      expect(writer.currentMeta()).toBeNull(); // meta does not exist yet either
+
+      writer.append(
+        event(0, 500, "device", {
+          kind: "profile",
+          model: "Pixel 9 Pro Fold",
+          sdkInt: 37,
+          abi: "arm64-v8a",
+          cores: 8,
+          deviceRamMb: 12_288,
+          refreshHz: 120,
+          lowRamDevice: "false",
+        }),
+      );
+
+      gate.release();
+      await openPromise;
+
+      expect(writer.currentMeta()?.profile).toEqual({
+        model: "Pixel 9 Pro Fold",
+        sdkInt: 37,
+        abi: "arm64-v8a",
+        cores: 8,
+        deviceRamMb: 12_288,
+        refreshHz: 120,
+        lowRamDevice: false,
+      });
+    } finally {
+      vi.mocked(SessionWriter.prototype.flush).mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-191: a vanished sessions root must not become an unhandled rejection
+// ---------------------------------------------------------------------------
+
+describe("SessionWriter: a vanished sessions root", () => {
+  // No afterEach cleanup needed: `mockRejectedValueOnce` below is
+  // self-consuming — it overrides exactly one call to writeFile and every
+  // call after that (in this test or any later one) falls through to the
+  // real implementation the module mock above wraps.
+
+  it("doFlush() does not reject, and does not produce an unhandled rejection, when meta.json's write hits ENOENT (GRA-183's repro)", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 20); // short interval: exercises the real, fire-and-forget timer path
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000)); // arms the 20ms flush timer
+
+    const enoent = Object.assign(new Error("ENOENT: no such file or directory, open 'meta.json'"), {
+      code: "ENOENT",
+    });
+    vi.mocked(writeFile).mockRejectedValueOnce(enoent);
+
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      // Let the 20ms timer fire on its own, fire-and-forget (`void
+      // this.flush()` inside append()'s own setTimeout) — exactly the shape
+      // GRA-183 found: a writer whose owner never called flush() explicitly
+      // before whatever the timer needed had already vanished.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(rejections).toEqual([]);
+    // And the flush pipeline is not left permanently wedged by the one
+    // ENOENT — an explicit flush() afterwards still resolves normally
+    // rather than rejecting or hanging.
+    await expect(writer.flush()).resolves.toBeUndefined();
+  });
+
+  it("does not need the flush timer at all — an explicit flush() after the root is removed also resolves, not rejects", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000); // long interval: only the explicit flush() below should do anything
+    await writer.open(HELLO);
+    writer.append(event(0, 1_000));
+
+    const enoent = Object.assign(new Error("ENOENT: no such file or directory, open 'meta.json'"), {
+      code: "ENOENT",
+    });
+    vi.mocked(writeFile).mockRejectedValueOnce(enoent);
+
+    await expect(writer.flush()).resolves.toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

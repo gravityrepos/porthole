@@ -2,9 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import net, { type AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DeviceClient, PROTOCOL_VERSION, type DeviceEvent } from "./device.js";
+import { SessionWriter } from "./sessions.js";
+import { TimelineServer } from "./timeline.js";
 import { stripComments } from "./testing/stripComments.js";
+import { waitUntil } from "./testing/harness.js";
 
 /**
  * device.ts is the only place that turns raw TCP bytes from the Android
@@ -799,5 +805,94 @@ describe("PROTOCOL_VERSION agrees with Protocol.kt's own copy", () => {
         "a mismatch here means the two sides of GRA-96's own check would silently disagree about what " +
         "a matching handshake even is.",
     ).toBe(PROTOCOL_VERSION);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-191: hello's assignment and its "hello" event must stay synchronous
+// ---------------------------------------------------------------------------
+
+describe("GRA-191: an event that arrives while open() is still in flight", () => {
+  it("is present in the timeline ring and in events.ndjson after flush", async () => {
+    const server = trackServer(await startRawServer());
+    const sessionsRoot = await mkdtemp(path.join(tmpdir(), "porthole-device-gra191-"));
+    const client = track(new DeviceClient("127.0.0.1", server.port, sessionsRoot));
+    const timeline = new TimelineServer(client, 0);
+
+    // Delays SessionWriter.open()'s own first step (flushing whatever the
+    // previous identity owed — a near-instant no-op for a brand-new
+    // writer) so this test can push an event while open() is provably
+    // still in flight, deterministically rather than racing real disk I/O.
+    // Real code's `this.opening` flag is what is under test here — this
+    // mock changes nothing about it, it only stalls one of the awaits
+    // inside open() so there is a window to act in.
+    const originalFlush = SessionWriter.prototype.flush;
+    let flushCalls = 0;
+    let releaseFirstFlush: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstFlush = resolve;
+    });
+    const flushSpy = vi.spyOn(SessionWriter.prototype, "flush").mockImplementation(function (
+      this: SessionWriter,
+    ) {
+      flushCalls++;
+      if (flushCalls === 1) return gate.then(() => originalFlush.call(this));
+      return originalFlush.call(this);
+    });
+
+    try {
+      client.start();
+      // Not waitForState(client, "connected") — with sessions.open() now
+      // awaited before "connected" (see device.ts), and open() gated open
+      // above, "connected" will not arrive until releaseFirstFlush() runs.
+      // "hello" is what this test needs: it fires synchronously with
+      // `client.hello` becoming non-null, before open() is even called.
+      await waitForHello(client);
+      await waitUntil(() => flushCalls >= 1, 3_000);
+      expect(client.hello).not.toBeNull();
+      // GRA-191's own regression: if `this.hello = hello` and
+      // `this.emit("hello", hello)` are ever separated by an await again,
+      // open() (and therefore this gated flush()) is not even CALLED yet
+      // at this point — it still sits between the two. Failing here,
+      // rather than on the ring assertion below, is the most direct signal
+      // that the ordering broke rather than the ring-clearing behaviour.
+      expect(flushCalls).toBeGreaterThanOrEqual(1);
+
+      const frame = JSON.stringify({ event: "recompose", t: 1_000, seq: 1, data: { name: "Cart" } }) + "\n";
+      server.write(frame);
+      await waitUntil(() => timeline.buffer().length >= 1, 3_000);
+
+      // In the ring now, before open() has ever resolved — the exact
+      // window GRA-183 found wiped: a delayed "hello" event clearing the
+      // ring out from under an event that arrived first. If the fix is
+      // real, timeline.ts's ring-clear-on-new-session already ran
+      // (synchronously, alongside hello's assignment) before this event
+      // was ever pushed, so there is nothing left to wipe it later.
+      expect(timeline.buffer().map((e) => e.event)).toEqual(["recompose"]);
+
+      releaseFirstFlush();
+      await waitUntil(() => client.sessions!.currentDir() !== null, 3_000);
+      await client.sessions!.flush();
+
+      // Still there once open() finally resolves — proves the fix is not
+      // merely "the clear is delayed a bit longer", it is "there is no
+      // clear left to race" for an event that arrived before the session
+      // even opened.
+      expect(timeline.buffer().map((e) => e.event)).toEqual(["recompose"]);
+
+      const onDisk = (
+        await readFile(path.join(client.sessions!.currentDir()!, "events.ndjson"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event: string });
+      // GRA-191's other half: SessionWriter.append() must not have dropped
+      // the event just because `open()` had not yet created the directory
+      // at the moment it arrived.
+      expect(onDisk.map((e) => e.event)).toEqual(["recompose"]);
+    } finally {
+      flushSpy.mockRestore();
+      await rm(sessionsRoot, { recursive: true, force: true });
+    }
   });
 });
