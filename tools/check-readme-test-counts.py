@@ -49,6 +49,20 @@ What this does NOT catch (true when run, not aspirational):
   - Prose elsewhere in the README (skip reasons, device claims, etc.) — only
     the four counted numbers per suite, and the headline total's arithmetic,
     are compared.
+  - GRA-175 measured this directly: a Gradle `Test` task with zero test
+    classes to run (mutated `gradle-plugin`'s down to none, for real) reports
+    NO-SOURCE and lets `./gradlew check` finish BUILD SUCCESSFUL — the task
+    itself never fails on collecting nothing. What DOES catch it, proven the
+    same way, is this check's own total comparison above: with gradle-plugin
+    gutted, the repo-wide JVM total dropped from 366 to 301 and this printed
+    "README drift (jvm total): README says 366, the suite's own JUnit XML
+    says 301" and exited 1. So a collection collapse in gradle-plugin or
+    runtime is already caught here, as a side effect of the total being
+    pinned rather than as anything built for the purpose — which is also
+    this mechanism's remaining blind spot: if one module's count drops by N
+    in the same PR that another's rises by N, the total still reconciles and
+    this stays green. Diff the JUnit XML's own test names, not just the
+    total, if that specific shape is ever suspected.
 
 Usage: python3 tools/check-readme-test-counts.py
 Exits 0 with the reconciled figures, or non-zero naming README's figure next

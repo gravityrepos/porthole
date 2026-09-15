@@ -5,6 +5,22 @@ Gradle JUnit XML). stdlib unittest, no dependency, mirroring
 mcp/scripts/check-readme-vitest-counts.test.mjs's coverage of the same
 defect class in the sibling script.
 
+GRA-175 audited this file for the same defect its sibling has (a runner that
+collects zero tests and still exits 0): measured directly, on the Python this
+machine has (3.14.5) and matching exactly how this file is invoked --
+`unittest.main()` under `if __name__ == "__main__":`, no discovery, no
+`-m unittest` -- emptying every test method out of both classes below prints
+"Ran 0 tests ... NO TESTS RAN" and exits **5**, not 0. That is CPython's own
+fix (landed in 3.12: unittest returns a non-zero exit code when nothing ran or
+everything skipped), not anything in this file, and it needs no wrapper here
+the way node --test does (see run-node-test-with-floor.mjs for why that one
+does). This is unproven for whatever python3 CI's ubuntu-latest runner
+resolves to at the time you read this -- not re-verified there -- but Ubuntu's
+shipped default has been >=3.12 since well before this was written, so the
+same behaviour is expected, not merely hoped for. If this file is ever run
+under an older interpreter, that machine is on its own: no code here
+compensates for it.
+
 Run: python3 tools/test_check_readme_test_counts.py
 """
 import importlib.util

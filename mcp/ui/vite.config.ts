@@ -20,4 +20,12 @@ export default defineConfig({
       "/api": { target: "http://127.0.0.1:8678" },
     },
   },
+  // GRA-175: no `test` block here, and no `passWithNoTests` to set — this
+  // file has none, so vitest falls back to its own default include glob and
+  // its own default `passWithNoTests: false` for `vitest run`. Verified: a
+  // glob matching zero files under this project prints "No test files
+  // found, exiting with code 1", the same as the server suite. Left
+  // unconfigured deliberately, not by omission: adding a `test` block whose
+  // author forgets this default would be the easiest way to reintroduce the
+  // zero-collection defect GRA-175 audited every runner for.
 });
