@@ -36,6 +36,11 @@ class PortholeExtensionDefaultsTest {
     }
 
     @Test
+    fun `defaults the ring capacity to roughly a minute of a busy screen`() {
+        assertEquals(2048, extension().ringCapacity.get())
+    }
+
+    @Test
     fun `defaults to instrumenting only the debug build type`() {
         assertEquals(listOf("debug"), extension().debugBuildTypes.get())
     }
@@ -74,10 +79,12 @@ class PortholeExtensionDefaultsTest {
         val porthole = project.extensions.getByType(PortholeExtension::class.java)
 
         porthole.port.set(9000)
+        porthole.ringCapacity.set(8192)
         porthole.debugBuildTypes.set(listOf("debug", "staging"))
         porthole.deviceSerial.set("emulator-5554")
 
         assertEquals(9000, porthole.port.get())
+        assertEquals(8192, porthole.ringCapacity.get())
         assertEquals(listOf("debug", "staging"), porthole.debugBuildTypes.get())
         assertEquals("emulator-5554", porthole.deviceSerial.get())
     }
