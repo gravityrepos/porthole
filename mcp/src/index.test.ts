@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -2121,18 +2121,33 @@ process.exit(17);
 `;
 
 interface FakeAdb {
-  sdkDir: string;
-  preloadPath: string;
+  /** Pass as `adbBinary` to `buildRig` — `capture_system_trace`'s adb calls run this instead of resolving a real one. */
+  binaryPath: string;
+  /** Pass as `adbEnv` (spread over `process.env`) — this is what makes `binaryPath` run FAKE_ADB_PRELOAD_SOURCE instead of trying to load its own CLI args as modules. */
+  env: NodeJS.ProcessEnv;
   cleanup(): void;
 }
 
-/** A controllable stand-in for adb, wired up so `findAdb()` finds it the normal way. */
+/**
+ * A controllable stand-in for adb.
+ *
+ * Deliberately returns a `binary` path and an `env` object for the caller to
+ * pass to `buildRig({ adbBinary, adbEnv })` — see `PortholeServerOptions` in
+ * index.ts — rather than mutating `process.env` itself. `NODE_OPTIONS` is
+ * what makes `binaryPath` (a hard link to the real `node` binary) run
+ * `FAKE_ADB_PRELOAD_SOURCE` instead of trying to load its own CLI arguments
+ * as a module, and setting that on the real, shared `process.env` for the
+ * duration of a multi-second capture is exactly what caused this test to
+ * intermittently break an unrelated `cli.test.ts` case that spawns its own
+ * child process — see `runAdbAsync`'s `env` option doc comment in adb.ts.
+ * Building the env value here and handing it to one specific rig's server
+ * removes the shared global instead of narrowing the window it is exposed
+ * for.
+ */
 function setupFakeAdb(): FakeAdb {
   const root = mkdtempSync(path.join(tmpdir(), "porthole-fakeadb-"));
-  const platformTools = path.join(root, "platform-tools");
-  mkdirSync(platformTools, { recursive: true });
   const binaryName = process.platform === "win32" ? "adb.exe" : "adb";
-  const binaryPath = path.join(platformTools, binaryName);
+  const binaryPath = path.join(root, binaryName);
   try {
     // A hard link, not a copy: same bytes, no ~90MB copy per test run. Falls
     // back to copying only if the temp directory is not on the same volume
@@ -2146,8 +2161,8 @@ function setupFakeAdb(): FakeAdb {
   writeFileSync(preloadPath, FAKE_ADB_PRELOAD_SOURCE);
 
   return {
-    sdkDir: root,
-    preloadPath,
+    binaryPath,
+    env: { ...process.env, NODE_OPTIONS: `--require=${preloadPath}` },
     cleanup() {
       rmSync(root, { recursive: true, force: true });
     },
@@ -2158,18 +2173,11 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
   it("keeps answering porthole_status and buffering pushed events during a multi-second capture, against a fake adb", async () => {
     const fakeAdb = setupFakeAdb();
     const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
-    const savedSdkDir = process.env.PORTHOLE_SDK_DIR;
-    const savedNodeOptions = process.env.NODE_OPTIONS;
-    // PORTHOLE_SDK_DIR wins over local.properties and ANDROID_HOME
-    // unconditionally in resolveSdkDir() (see adb.ts), so this is enough to
-    // make findAdb() return the fake binary regardless of what is really
-    // installed on the machine running the suite. NODE_OPTIONS only affects
-    // processes spawned *after* this point — never the already-running test
-    // process itself — so it is safe to set here and clear in `finally`.
-    process.env.PORTHOLE_SDK_DIR = fakeAdb.sdkDir;
-    process.env.NODE_OPTIONS = `--require=${fakeAdb.preloadPath}`;
 
-    const rig = await buildRig();
+    // adbBinary/adbEnv (GRA-89) point this ONE rig's capture_system_trace
+    // calls at the fake adb, without touching the real process.env — see
+    // setupFakeAdb's own doc comment for why that distinction matters.
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       const seconds = 3;
       const started = Date.now();
@@ -2203,10 +2211,6 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
       // rather than the capture short-circuiting some other way.
       expect(totalElapsedMs).toBeGreaterThanOrEqual(seconds * 1000 - 250);
     } finally {
-      if (savedSdkDir === undefined) delete process.env.PORTHOLE_SDK_DIR;
-      else process.env.PORTHOLE_SDK_DIR = savedSdkDir;
-      if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
-      else process.env.NODE_OPTIONS = savedNodeOptions;
       await rig.close();
       fakeAdb.cleanup();
       rmSync(outputDir, { recursive: true, force: true });

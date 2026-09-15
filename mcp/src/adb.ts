@@ -389,6 +389,28 @@ export interface RunAdbAsyncOptions {
   /** Fires every `tickMs` while the child is still running. Default writes progress to stderr; a caller wanting a different message overrides it, not the ticking. */
   onProgress?: (elapsedMs: number, args: string[]) => void;
   tickMs?: number;
+  /**
+   * Overrides the child's environment. Undefined (the default, and what
+   * every real caller leaves it as) means `spawn` does what it always does:
+   * inherit `process.env` as it stood at the moment this call was made.
+   *
+   * This exists for one reason: a test that needs a spawned child to see a
+   * *different* `NODE_OPTIONS` (or any other variable) than the rest of the
+   * process would otherwise have to mutate the real `process.env` for the
+   * duration of the call — a global, shared by every other test running in
+   * the same worker, including ones that spawn their own child processes
+   * concurrently. That is exactly the kind of cross-test interference this
+   * project's own rules warn about elsewhere, and it was measured here, not
+   * hypothesised: `index.test.ts`'s GRA-89 rig test used to set
+   * `process.env.NODE_OPTIONS` globally for its ~3s capture window, and an
+   * unrelated `cli.test.ts` case that spawns its own child process during
+   * that window failed intermittently, once in several full-suite runs,
+   * with an exit code its own assertions could not explain — a real
+   * instance of the leak this parameter exists to make unnecessary. Scoping
+   * the override to one `spawn()` call removes the shared mutable state
+   * instead of narrowing the window it is exposed for.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -417,6 +439,7 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
     timeoutMs = DEFAULT_ADB_TIMEOUT_MS,
     onProgress = defaultAdbProgress,
     tickMs = DEFAULT_ADB_TICK_MS,
+    env,
   } = options;
   const prefix = serial ? ["-s", serial] : [];
   const fullArgs = [...prefix, ...args];
@@ -428,7 +451,11 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
     let stderr = "";
     let timedOut = false;
 
-    const child = spawn(binary, fullArgs);
+    // `env` is only passed through when given: `spawn(binary, fullArgs)`
+    // with no third argument at all is what every real, non-test call makes
+    // (production behaviour is unchanged either way, since Node's own
+    // default is already "inherit process.env").
+    const child = env ? spawn(binary, fullArgs, { env }) : spawn(binary, fullArgs);
 
     const ticker = setInterval(() => {
       if (!settled) onProgress(Date.now() - start, fullArgs);

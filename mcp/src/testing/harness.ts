@@ -414,6 +414,10 @@ export interface BuildRigOptions {
   handlers?: FakeDeviceHandlers;
   /** Skip waiting for the fake device's `hello` to land — for testing the disconnected state. */
   connectDevice?: boolean;
+  /** Forwarded to `createPortholeServer` — see `PortholeServerOptions.adbEnv` in index.ts (GRA-89). */
+  adbEnv?: NodeJS.ProcessEnv;
+  /** Forwarded to `createPortholeServer` — see `PortholeServerOptions.adbBinary` in index.ts (GRA-89). */
+  adbBinary?: string;
 }
 
 /**
@@ -426,7 +430,13 @@ export async function buildRig(options: BuildRigOptions = {}): Promise<Rig> {
   const fakeDevice = await FakeDevice.start(options.handlers);
   const device = new DeviceClient("127.0.0.1", fakeDevice.port);
   const timeline = new TimelineServer(device, 0);
-  const { server } = createPortholeServer({ device, timeline, version: "0.0.0-test" });
+  const { server } = createPortholeServer({
+    device,
+    timeline,
+    version: "0.0.0-test",
+    adbEnv: options.adbEnv,
+    adbBinary: options.adbBinary,
+  });
 
   if (options.connectDevice ?? true) {
     device.start();
