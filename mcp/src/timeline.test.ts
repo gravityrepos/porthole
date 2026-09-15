@@ -3,8 +3,8 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -757,6 +757,49 @@ describe("GET /api/traces (GRA-113)", () => {
     await writeFile(resolve(tracesDir, "cached-d.pftrace"), "");
     await timeline.send("/api/traces");
     expect(runScript).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * GRA-113 AC4's own wording: "returns correct coverage windows for the real
+ * captures". Everything above proves the endpoint's contract against a fake
+ * binary; this proves the arithmetic against the real one, the same
+ * skipIf-gated shape perfetto-stdout.test.ts's `askTrace, end to end` test
+ * already uses for the same reason — neither the binary nor a real capture
+ * is guaranteed on a fresh checkout or CI runner, but both are real on this
+ * machine today.
+ */
+describe("GET /api/traces, against the real binary and a real capture (GRA-113 AC4)", () => {
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
+  // Read-only source: the main checkout's own captured trace, never this
+  // worktree's — copied in, not moved, and never written back to.
+  const sourceCapture =
+    "C:/Users/james/dev/porthole/mcp/.porthole/traces/porthole-1789157940493.pftrace";
+  const ready = existsSync(sourceCapture);
+
+  it.skipIf(!ready)("reports the real capture's real coverage window, computed off its own clock_snapshot", async () => {
+    const actual = await vi.importActual<typeof import("./perfetto.js")>("./perfetto.js");
+    const binary = actual.findTraceProcessor();
+    if (!binary) return; // No cached trace_processor on this machine either; nothing further to prove here.
+    vi.mocked(findTraceProcessor).mockReturnValueOnce(binary);
+
+    await mkdir(tracesDir, { recursive: true });
+    await copyFile(sourceCapture, resolve(tracesDir, "porthole-1789157940493.pftrace"));
+    try {
+      const response = await timeline.send("/api/traces");
+      const body = JSON.parse(response.body) as { traces: Array<Record<string, unknown>> };
+      const entry = body.traces.find((t) => t.id === "porthole-1789157940493");
+      expect(entry).toBeDefined();
+      // Hand-verified against this same trace with trace_processor_shell
+      // directly (SELECT start_ts, end_ts FROM trace_bounds; SELECT
+      // clock_id, clock_value, ts FROM clock_snapshot WHERE clock_id IN
+      // (3, 6)): bootNs 542876129521493..542887022165720, boot/monotonic
+      // offset 202202963814863ns at the trace's own first snapshot — see
+      // this ticket's report for the full derivation.
+      expect(entry?.coverage).toEqual({ from: 340673166, to: 340684058 });
+    } finally {
+      await rm(resolve(tracesDir, "porthole-1789157940493.pftrace"), { force: true });
+    }
   });
 });
 
