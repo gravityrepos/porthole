@@ -3,7 +3,7 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -948,32 +948,64 @@ describe("GRA-113 AC1: every finding carries window xor spanning, never neither"
 describe("GRA-113 AC3: one boot→uptime conversion, in moment.ts only", () => {
   // Copies the shape of surface.test.ts's ConnectionState-comparison guard:
   // a source grep, with a positive control proving the scanner actually sees
-  // something, run against the production files this ticket touches. The
-  // conversion used to be open-coded here (timeline.ts) reading whichever
-  // `clocks` sample it found first; it is now `toBootNs`/`fromBootMs`, both
-  // in moment.ts, and nothing in this ticket's other owned files should ever
-  // need to say "sleepMs" again.
-  //
-  // index.ts's `ask_system_trace` tool has the identical open-coded
-  // conversion at the same defect (first `clocks` sample found, not the one
-  // in force at the moment asked about) and is NOT included in the scan
-  // below: index.ts is outside this ticket's Owns, and fixing it here would
-  // be exactly the scope creep LEAN MODE asks implementers not to take on
-  // unilaterally. It is named in this ticket's report as an out-of-scope
-  // finding instead.
-  const scanned = ["timeline.ts", "trace.ts", "perfetto.ts"];
+  // something, run against every production file in mcp/src — not a
+  // hand-picked list. The first version of this guard scanned only
+  // ["timeline.ts", "trace.ts", "perfetto.ts"] and matched bare presence of
+  // the word "sleepMs", which is why it passed while index.ts's
+  // ask_system_trace carried the identical open-coded conversion: the guard
+  // was never pointed at that file at all. Two things are fixed here: the
+  // file list is now every `*.ts` directly under src/ that isn't a test,
+  // discovered with `readdirSync` rather than typed out by hand, so a future
+  // file needs no one to remember to add it; and the pattern now looks for
+  // *arithmetic* — `sleepMs` next to a `+` or `-` — rather than the bare
+  // identifier, because moment.ts's own `toBoot` legitimately hands `sleepMs`
+  // back to a caller (index.ts reports it in a payload) and a
+  // presence-only check would have forced that call site onto the banned
+  // list too.
+  const productionFiles = readdirSync(new URL("./", import.meta.url))
+    .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+    .filter((name) => name !== "moment.ts");
 
-  it("moment.ts does mention sleepMs — the positive control for the pattern below", () => {
-    const text = readFileSync(new URL("./moment.ts", import.meta.url), "utf8");
-    expect(text).toMatch(/\bsleepMs\b/);
+  /** `+`/`-` next to the identifier, either order — arithmetic, not a mention. */
+  const ARITHMETIC = /[-+]\s*sleepMs\b|\bsleepMs\s*[-+]/;
+
+  it("the file list is non-empty and actually includes index.ts — the file the bug was found in", () => {
+    // Same positive-control reasoning as surface.test.ts's own version: a
+    // guard that silently scans nothing (a broken readdirSync filter, a
+    // renamed directory) passes every offender through unseen. Naming
+    // index.ts specifically pins the exact gap the coordinator's widened
+    // grant closed — a passing list that happened to still exclude it would
+    // reopen the same hole under a different mechanism.
+    expect(productionFiles.length).toBeGreaterThan(10);
+    expect(productionFiles).toContain("index.ts");
+    expect(productionFiles).toContain("timeline.ts");
+    expect(productionFiles).not.toContain("moment.ts");
   });
 
-  it("none of timeline.ts, trace.ts or perfetto.ts contain sleepMs arithmetic", () => {
+  it("the arithmetic pattern matches the exact buggy shape index.ts used to have, and does not match its fix", () => {
+    // The mutation this test is built from: reverted to this literal text
+    // (from git history, not retyped from memory) and re-ran the file-scan
+    // test below, which failed with index.ts named as the offender. Restored
+    // and re-ran clean. This unit-level pair is the permanent record of that
+    // proof, independent of whichever way index.ts happens to read next.
+    const buggy = "const bounds = {\n  fromNs: (span.from + sleepMs) * 1e6,\n  toNs: (span.to + sleepMs) * 1e6,\n};";
+    expect(ARITHMETIC.test(buggy)).toBe(true);
+
+    const fixed = "window: { from: span.from, to: span.to, sleepMs: bootTo.sleepMs },";
+    expect(ARITHMETIC.test(fixed)).toBe(false);
+  });
+
+  it("moment.ts's own conversions do match the arithmetic pattern — the positive control for the file scan below", () => {
+    const text = readFileSync(new URL("./moment.ts", import.meta.url), "utf8");
+    expect(text).toMatch(ARITHMETIC);
+  });
+
+  it("no production file outside moment.ts contains sleepMs arithmetic", () => {
     const offenders: string[] = [];
-    for (const file of scanned) {
+    for (const file of productionFiles) {
       const text = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
-      if (/\bsleepMs\b/.test(text)) offenders.push(file);
+      if (ARITHMETIC.test(text)) offenders.push(file);
     }
-    expect(offenders, `sleepMs found outside moment.ts in: ${offenders.join(", ")}`).toEqual([]);
+    expect(offenders, `sleepMs arithmetic found outside moment.ts in: ${offenders.join(", ")}`).toEqual([]);
   });
 });
