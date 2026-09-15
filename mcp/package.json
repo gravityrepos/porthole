@@ -29,7 +29,9 @@
     "ui": "node dist/cli.js ui",
     "mock": "node tools/mock-device.mjs",
     "test": "vitest run",
-    "test:ui": "npm run test --workspace porthole-ui"
+    "test:ui": "npm run test --workspace porthole-ui",
+    "typecheck": "tsc --noEmit",
+    "typecheck:all": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
