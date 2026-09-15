@@ -184,23 +184,27 @@ configured in exactly one place.
 ```
 
 That is the whole minimum: the plugin block above, and this one command.
-`portholeStart` installs the debug build, forwards the port, writes
-`.mcp.json`, fetches `trace_processor` the first time anything needs it, and
-opens the timeline in your browser — in that order, because each step depends
-on the last one finishing. It is not new behaviour: it is `installDebug`,
-`portholeConnect`, `portholeMcpConfig`, `portholeTraceProcessor` and
-`portholeUi`, wired together so the order is not something you have to learn.
-Doing anything unusual still means reaching for one of those five directly —
-step 6 below is the reference table for that — and each one works exactly as
-it always has.
+`portholeStart` installs the debug build, then writes `.mcp.json`, fetches
+`trace_processor` the first time anything needs it, and forwards the port and
+opens the timeline in your browser — always in that order, a real Gradle
+`mustRunAfter` chain rather than a naming coincidence, since the last step
+blocks until you stop it. It is not new behaviour: it is `installDebug` (or
+`install<Variant>Debug`, see below), `portholeMcpConfig`,
+`portholeTraceProcessor`, and — forwarding the port — either `portholeUi` or
+`portholeConnect`, never both, wired together so the order is not something
+you have to learn. Doing anything unusual still means reaching for one of
+those four directly — step 6 below is the reference table for that — and
+each one works exactly as it always has.
 
 Two things worth knowing before you run it:
 
 - **More than one debug build variant** (a `productFlavors` block, like the
   sample's `room`/`sqldelight` storage flavors) means `portholeStart` cannot
-  guess which one you want installed, and refuses rather than picking:
-  `./gradlew :app:portholeStart -Pporthole.variant=room` names it. One variant
-  is picked automatically; more than one is always asked for, never guessed.
+  guess which one you want installed, and refuses rather than picking. Name
+  the variant AGP would use for `install<Variant>Debug` — not the flavor
+  alone — so the sample's Room flavor is `roomDebug`:
+  `./gradlew :app:portholeStart -Pporthole.variant=roomDebug`. One variant is
+  picked automatically; more than one is always asked for, never guessed.
 - **An agent driving this** — no one at a keyboard to look at a browser
   window — wants `-Pporthole.open=false`, which does everything except open
   the timeline. A person running it by hand gets the browser by default,
@@ -314,10 +318,12 @@ fun CartScreen(viewModel: CartViewModel) = PortholeScreen("Cart") {
 required for the semantics tree — the runtime attaches to the Activity's decor
 view by itself.
 
-**6. The pieces, individually.** `portholeStart` in step 2 is these five tasks,
-run in this order, for one variant. Reach for one directly for anything it
-does not cover — a second device, the UI without a fresh install, a config
-entry regenerated after editing `.mcp.json` by hand:
+**6. The pieces, individually.** `portholeStart` in step 2 is four of these
+five tasks, for one variant, in a fixed order — `portholeConnect` and
+`portholeUi` both forward the port, so exactly one of them runs, never both.
+Reach for any of the five directly for anything `portholeStart` does not
+cover — a second device, the UI without a fresh install, a config entry
+regenerated after editing `.mcp.json` by hand:
 
 | task | does | reach for it directly when |
 | --- | --- | --- |
