@@ -18,6 +18,15 @@ interface Props {
   onRestart: () => void;
   restartLabel: string;
   askLabel: string;
+  /** GRA-116: seconds the "keep" control saves back from now while following the live edge. Ignored while zoomed/panned. */
+  lookbackSeconds: number;
+  onLookbackSecondsChange: (seconds: number) => void;
+  onSave: () => void;
+  saveLabel: string;
+  /** The path `POST /api/save` just wrote, or null before any save (or after one that failed). */
+  savePath: string | null;
+  /** One line, or null when the last save attempt succeeded (or none has happened yet). */
+  saveError: string | null;
 }
 
 interface ConnectionDisplay {
@@ -97,6 +106,12 @@ export function Header({
   onRestart,
   restartLabel,
   askLabel,
+  lookbackSeconds,
+  onLookbackSecondsChange,
+  onSave,
+  saveLabel,
+  savePath,
+  saveError,
 }: Props) {
   const { tone, label, pulse } = connectionDisplay(connection, eventsPerSecond);
 
@@ -178,6 +193,34 @@ export function Header({
         </Chip>
         <Chip onClick={onFit}>fit</Chip>
         <Chip onClick={onClear}>clear</Chip>
+        {/* GRA-116: the "keep" control. The N-second lookback only means
+            anything while following the live edge -- zoomed/panned away, the
+            saved window is exactly what the ruler shows, with nothing to
+            configure -- so the input is hidden rather than shown disabled. */}
+        {following && (
+          <input
+            type="number"
+            min={1}
+            value={lookbackSeconds}
+            onChange={(event) => {
+              const seconds = Math.round(Number(event.target.value));
+              if (Number.isFinite(seconds) && seconds > 0) onLookbackSecondsChange(seconds);
+            }}
+            title="Seconds to keep, ending now"
+            aria-label="seconds to keep"
+            className="w-12 rounded-md border border-[var(--color-edge)] bg-[var(--color-control)] px-1.5 py-[5px] text-center font-mono text-[11px] text-[#dbe3ef]"
+          />
+        )}
+        <Chip
+          onClick={onSave}
+          title={
+            following
+              ? `Save the last ${lookbackSeconds}s as a trace file`
+              : "Save the visible window as a trace file"
+          }
+        >
+          {saveLabel}
+        </Chip>
         <button
           onClick={onAsk}
           title="Copy a prompt describing the window you are looking at"
@@ -186,6 +229,36 @@ export function Header({
           {askLabel}
         </button>
       </div>
+
+      {/* A flex-basis-full child on a flex-wrap row always starts a new
+          line, so the result (or error) shows on its own row below the
+          controls rather than fighting them for space. */}
+      {(savePath || saveError) && (
+        <div className="flex w-full basis-full flex-wrap items-center gap-2.5 font-mono text-[11px]">
+          {savePath && (
+            <>
+              <input
+                readOnly
+                value={savePath}
+                onFocus={(event) => event.currentTarget.select()}
+                aria-label="saved trace path"
+                title="The trace file just written -- click to select, then copy"
+                className="min-w-0 flex-1 rounded-md border border-[var(--color-edge)] bg-[var(--color-control)] px-2 py-1 text-[#dbe3ef]"
+              />
+              {/* Ruling 1, verbatim: GRA-57 (the system trace ring) is not in
+                  0.2.0, so every save through this control is Porthole-only. */}
+              <span className="text-[var(--color-muted)]">
+                Porthole half only; no system trace was attached.
+              </span>
+            </>
+          )}
+          {saveError && (
+            <span role="alert" className="text-[var(--danger)]">
+              {saveError}
+            </span>
+          )}
+        </div>
+      )}
     </header>
   );
 }

@@ -781,6 +781,24 @@ $ porthole sessions
   com.example.shop emulator-5554     started 2026-09-14T09:11:40.000Z t=[0,190442] events=4120  980.1KB .porthole/sessions/com.example.shop_emulator-5554_10000
 ```
 
+The timeline UI has the same gesture built into its header: **keep** saves
+the window you are already looking at, through the same save path. Zoomed
+or panned away from the live edge, it saves exactly the visible window, to
+the millisecond the ruler shows; following the live edge, there is no fixed
+window to save, so it saves a lookback of N seconds ending now — a small
+input next to the button, defaulting to 30. Either way it writes through
+`POST /api/save` (`{from, to, scenario?}` in uptime ms, hardened the way
+`/api/tools/restart` is: POST only, the same origin check every route on
+this server already applies, a 400 on a malformed body or `from >= to`)
+into the same `buildSavedTrace`/`writeSavedTrace` pair above, so the
+result is the same trace format either way. The header shows the path it
+wrote, selectable and copyable — the next thing you do with it is paste it
+at the agent — plus one line: this saves the Porthole half only, since the
+system trace ring (GRA-57) is not in 0.2.0. It replaces the old
+**copy trace** control, which put every event in the window on the
+clipboard as an unbounded JSON blob `capture`'s own tools never read — two
+controls claiming to save the window was worse than one.
+
 ## System traces
 
 Porthole watches one process. Most of what goes wrong is inside it, but not

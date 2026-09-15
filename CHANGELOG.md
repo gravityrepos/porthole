@@ -138,6 +138,19 @@ PR that makes the change, not after the fact.
   recorded, in the same vocabulary `findings` uses; `porthole sessions` lists
   every session on disk, across every app and device, newest first, with the
   most recently active one marked (GRA-54).
+- The timeline UI's header gained a **keep** control: the same "save what
+  just happened" gesture, from the place it is actually wanted. Saves the
+  visible window to the millisecond when zoomed or panned away from the
+  live edge, or the last N seconds (a small input, default 30) ending now
+  when following it, through a new `POST /api/save` that calls the same
+  `fillWindowFromDisk`/`buildSavedTrace`/`writeSavedTrace` path `save_moment`
+  already uses — no second implementation of any of it — hardened exactly
+  like `/api/tools/restart` (POST only, GRA-78's origin check, a 400 on a
+  malformed body or `from >= to`). Shows the path it wrote, selectable and
+  copyable, plus a note that only the Porthole half is saved until GRA-57's
+  system trace ring lands. Replaces **copy trace**, which put every event
+  in the window on the clipboard as an unbounded JSON blob none of
+  `capture`'s own tools could read (GRA-116).
 
 ### Fixed
 

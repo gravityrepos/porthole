@@ -5,8 +5,6 @@ import type { WindowSummary } from "../lib/analysis";
 interface Props {
   summary: WindowSummary;
   onAsk: () => void;
-  onCopyTrace: () => void;
-  copyLabel: string;
 }
 
 /**
@@ -15,7 +13,7 @@ interface Props {
  * question — reading "caused by" under a selected HTTP call implied those
  * writes caused that call, which is not what the counts mean.
  */
-export function WindowPanel({ summary, onAsk, onCopyTrace, copyLabel }: Props) {
+export function WindowPanel({ summary, onAsk }: Props) {
   return (
     <section className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-center justify-between border-b border-[var(--color-line)] px-3.5 py-2.5">
@@ -126,13 +124,6 @@ export function WindowPanel({ summary, onAsk, onCopyTrace, copyLabel }: Props) {
                 className="cursor-pointer rounded-[5px] bg-[var(--accent)] px-2.5 py-1 font-mono text-[10.5px] text-[#0f1620] hover:brightness-110"
               >
                 ask agent
-              </button>
-              <button
-                onClick={onCopyTrace}
-                title="Copy every event in this window as JSON"
-                className="cursor-pointer rounded-[5px] border border-[var(--color-edge)] bg-[var(--color-control)] px-2.5 py-1 font-mono text-[10.5px] text-[var(--color-muted)] hover:text-[#dbe3ef]"
-              >
-                {copyLabel}
               </button>
             </div>
           </div>
