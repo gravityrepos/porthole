@@ -5,9 +5,10 @@ import { spawn } from "node:child_process";
 import { DeviceClient, type ConnectionState } from "./device.js";
 import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
-import { runAdb } from "./adb.js";
+import { resolveProjectRoot, runAdb } from "./adb.js";
 import { bootPortholeServer } from "./index.js";
 import { parsePort, requiredValue } from "./args.js";
+import { sessionsRoot } from "./sessions.js";
 
 /**
  * The human entry point.
@@ -133,7 +134,14 @@ async function ui(argv: string[]): Promise<void> {
     }
   }
 
-  const device = new DeviceClient("127.0.0.1", options.port);
+  // GRA-53: the same sessions root `createPortholeServer` uses (index.ts),
+  // so a session started here — `porthole ui` is a real entry point someone
+  // launches directly, not only through an agent's MCP server — persists to
+  // disk the same as any other. Without this, `porthole ui` silently wrote
+  // to nothing: `DeviceClient`'s sessions root defaults to disabled when
+  // omitted, and nobody watching a browser tab would notice a feature that
+  // fails silent.
+  const device = new DeviceClient("127.0.0.1", options.port, sessionsRoot(resolveProjectRoot().directory));
   const timeline = new TimelineServer(device, options.uiPort, options.serial);
   device.start();
 
