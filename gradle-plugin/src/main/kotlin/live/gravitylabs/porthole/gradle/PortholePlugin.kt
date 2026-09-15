@@ -36,11 +36,10 @@ class PortholePlugin : Plugin<Project> {
         }
 
         var configured = false
-        fun once(finalizeDsl: () -> Unit) {
+        fun once(wireAndRegister: () -> Unit) {
             if (configured) return
             configured = true
-            finalizeDsl()
-            registerTasks(target, extension)
+            wireAndRegister()
         }
 
         // Delegated to [AndroidWiring], which is the only class here allowed to
@@ -48,10 +47,20 @@ class PortholePlugin : Plugin<Project> {
         // a project without the Android plugin fails while Gradle is still
         // decorating the class — see that file for why.
         target.plugins.withId("com.android.application") {
-            once { AndroidWiring.application(target, extension) }
+            once {
+                // Only an application module gets portholeStart (GRA-174):
+                // there is no install task on a library to depend on, so
+                // AndroidWiring.library below hands registerTasks no variant
+                // names at all and it registers nothing extra.
+                val debugVariants = AndroidWiring.application(target, extension)
+                registerTasks(target, extension, debugVariants)
+            }
         }
         target.plugins.withId("com.android.library") {
-            once { AndroidWiring.library(target, extension) }
+            once {
+                AndroidWiring.library(target, extension)
+                registerTasks(target, extension, debugVariants = null)
+            }
         }
 
         target.afterEvaluate {
@@ -64,7 +73,13 @@ class PortholePlugin : Plugin<Project> {
         }
     }
 
-    private fun registerTasks(project: Project, extension: PortholeExtension) {
+    /**
+     * [debugVariants] is non-null only for an application module (see
+     * [AndroidWiring.application]) and is what lets `portholeStart` exist at
+     * all: a library module has no `install<Variant>` task, so there is
+     * nothing for a start task to depend on and none is registered.
+     */
+    private fun registerTasks(project: Project, extension: PortholeExtension, debugVariants: Provider<List<String>>?) {
         val adb = adbProvider(project)
         val connectionPath = project.layout.buildDirectory.file("porthole/connection.json")
 
@@ -113,6 +128,15 @@ class PortholePlugin : Plugin<Project> {
             configFile.set(project.rootProject.layout.projectDirectory.file(".mcp.json"))
             overwrite.set(
                 project.providers.gradleProperty("porthole.overwrite").map { it == "true" },
+            )
+        }
+
+        if (debugVariants != null) {
+            registerPortholeStart(
+                project = project,
+                variants = debugVariants,
+                requestedVariant = project.providers.gradleProperty("porthole.variant"),
+                openUi = project.providers.gradleProperty("porthole.open").map { it != "false" },
             )
         }
     }
