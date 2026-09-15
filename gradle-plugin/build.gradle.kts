@@ -1,6 +1,7 @@
 plugins {
     `kotlin-dsl`
     id("com.gradle.plugin-publish") version "1.3.1"
+    jacoco
 }
 
 group = "live.gravitylabs.porthole"
@@ -176,6 +177,29 @@ tasks.test {
     if (providers.gradleProperty("porthole.agpVersion").isPresent) {
         dependsOn(tasks.named("publishToMavenLocal"))
         systemProperty("porthole.pluginVersion", project.version.toString())
+    }
+
+    // GRA-190: jacoco instruments class files at execution time, so the report
+    // task below has to run after this task produces them, on every `test`
+    // run rather than only when someone remembers to ask for the report by
+    // name. `check` already depends on `test` (kotlin-dsl's own wiring), so
+    // this is what puts the XML under `./gradlew check` too.
+    finalizedBy(tasks.named("jacocoTestReport"))
+}
+
+// GRA-190: coverage for pr.yml's `jvm` Codecov flag. XML only — the HTML
+// report is for a human digging into a red build, same reasoning as the
+// Gradle job's own HTML-reports-on-failure-only step in pr.yml, and nothing
+// here reads it on a green run. `dependsOn(tasks.test)` rather than relying
+// solely on the finalizedBy above: it means `./gradlew jacocoTestReport` run
+// by name on its own (as pr.yml's Gradle job does, straight after
+// `./gradlew check`) still produces a report from a fresh test run instead of
+// silently reporting on stale or absent execution data.
+tasks.jacocoTestReport {
+    dependsOn(tasks.test)
+    reports {
+        xml.required.set(true)
+        html.required.set(false)
     }
 }
 

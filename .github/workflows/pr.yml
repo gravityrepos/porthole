@@ -3,10 +3,18 @@ name: PR
 # One workflow, run on every pull request and on every push to main. There is
 # deliberately no publish path here: this workflow only ever runs tests and
 # checks. It never runs a Gradle publish task, never `npm publish`, never a
-# Vercel deploy, and it carries no registry credentials or other secrets of
-# any kind — that is an explicit acceptance criterion, not an oversight. A
-# future ticket that wants this workflow to also publish needs its own
-# credentials review; it does not get to grow into this one.
+# Vercel deploy, and it carries no registry credentials — that is an explicit
+# acceptance criterion, not an oversight. A future ticket that wants this
+# workflow to also publish needs its own credentials review; it does not get
+# to grow into this one.
+#
+# GRA-190: the one exception to "no secrets" is `secrets.CODECOV_TOKEN`,
+# referenced by name only in the coverage-upload steps below — nothing in
+# this file or in any agent's context ever holds its value. The repo is
+# public, so codecov-action's own tokenless upload is the fallback for as
+# long as the secret is absent; `fail_ci_if_error: false` on every upload
+# step means a missing or invalid token degrades coverage reporting, never
+# the PR itself.
 #
 # The emulator, the AGP compatibility matrix and anything nightly are out of
 # scope on purpose (see GRA-101) — they are slow and belong on their own
@@ -76,6 +84,27 @@ jobs:
       # warnings of until they become the next major-version break.
       - name: ./gradlew check
         run: ./gradlew check --warning-mode all
+
+      # GRA-190: gradle-plugin's own coverage XML is already produced above —
+      # its `jacocoTestReport` task finalizes `test` (gradle-plugin/build.gradle.kts),
+      # so `./gradlew check` already wrote it, pass or fail, before this step
+      # runs. `runtime` has no such wiring: AGP's own generated report task
+      # (`createDebugUnitTestCoverageReport` — the exact name for the AGP
+      # version in gradle/libs.versions.toml, confirmed by running
+      # `./gradlew :runtime:tasks --all` locally rather than assumed) is
+      # invoked here instead, deliberately not finalizing `test` the way
+      # gradle-plugin's does — see that module's build.gradle.kts. `if:
+      # always()`, same reasoning as every other artifact step in this job:
+      # a red suite should still upload whatever coverage it produced.
+      # Measured (missing-input self-check): with the coverage `.exec` file
+      # absent, this task fails the build outright ("input file ... doesn't
+      # exist") rather than silently writing an empty report — the opposite
+      # of gradle-plugin's own `jacocoTestReport`, which SKIPs quietly when
+      # its input is missing. Recorded here because the two report tasks
+      # disagree on this, not because either one changed for it.
+      - name: Coverage report (runtime, JaCoCo XML)
+        if: always()
+        run: ./gradlew :runtime:createDebugUnitTestCoverageReport --warning-mode all
 
       # GRA-159: a green ./gradlew check tells you every test that ran
       # passed, not how many ran. This reads the JUnit XML every JVM test
@@ -157,6 +186,36 @@ jobs:
           name: gradle-junit-xml
           path: '**/build/test-results/'
           if-no-files-found: warn
+
+      # GRA-190: one flag, two XML files — gradle-plugin's jacoco report and
+      # runtime's AGP-generated one, both from the steps above. `if:
+      # always()`: a red suite still uploads whatever coverage it produced,
+      # matching `codecov.yml`'s `require_ci_to_pass: false`. No token
+      # secret is ever printed or read by this workflow — it is handed to
+      # the action by reference (`secrets.CODECOV_TOKEN`) and the action
+      # itself falls back to tokenless upload if the secret is absent, which
+      # is the expected path until the founder creates it in repo settings.
+      # `fail_ci_if_error: false`: a Codecov outage must never fail a PR —
+      # this check is informational (`codecov.yml`) and the upload should be
+      # too. `disable_search: true`: codecov-action's own `files:` input
+      # description says its named files "will be added to the coverage
+      # files found for upload" — it is additive to a repo-wide auto-search,
+      # not exclusive, unless search is turned off. Left on, this step could
+      # also sweep up whatever the Node job's coverage looks like on a
+      # shared runner, or a stray report elsewhere in the tree, and tag it
+      # `jvm` too. Confirmed from the action's own action.yml
+      # (`disable_search`'s description: "Disable search for coverage
+      # files. This is helpful when specifying what files you want to
+      # upload") rather than assumed.
+      - name: Upload coverage to Codecov (jvm)
+        if: always()
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: jvm
+          files: gradle-plugin/build/reports/jacoco/test/jacocoTestReport.xml,runtime/build/reports/coverage/test/debug/report.xml
+          disable_search: true
+          fail_ci_if_error: false
 
       # GRA-164: unit tests for the parsing this check relies on (thousands-
       # separator rejection especially — see the checker's own file for
@@ -291,11 +350,29 @@ jobs:
       # straight, with the same config each package already has, runs the
       # exact same tests the two scripts above run — only the reporter
       # changes, never the test selection.
+      # GRA-190: coverage flags added to these same two invocations rather
+      # than a third command — the JUnit reporter flags and output paths
+      # above are unchanged, byte-identical to what GRA-159 already relies
+      # on, so the README drift checks below still read the same XML they
+      # always did. `--coverage.reportsDirectory` rather than the v8
+      # provider's own default (`coverage/`) so the server and UI reports
+      # land in one predictable place — `mcp/coverage/{server,ui}/` — for
+      # the Codecov upload steps further down to name explicitly.
+      # `--coverage.reporter=lcov` only: no `text` reporter, so this adds no
+      # console output to a step whose job is the JUnit XML, not a coverage
+      # summary a human would read here (Codecov renders that instead).
+      # Exclusions (test files, mcp/src/testing/**, dist/**, and — measured
+      # necessary, not just mcp/ui/dist/** — the whole of ui/** from the
+      # server's own report, since v8's `coverage.all` default otherwise
+      # walks mcp/ui/src/** too and reports it as untested "server" code)
+      # live in mcp/vitest.config.ts and mcp/ui/vite.config.ts, not here —
+      # per the ticket, config rather than the command line, so they apply
+      # the same way to a local `--coverage` run as to this step.
       - name: npm test (server suite, + JUnit XML)
-        run: npx vitest run --reporter=default --reporter=junit --outputFile=test-results/server-junit.xml
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=test-results/server-junit.xml --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage/server
       - name: npm run test:ui (+ JUnit XML)
         working-directory: mcp/ui
-        run: npx vitest run --reporter=default --reporter=junit --outputFile=../test-results/ui-junit.xml
+        run: npx vitest run --reporter=default --reporter=junit --outputFile=../test-results/ui-junit.xml --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=../coverage/ui
 
       # Same instrument as the Gradle job, same reason: a green matrix leg
       # here is exactly where the server suite's one real skip (the
@@ -372,6 +449,42 @@ jobs:
           name: vitest-test-results-${{ matrix.os }}
           path: mcp/test-results/
           if-no-files-found: warn
+
+      # GRA-190: one Codecov upload per flag, per OS leg — three legs upload
+      # the same two flags across this matrix, and Codecov merges same-flag
+      # uploads rather than treating a later one as a replacement. `files:`
+      # names the exact lcov path each vitest invocation above was just told
+      # to write (`--coverage.reportsDirectory`), relative to the repo root
+      # regardless of this job's own `working-directory: mcp` default — a
+      # `uses:` step (unlike a `run:` step) does not inherit that default at
+      # all, and codecov-action's own `directory` input defaults to "the
+      # current working directory", which for a `uses:` step is
+      # `GITHUB_WORKSPACE`. `if: always()` and `fail_ci_if_error: false` for
+      # the same reasons as the Gradle job's upload: a red suite still
+      # uploads what it produced, and a Codecov outage never fails a PR.
+      # `disable_search: true`: without it, `files:` is additive to a
+      # repo-wide auto-search (confirmed in the action's own action.yml —
+      # see the Gradle job's upload comment above), so the `server` step
+      # could also sweep up `mcp/coverage/ui/lcov.info`, and vice versa,
+      # tagging one suite's coverage with the other's flag.
+      - name: Upload coverage to Codecov (server)
+        if: always()
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: server
+          files: mcp/coverage/server/lcov.info
+          disable_search: true
+          fail_ci_if_error: false
+      - name: Upload coverage to Codecov (ui)
+        if: always()
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: ui
+          files: mcp/coverage/ui/lcov.info
+          disable_search: true
+          fail_ci_if_error: false
 
       # GRA-164: same defect as the Gradle job's summary step above — a
       # number a human has to copy into README.md by hand goes stale, and

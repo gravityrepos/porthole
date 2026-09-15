@@ -1478,9 +1478,25 @@ Both jobs finish with `git diff --exit-code`, so a build step that
 regenerates a file this repo commits (`site/api`, if `apiDocs` ever gets
 wired into `check`) fails the PR instead of drifting in silently.
 
-No job in this workflow ever runs a publish task, and the workflow has no
-secrets — the emulator, the AGP compatibility matrix and anything nightly are
-separate, slower checks that live outside this workflow entirely.
+No job in this workflow ever runs a publish task, and the only secret it
+references is the coverage token described below — the emulator, the AGP
+compatibility matrix and anything nightly are separate, slower checks that
+live outside this workflow entirely.
+
+**Coverage.** Both jobs also upload coverage to Codecov: the Gradle job
+uploads JaCoCo XML for `gradle-plugin` and `runtime` under the `jvm` flag
+(`runtime-noop` has no tests worth measuring and is excluded); the Node job
+uploads each vitest suite's own `lcov` report under `server` and `ui`, from
+the same `--coverage` run that already produces the JUnit XML the checks
+above read, on every leg. Reports upload with `if: always()`, so a red suite
+still shows whatever coverage it produced. Both the project and patch status
+checks are `informational: true` in `codecov.yml` — they appear on every PR
+but cannot fail one, until the founder turns that off deliberately — and
+`fail_ci_if_error: false` on every upload means a Codecov outage degrades
+reporting, never the PR itself. The upload reads `secrets.CODECOV_TOKEN` by
+name only; the repo is public, so Codecov's tokenless upload is the fallback
+for as long as a maintainer has not created that secret in the repository's
+own settings, which is the only place its value ever exists.
 
 **The exec-bit rule.** A `*.sh` or `gradlew` committed from a Windows checkout
 arrives in the index as mode `100644` — Windows has no such bit to record —
