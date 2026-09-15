@@ -112,6 +112,35 @@ function eventsPath(dir: string): string {
   return path.join(dir, "events.ndjson");
 }
 
+/**
+ * This directory holds redacted-but-real app data (logcat lines, SQL bind
+ * values, HTTP headers) sitting on disk for up to [DEFAULT_RETENTION]'s
+ * `maxAgeMs`, rather than in a process's memory that dies with it — a
+ * different promise to a user than the in-memory ring ever made, per the
+ * ticket's own security note. Owner-only permissions are the cheap half of
+ * making that true.
+ *
+ * POSIX only. `fs`'s `mode` option is Unix permission bits; Windows/NTFS has
+ * no such concept (it uses ACLs instead), and Node's own docs say `mode` is
+ * "Not supported on Windows" — passing one there is not wrong, just inert,
+ * so every call site below gates on this rather than silently no-op'ing on
+ * one platform without saying so.
+ */
+const isPosix = process.platform !== "win32";
+
+/** Owner rwx only — the sessions root and every session directory under it (recursive `mkdir` applies this to each level it creates). */
+const SESSION_DIR_MODE = 0o700;
+/** Owner rw only — `meta.json` and `events.ndjson`. Applied at file creation; an already-existing file keeps whatever mode it was created with. */
+const SESSION_FILE_MODE = 0o600;
+
+function dirOptions(): { recursive: true; mode?: number } {
+  return isPosix ? { recursive: true, mode: SESSION_DIR_MODE } : { recursive: true };
+}
+
+function fileOptions(): { mode?: number } {
+  return isPosix ? { mode: SESSION_FILE_MODE } : {};
+}
+
 // ---------------------------------------------------------------------------
 // meta.json
 // ---------------------------------------------------------------------------
@@ -193,6 +222,15 @@ export class SessionWriter {
    * session's, not just what this instance has seen.
    */
   async open(hello: HelloLike): Promise<void> {
+    // PORTHOLE_SESSIONS=0 is the off switch: `dir` is left null, exactly the
+    // "no root configured" shape `append()` already treats as a silent
+    // no-op, and neither `mkdir` nor a retention sweep ever touches the
+    // sessions root. Checked first, and every time — not cached at
+    // construction — so it stays cheap to reason about (one env read, one
+    // branch) rather than a second piece of state that could drift from the
+    // environment it mirrors.
+    if (!sessionsEnabled()) return;
+
     const identity = sessionIdentity(hello);
     const dir = path.join(this.root, sessionDirName(identity));
     if (this.dir === dir) return;
@@ -200,7 +238,7 @@ export class SessionWriter {
     await this.flush();
 
     this.dir = dir;
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, dirOptions());
     this.meta = (await readMeta(dir)) ?? {
       packageName: identity.packageName,
       deviceId: identity.deviceId,
@@ -214,7 +252,15 @@ export class SessionWriter {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    await writeFile(metaPath(dir), JSON.stringify(this.meta, null, 2));
+    await writeFile(metaPath(dir), JSON.stringify(this.meta, null, 2), fileOptions());
+
+    // Every new (or resumed) session is a natural, cheap point to sweep: it
+    // is already the moment this writer is about to grow the directory it
+    // would prune from, and it means retention runs on the same cadence a
+    // long-lived MCP server actually sees `hello`s, not on a separate timer
+    // this ticket does not need. `activeDir` is *this* session, just opened
+    // above — never the one about to be pruned, no matter its age or size.
+    await enforceRetention(this.root, retentionOptionsFromEnv(), this.currentDir());
   }
 
   /**
@@ -259,8 +305,8 @@ export class SessionWriter {
     this.queue = [];
 
     const lines = batch.map((event) => JSON.stringify(event)).join("\n") + "\n";
-    await mkdir(dir, { recursive: true });
-    await appendFile(eventsPath(dir), lines, "utf8");
+    await mkdir(dir, dirOptions());
+    await appendFile(eventsPath(dir), lines, { encoding: "utf8", ...fileOptions() });
 
     const meta = this.meta ?? (await readMeta(dir));
     if (meta) {
@@ -271,7 +317,7 @@ export class SessionWriter {
       }
       meta.updatedAt = Date.now();
       this.meta = meta;
-      await writeFile(metaPath(dir), JSON.stringify(meta, null, 2));
+      await writeFile(metaPath(dir), JSON.stringify(meta, null, 2), fileOptions());
     }
   }
 
@@ -519,6 +565,47 @@ export const DEFAULT_RETENTION: RetentionOptions = {
   maxBytes: 500 * 1024 * 1024,
   maxAgeMs: 7 * 24 * 60 * 60 * 1000,
 };
+
+/**
+ * The env half of retention config — `SessionWriter.open()`'s only caller of
+ * `enforceRetention`, so this is where the override actually lands. The
+ * `porthole {}` DSL half (a Gradle-side setting reaching the MCP server) is
+ * explicitly **not** part of this ticket; env vars are the whole mechanism
+ * for now, and are not superseded by the DSL arriving later — that would be
+ * a second source of truth for the same two numbers.
+ *
+ * Missing, empty or malformed values (`""`, `"abc"`, a negative number, `0`)
+ * all fall back to [DEFAULT_RETENTION] rather than producing a retention
+ * policy that prunes everything or nothing by accident — a typo in an env
+ * var should degrade to "the documented default", not to undefined
+ * behaviour.
+ */
+export function retentionOptionsFromEnv(): RetentionOptions {
+  const maxBytes = parsePositiveInt(process.env.PORTHOLE_SESSIONS_MAX_BYTES);
+  const maxAgeDays = parsePositiveInt(process.env.PORTHOLE_SESSIONS_MAX_AGE_DAYS);
+  return {
+    maxBytes: maxBytes ?? DEFAULT_RETENTION.maxBytes,
+    maxAgeMs: maxAgeDays !== undefined ? maxAgeDays * 24 * 60 * 60 * 1000 : DEFAULT_RETENTION.maxAgeMs,
+  };
+}
+
+/** A positive integer, or `undefined` for anything that is not one — missing, empty, `NaN`, zero, negative or fractional-but-non-finite input all collapse to "no override". */
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+/**
+ * `PORTHOLE_SESSIONS=0` is the documented off switch (README's "Sessions on
+ * disk" section): any other value, including unset, leaves writing on. This
+ * is read fresh on every `open()` call rather than cached, so a test (or a
+ * host that changes its own environment) never has to worry about import
+ * order.
+ */
+export function sessionsEnabled(): boolean {
+  return process.env.PORTHOLE_SESSIONS !== "0";
+}
 
 interface SessionDirInfo {
   dir: string;

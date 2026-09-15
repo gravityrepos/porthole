@@ -3,7 +3,7 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_RETENTION,
   SessionWriter,
@@ -12,8 +12,10 @@ import {
   fillWindowFromDisk,
   findSessionsForIdentity,
   readSessionWindow,
+  retentionOptionsFromEnv,
   sessionDirName,
   sessionIdentity,
+  sessionsEnabled,
   sessionsRoot,
   type SessionEvent,
 } from "./sessions.js";
@@ -182,6 +184,37 @@ describe("SessionWriter", () => {
     const content = await readFile(path.join(dirBefore!, "events.ndjson"), "utf8");
     expect(content.trim().split("\n")).toHaveLength(1);
   });
+
+  it(
+    "creates the session directory and files owner-only on POSIX; on Windows, mode bits are not set " +
+      "(NTFS has no such concept — see sessions.ts's isPosix comment)",
+    async () => {
+      const root = await tmpRoot();
+      const writer = new SessionWriter(root, 60_000);
+      await writer.open(HELLO);
+      const dir = writer.currentDir()!;
+      writer.append(event(0, 1_000));
+      await writer.flush();
+
+      const dirStat = await stat(dir);
+      const metaStat = await stat(path.join(dir, "meta.json"));
+      const eventsStat = await stat(path.join(dir, "events.ndjson"));
+
+      // Branched rather than `it.skipIf`, per this project's own lesson
+      // (adb.test.ts): a skipped-on-one-platform test means that platform's
+      // behaviour is never actually exercised anywhere, and nothing notices
+      // if it silently regresses. Both branches run and both assert
+      // something real for their platform.
+      if (process.platform === "win32") {
+        expect(dirStat.isDirectory()).toBe(true);
+        expect(eventsStat.isFile()).toBe(true);
+      } else {
+        expect(dirStat.mode & 0o777).toBe(0o700);
+        expect(metaStat.mode & 0o777).toBe(0o600);
+        expect(eventsStat.mode & 0o777).toBe(0o600);
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -474,6 +507,135 @@ describe("enforceRetention", () => {
     const result = await enforceRetention(path.join(root, "does-not-exist"), DEFAULT_RETENTION);
     expect(result.prunedDirs).toEqual([]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// env wiring: the off switch and the retention overrides SessionWriter.open()
+// actually applies (not just what enforceRetention accepts as a parameter)
+// ---------------------------------------------------------------------------
+
+describe("env wiring", () => {
+  const ENV_KEYS = ["PORTHOLE_SESSIONS", "PORTHOLE_SESSIONS_MAX_BYTES", "PORTHOLE_SESSIONS_MAX_AGE_DAYS"] as const;
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+    for (const key of ENV_KEYS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  async function makeOldSession(root: string, name: string, ageMs: number): Promise<string> {
+    const dir = path.join(root, name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "events.ndjson"), "x".repeat(10));
+    const updatedAt = Date.now() - ageMs;
+    await writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify({
+        packageName: "com.example.shop",
+        deviceId: "abc123",
+        startedAt: 0,
+        device: "d",
+        sdkInt: 1,
+        versionName: null,
+        firstT: 0,
+        lastT: 0,
+        eventCounts: {},
+        createdAt: updatedAt,
+        updatedAt,
+      }),
+    );
+    return dir;
+  }
+
+  describe("retentionOptionsFromEnv (malformed/missing/empty input, self-check a)", () => {
+    it("falls back to DEFAULT_RETENTION when neither var is set", () => {
+      expect(retentionOptionsFromEnv()).toEqual(DEFAULT_RETENTION);
+    });
+
+    it("falls back on an empty string", () => {
+      process.env.PORTHOLE_SESSIONS_MAX_BYTES = "";
+      expect(retentionOptionsFromEnv().maxBytes).toBe(DEFAULT_RETENTION.maxBytes);
+    });
+
+    it("falls back on a non-numeric value", () => {
+      process.env.PORTHOLE_SESSIONS_MAX_AGE_DAYS = "banana";
+      expect(retentionOptionsFromEnv().maxAgeMs).toBe(DEFAULT_RETENTION.maxAgeMs);
+    });
+
+    it("falls back on zero and on a negative number — a 0-byte or negative budget is not a real policy", () => {
+      process.env.PORTHOLE_SESSIONS_MAX_BYTES = "0";
+      expect(retentionOptionsFromEnv().maxBytes).toBe(DEFAULT_RETENTION.maxBytes);
+      process.env.PORTHOLE_SESSIONS_MAX_BYTES = "-5";
+      expect(retentionOptionsFromEnv().maxBytes).toBe(DEFAULT_RETENTION.maxBytes);
+    });
+
+    it("honours a real override, converting days to milliseconds", () => {
+      process.env.PORTHOLE_SESSIONS_MAX_AGE_DAYS = "1";
+      expect(retentionOptionsFromEnv().maxAgeMs).toBe(24 * 60 * 60 * 1000);
+    });
+
+    it("honours a real byte-budget override verbatim, no unit conversion", () => {
+      process.env.PORTHOLE_SESSIONS_MAX_BYTES = "1000";
+      expect(retentionOptionsFromEnv().maxBytes).toBe(1000);
+    });
+  });
+
+  describe("sessionsEnabled", () => {
+    it("is enabled when unset", () => {
+      expect(sessionsEnabled()).toBe(true);
+    });
+
+    it("is disabled only by the literal string \"0\"", () => {
+      process.env.PORTHOLE_SESSIONS = "0";
+      expect(sessionsEnabled()).toBe(false);
+    });
+
+    it("stays enabled for any other value, including a falsy-looking one like \"false\"", () => {
+      process.env.PORTHOLE_SESSIONS = "false";
+      expect(sessionsEnabled()).toBe(true);
+    });
+  });
+
+  it("PORTHOLE_SESSIONS=0 makes open() a no-op: no directory, no meta.json, nothing to append into", async () => {
+    process.env.PORTHOLE_SESSIONS = "0";
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 5);
+
+    await writer.open(HELLO);
+
+    expect(writer.currentDir()).toBeNull();
+    expect(await readdir(root)).toEqual([]);
+    // append() after a disabled open() must stay the same silent no-op it
+    // already is before any open() at all — proved above, re-proved here so
+    // the off switch is shown to actually reach that guard, not bypass it.
+    expect(() => writer.append(event(0, 100))).not.toThrow();
+    await writer.flush();
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it(
+    "open() applies PORTHOLE_SESSIONS_MAX_AGE_DAYS to its own retention sweep, not just to a caller of " +
+      "enforceRetention directly",
+    async () => {
+      const root = await tmpRoot();
+      const old = await makeOldSession(root, "ancient", 3 * 24 * 60 * 60 * 1000); // 3 days old
+      process.env.PORTHOLE_SESSIONS_MAX_AGE_DAYS = "1"; // narrower than the 7-day default
+
+      const writer = new SessionWriter(root, 60_000);
+      await writer.open(HELLO); // a new, distinct session -- "ancient" is not its own activeDir
+
+      await expect(stat(old)).rejects.toThrow();
+      // The session open() itself just created must survive its own sweep.
+      await expect(stat(writer.currentDir()!)).resolves.toBeDefined();
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
