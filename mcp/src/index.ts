@@ -33,6 +33,7 @@ import {
   type SessionEvent,
 } from "./sessions.js";
 import { buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, writeSavedTrace } from "./save.js";
+import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -151,6 +152,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   // branch only runs when nothing was injected.
   const device = options.device ?? new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory));
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
+  // GRA-55: one watermark per process (see watermark.ts's module doc comment
+  // for why not per connection), re-opened against whichever session
+  // directory is current every time a tool runs — cheap, since `open()` is a
+  // no-op once the directory has not changed.
+  const watermark = new Watermark();
 
   const server = new McpServer({
     name: "porthole",
@@ -177,8 +183,22 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
    * exists would be exactly the untested-claim shape this ticket exists to
    * end, just moved from "untested" to "vacuous".
    */
-  function ok(summary: string, payload: unknown): ToolResult {
-    return { content: joinSummaryAndPayload(summary, payload) };
+  /**
+   * GRA-55: the one place every successful tool result passes through, which
+   * is what "the banner goes on every tool, built in one place" (the EM's
+   * own condition for this ticket) means concretely — no per-tool call adds
+   * it, so no tool can forget it the way the ticket's own history names as
+   * the risk ("the one tool that forgets is the one the agent was using
+   * when the ANR happened"). `attachSinceLastAndBanner()` does the actual
+   * work; this function stays a thin async wrapper so every existing call
+   * site (`return ok(summary, payload)`, inside an already-`async` handler)
+   * keeps compiling unchanged — an `async` function returning a `Promise`
+   * is flattened by the caller's own `await`/`return` exactly as returning
+   * the value directly would be.
+   */
+  async function ok(summary: string, payload: unknown): Promise<ToolResult> {
+    const { summary: withBanner, payload: withSinceLast } = await attachSinceLastAndBanner(summary, payload);
+    return { content: joinSummaryAndPayload(withBanner, withSinceLast) };
   }
 
   /**
@@ -327,12 +347,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .int()
       .optional()
       .describe("Absolute end, same clock. Defaults to the latest event."),
+    // GRA-55: only consulted when none of sinceMs/from/to above are given —
+    // same precedence sinceMs already has against from/to. "last" is the
+    // default rather than a value someone has to ask for, because the whole
+    // point is that an agent should not have to guess a lookback.
+    since: z
+      .enum(["last", "all"])
+      .optional()
+      .describe(
+        '"last" (the default when sinceMs/from/to are all omitted) starts where the previous ' +
+          "window-taking tool call on this session left off, so nothing since is missed and " +
+          'nothing already examined is re-read. On the very first call this session has ever made, ' +
+          '"last" behaves exactly like today\'s default (the whole buffer). "all" is the reset: the ' +
+          "whole buffer plus disk, same as every call before this existed, and it clears the " +
+          "watermark that \"last\" tracks.",
+      ),
   };
 
   interface Window {
     sinceMs?: number;
     from?: number;
     to?: number;
+    since?: "last" | "all";
   }
 
   /** The span actually examined, resolved against the buffer so it can be quoted back. */
@@ -392,6 +428,196 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       from,
       to,
     });
+  }
+
+  /** The session directory `watermark` should currently be reading/writing — the same one `mergeWithDisk` already uses, so the two never disagree about which session is "current". */
+  function currentWatermarkDir(): string | null {
+    return device.sessions?.currentDir() ?? null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // GRA-55: since: "last", and the banner every tool result carries
+  // ---------------------------------------------------------------------------
+
+  /** What a resolved window carries once `since` has been folded in — `resolveWindow`'s own result plus whether this call was `since: "last"`-shaped, which `findings`' classification needs. */
+  interface ResolvedWindow {
+    from: number;
+    to: number;
+    ms: number;
+    /** True for both "this call explicitly asked for since: last" and "no window was given at all", since the latter defaults to the former. False for an explicit sinceMs/from/to, and for since: "all". */
+    sinceLast: boolean;
+    /** AC5: true only for a since:"last" call with no watermark yet — "behaves exactly as today's default and says so in the summary line" is this flag reaching the caller. */
+    firstEver: boolean;
+  }
+
+  /**
+   * Folds `since` into `resolveWindow`, and records `lastExaminedT` on every
+   * resolution — the one chokepoint every window-taking tool (`findings`,
+   * `save_moment`, `recompositions`, `frames`, `blocking`, `logs`,
+   * `timeline`) calls instead of `resolveWindow` directly, so "since: last
+   * updates the watermark" cannot be true for six tools and forgotten by a
+   * seventh.
+   *
+   * Explicit `sinceMs`/`from`/`to` wins outright, exactly as it always has —
+   * `since` only ever supplies a default for when none of those were given.
+   *
+   * `since: "last"` with nothing yet in the watermark behaves exactly like
+   * today's default (AC5): the whole buffer, same as `resolveWindow({})`.
+   * With a watermark and new events since it, the window is `[lastExaminedT,
+   * newest]` — genuinely new material only. With a watermark and *nothing*
+   * new (the AC1 case: two calls back to back with no interaction between
+   * them), there is no new material to narrow to, and narrowing there
+   * anyway would return an empty window whose zero findings would then look
+   * exactly like "everything resolved" — the opposite of AC1's "the second
+   * call marks everything ongoing." So this falls back to re-asking the
+   * exact window the last `findings` call covered (its digest, if there is
+   * one): the same question again, honestly, which is what "nothing
+   * happened" actually means here.
+   */
+  async function resolveWindowSince(w: Window): Promise<ResolvedWindow | null> {
+    await watermark.open(currentWatermarkDir());
+
+    if (w.sinceMs !== undefined || w.from !== undefined || w.to !== undefined) {
+      const span = resolveWindow(w);
+      if (span) await watermark.recordExamined(span.to);
+      return span ? { ...span, sinceLast: false, firstEver: false } : null;
+    }
+
+    const since = w.since ?? "last";
+    if (since === "all") {
+      await watermark.reset();
+      const span = resolveWindow({});
+      if (span) await watermark.recordExamined(span.to);
+      return span ? { ...span, sinceLast: false, firstEver: false } : null;
+    }
+
+    const state = watermark.get();
+    if (state.lastExaminedT === null) {
+      // AC5: no watermark yet — the whole buffer, exactly as if `since` did
+      // not exist. `firstEver: true` is what lets the caller say so.
+      const span = resolveWindow({});
+      if (span) await watermark.recordExamined(span.to);
+      return span ? { ...span, sinceLast: true, firstEver: true } : null;
+    }
+
+    const buffered = timeline.buffer();
+    const liveNewest = buffered.length > 0 ? buffered[buffered.length - 1].t : null;
+    if (liveNewest !== null && liveNewest > state.lastExaminedT) {
+      // Exclusive lower bound: `lastExaminedT` was the `to` of whatever
+      // window was examined last, and every window here (like
+      // `resolveWindow`'s own) treats its bounds as inclusive. Starting the
+      // next one at the same value would re-examine that one boundary event
+      // twice across two consecutive since:"last" windows — harmless for a
+      // raw event count, but exactly the kind of double-count that would
+      // make a finding resting on that single event look "still happening"
+      // one call after it actually stopped.
+      const from = state.lastExaminedT + 1;
+      const span = { from, to: liveNewest, ms: Math.max(0, liveNewest - from) };
+      await watermark.recordExamined(span.to);
+      return { ...span, sinceLast: true, firstEver: false };
+    }
+
+    if (state.digest) {
+      const { from, to } = state.digest.window;
+      return { from, to, ms: Math.max(0, to - from), sinceLast: true, firstEver: false };
+    }
+
+    // Nothing new, and nothing to fall back to (a window-taking tool other
+    // than `findings` was the only thing ever called) — an honest
+    // zero-width window rather than a guess.
+    return { from: state.lastExaminedT, to: state.lastExaminedT, ms: 0, sinceLast: true, firstEver: false };
+  }
+
+  /** The structured half of the banner (ruling 5's "an agent that has to regex a sentence to know whether to act is a worse agent"). */
+  interface SinceLast {
+    errors: number;
+    firstAt: number;
+    lastAt: number;
+  }
+
+  /**
+   * The banner's actual construction: every error-severity finding produced
+   * by the events between `lastReportedErrorT` (exclusive, so nothing is
+   * ever shown twice) and the newest event this process currently knows
+   * about. Advances `lastReportedErrorT` whenever it looks — including when
+   * it finds nothing to report — so a quiet stretch does not get re-scanned
+   * from the same old boundary on every subsequent call.
+   */
+  async function errorBanner(): Promise<{ banner: string | null; sinceLast: SinceLast | null }> {
+    const buffered = timeline.buffer();
+    const liveNewest = buffered.length > 0 ? buffered[buffered.length - 1].t : null;
+    const state = watermark.get();
+
+    if (liveNewest === null) {
+      // Nothing buffered at all yet — there is nothing to report on, and
+      // nothing to seed either (there is no `t` to seed it to). Left null,
+      // so the first call that actually has something buffered is the one
+      // that decides whether it is worth reporting.
+      return { banner: null, sinceLast: null };
+    }
+    if (state.lastReportedErrorT !== null && liveNewest <= state.lastReportedErrorT) {
+      return { banner: null, sinceLast: null };
+    }
+
+    // `lastReportedErrorT === null` (this process has never reported
+    // anything) is treated as "everything currently buffered counts as
+    // unreported" rather than silently seeding to now — a call whose very
+    // first look at the world finds an error already sitting there should
+    // say so, not swallow it just because no earlier call happened to check
+    // first. `from: 0` reaches back to the start of whatever this process
+    // can see (the live buffer, widened by `mergeWithDisk`'s own disk
+    // fallback), the same "no prior context" floor `resolveWindow`'s own
+    // default uses.
+    const from = state.lastReportedErrorT === null ? 0 : state.lastReportedErrorT + 1;
+    const merged = await mergeWithDisk(from, liveNewest);
+    const events = merged.events as unknown as DeviceEvent[];
+    if (events.length === 0) {
+      await watermark.recordReportedErrorT(liveNewest);
+      return { banner: null, sinceLast: null };
+    }
+
+    const trace = buildTrace({
+      scenario: "since-last-banner",
+      events,
+      hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+      durationMs: liveNewest - from,
+      withEvents: false,
+    });
+    const errorFindings = trace.findings.filter((f) => f.severity === "error");
+    await watermark.recordReportedErrorT(liveNewest);
+    if (errorFindings.length === 0) {
+      return { banner: null, sinceLast: null };
+    }
+
+    return {
+      banner: buildBanner(errorFindings),
+      sinceLast: {
+        errors: errorFindings.reduce((sum, f) => sum + (f.count ?? 1), 0),
+        firstAt: events[0].t,
+        lastAt: events[events.length - 1].t,
+      },
+    };
+  }
+
+  /**
+   * `ok()`'s actual work (see that function's own comment for why it is
+   * split out): opens the watermark for whichever session is current,
+   * builds the banner, prefixes it onto the summary, and attaches the
+   * structured `sinceLast` field to the payload — every payload here is a
+   * plain object, so the spread below always applies.
+   */
+  async function attachSinceLastAndBanner(
+    summary: string,
+    payload: unknown,
+  ): Promise<{ summary: string; payload: unknown }> {
+    await watermark.open(currentWatermarkDir());
+    const { banner, sinceLast } = await errorBanner();
+    const withBanner = banner ? `${banner}\n${summary}` : summary;
+    const withSinceLast =
+      payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), sinceLast }
+        : payload;
+    return { summary: withBanner, payload: withSinceLast };
   }
 
   // ---------------------------------------------------------------------------
@@ -532,8 +758,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to }): Promise<ToolResult> => {
-      const span = resolveWindow({ sinceMs, from, to });
+    async ({ sinceMs, from, to, since }): Promise<ToolResult> => {
+      const span = await resolveWindowSince({ sinceMs, from, to, since });
       if (!span) {
         // resolveWindow returns null whenever the ring is empty, which is not
         // the same thing as the device being unreachable — hello can have
@@ -644,6 +870,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       });
 
       const findings = trace.findings.map(withFollowUp);
+
+      // GRA-55: classified against whatever the *previous* findings call
+      // left in the watermark, before this call's own digest overwrites it
+      // — order matters here, `recordDigest` below must come after reading
+      // `previousDigest`, not before.
+      const previousDigest = watermark.get().digest;
+      const classified = classify(findings, previousDigest, span.sinceLast, {
+        from: span.from,
+        to: span.to,
+      });
+      await watermark.recordDigest({
+        findings: trace.findings.map((f) => ({ id: f.id, count: f.count ?? 1 })),
+        window: { from: span.from, to: span.to },
+        sinceLast: span.sinceLast,
+      });
+      const classificationNote = classified.counts
+        ? ` (${classificationSummary(classified.counts)})`
+        : classified.skippedNote
+          ? ` (${classified.skippedNote})`
+          : "";
+      // AC5: "since: 'last' on a first-ever call behaves as the current
+      // default and says so" — this is the "says so".
+      const firstEverNote = span.firstEver
+        ? 'First call this session: "since": "last" has nothing to start from yet, so this is the ' +
+          "whole buffer, the same default as before since existed. "
+        : "";
+
       const payload = {
         window: { from: span.from, to: span.to, ms: span.ms },
         // The merged (disk + memory) recorded extent, clipped to the window
@@ -654,7 +907,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         clippedMs: clipped,
         eventsExamined: events.length,
         metrics: trace.metrics,
-        findings,
+        // Classified findings (new/ongoing/resolved, per `classify()`'s own
+        // comment on when that runs) rather than the plain list — `resolved`
+        // entries can make this longer than `findings.length` below, which
+        // stays keyed on what is *currently* true, not on what changed.
+        findings: classified.findings,
         connected,
         exitedProcess,
       };
@@ -669,11 +926,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       if (findings.length === 0) {
         return ok(
           notice +
+            firstEverNote +
             (shortfall > span.ms * 0.5
               ? `Almost none of that window is in the buffer${missing} This is not a quiet app; ` +
                 "it is a question the buffer cannot answer."
               : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
-                `(${events.length} events). That is not the same as the app being fast.${missing}`),
+                `(${events.length} events). That is not the same as the app being fast.${missing}`) +
+            classificationNote,
           payload,
         );
       }
@@ -689,8 +948,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       return ok(
         notice +
+          firstEverNote +
           `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
-          `Worst: ${worst.title} [${worst.confidence}].${missing}`,
+          `Worst: ${worst.title} [${worst.confidence}].${missing}${classificationNote}`,
         payload,
       );
     },
@@ -1017,8 +1277,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ sinceMs, from, to, scenario, out }): Promise<ToolResult> => {
-      const span = resolveWindow({ sinceMs, from, to });
+    async ({ sinceMs, from, to, since, scenario, out }): Promise<ToolResult> => {
+      const span = await resolveWindowSince({ sinceMs, from, to, since });
       if (!span) {
         // Same shape as ask_system_trace's empty-ring refusal: there is
         // genuinely no window to save here, nothing partial to write.
@@ -1283,8 +1543,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ screen, sinceMs, from, to, limit }): Promise<ToolResult> =>
-      call<{
+    async ({ screen, sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+      // GRA-55: resolved here, on the MCP side, rather than forwarding
+      // sinceMs/since to the device — `since: "last"` needs the watermark,
+      // which only this process holds. Falls back to the caller's own raw
+      // sinceMs/from/to, unchanged, when nothing can be resolved (an empty
+      // buffer, no watermark yet) — exactly today's behaviour for that case.
+      const resolved = await resolveWindowSince({ sinceMs, from, to, since });
+      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      return call<{
         nodes: Array<{
           name: string;
           count: number;
@@ -1293,7 +1560,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         totalNodes?: number;
         truncated?: boolean;
         unattributedWrites: Array<{ key: string; count: number }>;
-      }>("recompositions", { screen, sinceMs, from, to, limit: limit ?? 50 }, (report) => {
+      }>("recompositions", { screen, ...windowArgs, limit: limit ?? 50 }, (report) => {
         if (report.nodes.length === 0) {
           return "No instrumented composable recomposed in that window.";
         }
@@ -1311,7 +1578,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".") +
           cut
         );
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -1481,8 +1749,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, limit }): Promise<ToolResult> =>
-      call<{
+    async ({ sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+      const resolved = await resolveWindowSince({ sinceMs, from, to, since });
+      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      return call<{
         totalFrames: number;
         jankyFrames: number;
         frameIntervalMs: number;
@@ -1492,7 +1762,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           worstPhase: string;
           firstDraw: boolean;
         }>;
-      }>("frames", { sinceMs, from, to, limit }, (report) => {
+      }>("frames", { ...windowArgs, limit }, (report) => {
         if (report.totalFrames === 0) return "No frames observed yet.";
         const rate = ((report.jankyFrames / report.totalFrames) * 100).toFixed(1);
         const worst = report.worst[0];
@@ -1512,7 +1782,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               `${worst.worstPhase}. Across the worst frames: ${phases}.`
             : "")
         );
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -1541,12 +1812,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, limit }): Promise<ToolResult> =>
-      call<{
+    async ({ sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+      const resolved = await resolveWindowSince({ sinceMs, from, to, since });
+      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      return call<{
         stalls: Array<{ durationMs: number; stack: string }>;
         mainThreadQueries: Array<{ sql: string; elapsedMs: number; kind: string }>;
         stallThresholdMs: number;
-      }>("blocking", { sinceMs, from, to, limit }, (report) => {
+      }>("blocking", { ...windowArgs, limit }, (report) => {
         const parts: string[] = [];
         if (report.stalls.length) {
           const worst = report.stalls[0];
@@ -1563,7 +1836,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           );
         }
         return parts.length ? parts.join(". ") : "Nothing blocked the main thread in this window.";
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -1595,13 +1869,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ level, tag, contains, sinceMs, from, to, limit }): Promise<ToolResult> =>
-      call<{
+    async ({ level, tag, contains, sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+      const resolved = await resolveWindowSince({ sinceMs, from, to, since });
+      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      return call<{
         entries: Array<{ level: string; tag: string; message: string; wallTime: string }>;
         capturing: boolean;
         evicted: number;
         notes: string[];
-      }>("logs", { level, tag, contains, sinceMs, from, to, limit }, (page) => {
+      }>("logs", { level, tag, contains, ...windowArgs, limit }, (page) => {
         if (!page.capturing) {
           return page.notes.join(" ") || "Log capture is not running.";
         }
@@ -1623,7 +1899,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             ? `. Latest error: ${worst.tag}: ${worst.message.split("\n")[0].slice(0, 120)}`
             : ".")
         );
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -1653,11 +1930,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, kinds, limit }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, since, kinds, limit }): Promise<ToolResult> => {
       try {
         // Absolute bounds first, so a window quoted from another tool selects the
         // same span here. sinceMs stays as the convenience for "recently".
-        const span = resolveWindow({ sinceMs, from, to });
+        const span = await resolveWindowSince({ sinceMs, from, to, since });
 
         // GRA-53: the third consumer of the same merge `findings` and
         // `what_was_happening` already use — deliberately not a third

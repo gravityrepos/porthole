@@ -545,6 +545,67 @@ Paste that at your assistant. `recompositions`, `logs` and `timeline` all take
 absolute `from`/`to`, so it asks about the moment you actually saw instead of
 guessing a lookback and hoping the windows overlap.
 
+### What happened while you were not looking
+
+MCP has no push — a server cannot interrupt an agent's turn. The gap this
+leaves is the ordinary agentic loop: ask a question, think for a while, ask
+another. In between, the app can ANR and nothing says so; the next call
+either misses it or, worse, re-reports the same three findings it already
+investigated.
+
+Every window-taking tool (`findings`, `save_moment`, `recompositions`,
+`frames`, `blocking`, `logs`, `timeline`) accepts a `since` parameter next to
+`sinceMs`/`from`/`to`, and it is the default whenever none of those three are
+given:
+
+- `since: "last"` (the default) starts where the previous window-taking tool
+  call on this session left off, so a call with no arguments never misses
+  anything and never re-reads what was already examined. The first call a
+  session ever makes has nothing to start from, so it behaves exactly like
+  today's default — the whole buffer — and its summary says so.
+- `since: "all"` is the reset: the whole buffer plus disk, the same as every
+  call before `since` existed, and it clears the tracking `since: "last"`
+  uses. There is no separate `reset_watermark` tool — this is the reset.
+
+This tracking (`lastExaminedT`, an error-severity digest, and `findings`' own
+last result) is a **watermark**: one per MCP server process, keyed to
+whichever session is currently open, held in memory and written through to
+`<session dir>/watermark.json` beside `events.ndjson` on every update. It
+survives an MCP server restart the same way [sessions on disk](#sessions-on-disk)
+do — loaded back from the session directory the next time that identity
+reconnects. Two MCP servers attached to one app at once is not designed
+for: both would write the same file, and the last writer wins.
+
+**The banner.** Every tool's result — not only `findings` — leads its
+summary line with a one-line alert when anything of `error` severity has
+happened since the last call and has not yet been reported:
+
+```
+⚠ Since your last call: main thread blocked for 6200ms. Call `findings {"since":"last"}`.
+```
+
+It never repeats an event: showing the banner advances the watermark, so the
+same ANR is not reported again on the next nine calls. Capped at 240
+characters, truncating with "…and N more kinds" rather than growing past it.
+The same fact is also on the payload as a structured field —
+`sinceLast: { errors, firstAt, lastAt } | null` — for a caller that would
+rather branch on a value than parse a sentence.
+
+**`findings` classifies what it finds** against its own previous call:
+each finding carries `status: "new" | "ongoing" | "resolved"`, and an
+`ongoing` one carries `delta` — the count now minus the count last time, so
+"still happening" and "got worse while I was reading" read differently.
+`resolved` is reported exactly once, for a finding that was there last time
+and is not any more, and then it drops out. The summary line says "N new, M
+ongoing, K resolved" rather than restating every ongoing finding.
+
+Classification only runs when the two calls are actually comparable: chained
+`since: "last"` calls always are, and two calls with explicit windows are
+comparable when they overlap by at least half of the shorter one. When they
+are not, `findings` says so in the summary and leaves every finding
+unclassified rather than guessing — a `resolved` finding from a call that
+merely looked somewhere else would be a false all-clear.
+
 ## Sessions on disk
 
 The MCP server's own memory is a process, and that process restarts more

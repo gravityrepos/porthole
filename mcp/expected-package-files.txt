@@ -44,6 +44,8 @@ dist/timeline.js
 dist/timeline.js.map
 dist/trace.js
 dist/trace.js.map
+dist/watermark.js
+dist/watermark.js.map
 package.json
 src/adb.ts
 src/args.ts
@@ -60,6 +62,7 @@ src/system.ts
 src/systrace.ts
 src/timeline.ts
 src/trace.ts
+src/watermark.ts
 ui/dist/assets/index-*.css
 ui/dist/assets/index-*.js
 ui/dist/index.html

@@ -72,6 +72,39 @@ describe("the window", () => {
     expect(timelineTool).toContain("...windowShape");
     expect(timelineTool).toContain("resolveWindow");
   });
+
+  // GRA-55: `since` lives on the same shared `windowShape` `sinceMs` does,
+  // for the same reason — one declaration, not a hand-rolled copy per tool.
+  it("puts since: \"last\"/\"all\" on the shared windowShape too, not a second hand-rolled copy", () => {
+    const handRolled = source.match(/^\s+since: z/gm) ?? [];
+    expect(handRolled.length, "a tool has grown its own `since` again").toBe(1); // the definition
+    expect(source).toMatch(/since:\s*z\s*\n\s*\.enum\(\["last", "all"\]\)/);
+  });
+
+  it("every tool that shares windowShape actually registers since as an enum of last/all, not just in source text", async () => {
+    // The behavioural half of the check above: asks the running server's own
+    // schema, the same way `windowedTools()`-style tests in index.test.ts do,
+    // rather than trusting that the source-text match above implies the
+    // schema compiled the way it reads.
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const windowed = ["findings", "save_moment", "recompositions", "frames", "blocking", "logs", "timeline"];
+      for (const name of windowed) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool, `${name} is not registered`).toBeDefined();
+        const props = (tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+        const since = props.since as { enum?: string[] } | undefined;
+        expect(since, `${name}'s schema has no \`since\``).toBeDefined();
+        expect(since?.enum?.slice().sort(), `${name}'s \`since\` is not enum(["last","all"])`).toEqual([
+          "all",
+          "last",
+        ]);
+      }
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 describe("findings", () => {
@@ -249,6 +282,58 @@ function readmeToolNames(): string[] {
   }
   return names;
 }
+
+describe("GRA-55: every tool's result carries sinceLast", () => {
+  // The EM's own warning on this ticket: "make the test assert the *absence*
+  // of a tool that skipped it — otherwise the one tool that forgets is the
+  // one the agent was using when the ANR happened." Walks the *registered*
+  // tool list (`listTools()`, not a hand-copied array — the same reason
+  // "the tool surface" below asks the running server rather than grepping
+  // this file) so a future tool that forgets `ok()` — or forgets to route
+  // through it — fails this test by name, without anyone remembering to
+  // extend a list.
+  const ARGS_BY_TOOL: Record<string, Record<string, unknown>> = {
+    // The two tools with a required, non-window argument — anything else
+    // here is optional, so `{}` is a valid call.
+    save_moment: { from: 0, to: 2_000 },
+    what_was_happening: { at: 1_000 },
+    // No real trace file or trace_processor binary in this environment —
+    // this call is expected to `fail()`, which carries no payload at all
+    // (by `fail()`'s own design) and is explicitly excluded below, the same
+    // way `capture_system_trace` (no real adb) is excluded without needing
+    // an entry here.
+    ask_system_trace: { trace: "/nonexistent.pftrace" },
+  };
+
+  it("every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: { name: "Cart" } },
+        { event: "nav", t: 1_500, data: { route: "cart" } },
+      ]);
+
+      const tools = await rig.client.listTools();
+      expect(tools.length).toBeGreaterThan(0); // positive control: a broken listTools() must not read as "nothing to check"
+
+      const missing: string[] = [];
+      for (const tool of tools) {
+        const args = ARGS_BY_TOOL[tool.name] ?? {};
+        const result = await rig.client.callTool(tool.name, args);
+        if (result.isError) continue; // no payload block at all — see fail()
+        const payload = result.json;
+        const hasSinceLast =
+          payload !== null && typeof payload === "object" && "sinceLast" in (payload as object);
+        if (!hasSinceLast) missing.push(tool.name);
+      }
+      expect(missing, `tool(s) whose successful result has no sinceLast field: ${missing.join(", ")}`).toEqual(
+        [],
+      );
+    } finally {
+      await rig.close();
+    }
+  });
+});
 
 describe("the tool surface", () => {
   // The 17 names `index.ts` registers, in registration order, verified
