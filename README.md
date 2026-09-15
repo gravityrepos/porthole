@@ -177,19 +177,41 @@ The plugin puts `runtime` on your debug build types and `runtime-noop` on
 everything else, and generates the `porthole_port` resource so the port is
 configured in exactly one place.
 
-**2. Run the app.**
-
-That is the whole minimum. The runtime starts with the process through
-androidx.startup and finds the current Activity on its own, which gives it the
-view it needs for the semantics tree and the view models scoped to that
-Activity. There is nothing to wrap and no launch flag to remember.
-
-Screen-scoped view models need step 3.
+**2. Run one task.**
 
 ```bash
-./gradlew :app:installDebug        # your app
-./gradlew portholeUi
+./gradlew :app:portholeStart
 ```
+
+That is the whole minimum: the plugin block above, and this one command.
+`portholeStart` installs the debug build, forwards the port, writes
+`.mcp.json`, fetches `trace_processor` the first time anything needs it, and
+opens the timeline in your browser — in that order, because each step depends
+on the last one finishing. It is not new behaviour: it is `installDebug`,
+`portholeConnect`, `portholeMcpConfig`, `portholeTraceProcessor` and
+`portholeUi`, wired together so the order is not something you have to learn.
+Doing anything unusual still means reaching for one of those five directly —
+step 6 below is the reference table for that — and each one works exactly as
+it always has.
+
+Two things worth knowing before you run it:
+
+- **More than one debug build variant** (a `productFlavors` block, like the
+  sample's `room`/`sqldelight` storage flavors) means `portholeStart` cannot
+  guess which one you want installed, and refuses rather than picking:
+  `./gradlew :app:portholeStart -Pporthole.variant=room` names it. One variant
+  is picked automatically; more than one is always asked for, never guessed.
+- **An agent driving this** — no one at a keyboard to look at a browser
+  window — wants `-Pporthole.open=false`, which does everything except open
+  the timeline. A person running it by hand gets the browser by default,
+  since that is what `portholeUi` alone has always done.
+
+The runtime starts with the process through androidx.startup and finds the
+current Activity on its own, which gives it the view it needs for the
+semantics tree and the view models scoped to that Activity. There is nothing
+to wrap and no launch flag to remember.
+
+Screen-scoped view models need step 3.
 
 **3. Register your NavController.** One line, and it earns more than it used to.
 
@@ -292,25 +314,29 @@ fun CartScreen(viewModel: CartViewModel) = PortholeScreen("Cart") {
 required for the semantics tree — the runtime attaches to the Activity's decor
 view by itself.
 
-**6. Open the timeline.**
+**6. The pieces, individually.** `portholeStart` in step 2 is these five tasks,
+run in this order, for one variant. Reach for one directly for anything it
+does not cover — a second device, the UI without a fresh install, a config
+entry regenerated after editing `.mcp.json` by hand:
 
-```bash
-./gradlew portholeUi
-```
+| task | does | reach for it directly when |
+| --- | --- | --- |
+| `install<Variant>Debug` | installs the debug build (AGP's own task, e.g. `installDebug` or, with flavors, `installRoomDebug`) | you only need the build on the device, nothing else |
+| `portholeConnect` | `adb forward`s the port and writes the connection file | your agent is doing the looking and you do not want a browser — `portholeStart -Pporthole.open=false` uses this instead of `portholeUi` |
+| `portholeMcpConfig` | writes the MCP server entry into `.mcp.json` | you edited `.mcp.json` by hand and want the entry regenerated, or need `-Pporthole.overwrite=true` |
+| `portholeTraceProcessor` | fetches and verifies Perfetto's `trace_processor`, once | you want it ahead of time, or `-Pporthole.refresh=true` to re-fetch it |
+| `portholeUi` | forwards the port itself, serves the UI, opens your browser, and keeps running until you stop it | you already installed and connected, and only want the timeline again |
 
-That forwards the port, serves the UI, opens your browser and keeps running
-until you stop it. It is the whole workflow for a person: build, run, look.
-
-If you would rather not go through Gradle, or you do not have the plugin
-applied, the CLI is the same thing:
+`portholeUi` and the npm CLI it launches are the same thing, so without the
+plugin applied — or without Gradle at all — this does what `portholeUi` does:
 
 ```bash
 npx @gravitylabsllc/porthole ui
 ```
 
-Both need Node, because the UI is a web app. If you only want the adb bridge —
-because your agent is doing the looking — `./gradlew portholeConnect` sets it up
-and nothing else.
+Both need Node, because the UI is a web app. The MCP server and the UI are
+independent — run either, or both at once, and each opens its own connection
+to the device.
 
 **7. Point your agent at it.** `./gradlew portholeMcpConfig` prints the entry:
 
@@ -331,9 +357,6 @@ overwrites, so other servers in the file are untouched, and if a `porthole`
 entry is already there and differs it prints the difference and leaves it —
 a different entry is usually deliberate. `-Pporthole.overwrite=true` replaces
 it, and the previous file is kept as `.mcp.json.bak` either way.
-
-The MCP server and the UI are independent. Run either, or both at once — they
-each open their own connection to the device.
 
 **Environment variables**, for anyone not going through the generated
 `.mcp.json` above:
@@ -1164,9 +1187,8 @@ That is how the tools and the timeline UI were verified.
 `main`. It is meant to end up required to merge — both jobs are intended as
 required status checks on `main` — but requiring a check is a
 branch-protection setting on the repository itself, not something a workflow
-file can grant, and nobody has switched it on yet. The workflow also has not
-had a run anywhere yet for that setting to point at; the founder turns it on
-once the first run exists. Two jobs, meant to both be required:
+file can grant, and nobody has switched it on yet — the workflow itself has
+had well over a hundred runs by now. Two jobs, meant to both be required:
 
 - **Gradle checks** (ubuntu) — `./gradlew check`, which since GRA-75 reaches
   the plugin's tests too (see [Building](#building) above). Test reports
