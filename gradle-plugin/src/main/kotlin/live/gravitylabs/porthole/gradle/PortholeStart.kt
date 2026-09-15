@@ -62,6 +62,29 @@ internal fun resolveInstallTask(variants: List<String>, requestedVariant: String
 }
 
 /**
+ * The same variant resolution as [resolveInstallTask], but for *ordering*
+ * rather than for *what to install* — which means it must never throw.
+ *
+ * `portholeMcpConfig`, `portholeTraceProcessor`, `portholeConnect` and
+ * `portholeUi` each get a `mustRunAfter` naming the install task, so that
+ * `portholeStart`'s order is a real Gradle constraint rather than an
+ * accident of task-name alphabetising (see [registerPortholeStart]'s ordering
+ * block). Those `mustRunAfter` declarations are attached unconditionally —
+ * they do nothing unless the install task is *also* in the graph being run,
+ * but Gradle still has to evaluate them for a standalone run of, say,
+ * `./gradlew portholeMcpConfig` on an ambiguous module. [resolveInstallTask]
+ * throwing there would break AC3 (the narrow tasks keep working on their
+ * own) for a module `portholeStart` was never involved in. Returning `null` —
+ * "no install task to order against" — instead of guessing or failing is the
+ * only answer that keeps a standalone run exactly as it always behaved.
+ */
+internal fun installTaskForOrdering(variants: List<String>, requestedVariant: String?): String? {
+    val candidates = variants.distinct().sorted()
+    val chosen = requestedVariant?.takeIf { it in candidates } ?: candidates.singleOrNull() ?: return null
+    return "install" + chosen.replaceFirstChar { it.uppercase() }
+}
+
+/**
  * The whole dependency graph `portholeStart` has. Exactly these four narrow
  * tasks — nothing re-implemented — which is what GRA-174's acceptance
  * criterion 2 holds this to over time.
@@ -97,20 +120,47 @@ internal fun portholeStartDependencies(
  * default cannot serve both audiences — this is the one being defaulted, and
  * the choice is documented here and in the README's Setup section rather
  * than left implicit.
+ *
+ * `dependsOn` alone only says *that* these four run, not in what order —
+ * Gradle is free to schedule an unordered set however it likes, and without
+ * more information it tie-breaks alphabetically, which happened to put
+ * `portholeUi` last. That was never a guarantee: `portholeUi` blocks until
+ * the person watching it stops it, so anything scheduled after it would
+ * simply never run if the tie-break ever landed differently. The
+ * `mustRunAfter` chain below makes the order — install, then
+ * `portholeConnect`, then `portholeMcpConfig`, then `portholeTraceProcessor`,
+ * then `portholeUi` — an actual Gradle constraint, independent of task
+ * names, so `portholeUi` running last is design rather than luck. A
+ * `mustRunAfter` naming a task that is not itself in the graph being run
+ * (for instance `portholeUi`'s on `portholeConnect`, when only one of the two
+ * is ever a dependency) is simply ignored by Gradle, which is what keeps this
+ * safe to declare unconditionally rather than only for whichever branch
+ * `openUi` took.
  */
 internal fun registerPortholeStart(
     project: Project,
     variants: Provider<List<String>>,
     requestedVariant: Provider<String>,
     openUi: Provider<Boolean>,
-): TaskProvider<Task> =
-    project.tasks.register("portholeStart") {
+): TaskProvider<Task> {
+    val installTask = Callable { listOfNotNull(installTaskForOrdering(variants.get(), requestedVariant.orNull)) }
+
+    project.tasks.named("portholeConnect").configure { mustRunAfter(installTask) }
+    project.tasks.named("portholeMcpConfig").configure { mustRunAfter(installTask, "portholeConnect") }
+    project.tasks.named("portholeTraceProcessor").configure {
+        mustRunAfter(installTask, "portholeConnect", "portholeMcpConfig")
+    }
+    project.tasks.named("portholeUi").configure {
+        mustRunAfter(installTask, "portholeConnect", "portholeMcpConfig", "portholeTraceProcessor")
+    }
+
+    return project.tasks.register("portholeStart") {
         group = PortholePlugin.GROUP
         description = "Installs the debug build, forwards the port, writes .mcp.json, fetches " +
             "trace_processor if it's missing, and opens the timeline — the narrow tasks below " +
-            "run all of it; this only orders them. -Pporthole.open=false skips the browser; " +
-            "-Pporthole.variant=<name> picks the variant when the module has more than one " +
-            "debug variant."
+            "run all of it, in that order; this only orders them. -Pporthole.open=false skips " +
+            "the browser; -Pporthole.variant=<name> picks the variant when the module has more " +
+            "than one debug variant."
         dependsOn(
             Callable {
                 portholeStartDependencies(
@@ -121,3 +171,4 @@ internal fun registerPortholeStart(
             },
         )
     }
+}

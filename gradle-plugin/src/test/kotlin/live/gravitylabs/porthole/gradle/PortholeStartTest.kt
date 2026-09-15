@@ -170,7 +170,13 @@ class RegisterPortholeStartFunctionalTest {
 
     @Test
     fun `depends on exactly the narrow tasks for the unambiguous case`() {
-        val project = newProject(listOf("installDebug", "portholeMcpConfig", "portholeTraceProcessor", "portholeUi"))
+        // All five narrow tasks are always registered in production
+        // (registerTasks does not gate any of them on openUi), so the fixture
+        // mirrors that even though this scenario only expects portholeStart to
+        // depend on four of them.
+        val project = newProject(
+            listOf("installDebug", "portholeConnect", "portholeMcpConfig", "portholeTraceProcessor", "portholeUi"),
+        )
 
         val start = registerPortholeStart(
             project = project,
@@ -209,6 +215,7 @@ class RegisterPortholeStartFunctionalTest {
             listOf(
                 "installRoomDebug",
                 "installSqldelightDebug",
+                "portholeConnect",
                 "portholeMcpConfig",
                 "portholeTraceProcessor",
                 "portholeUi",
@@ -243,9 +250,10 @@ class RegisterPortholeStartFunctionalTest {
             listOf(
                 "installRoomDebug",
                 "installSqldelightDebug",
+                "portholeConnect",
                 "portholeMcpConfig",
                 "portholeTraceProcessor",
-                "portholeConnect",
+                "portholeUi",
             ),
         )
 
@@ -265,5 +273,106 @@ class RegisterPortholeStartFunctionalTest {
             setOf("installRoomDebug", "portholeMcpConfig", "portholeTraceProcessor", "portholeConnect"),
             dependencyNames(start.get()),
         )
+    }
+
+    /**
+     * QA on this ticket: the graph test above guards the *edges*
+     * (`dependsOn`) but not the *node* — nothing stopped real work from
+     * moving into `portholeStart`'s own `@TaskAction` while the dependency
+     * list stayed untouched, which is exactly the re-implementation AC2 is
+     * meant to rule out. Move work inline and the dependency-set tests above
+     * would still pass; this is the one that would not.
+     */
+    @Test
+    fun `portholeStart is a pure lifecycle task, with no actions of its own`() {
+        val project = newProject(
+            listOf("installDebug", "portholeConnect", "portholeMcpConfig", "portholeTraceProcessor", "portholeUi"),
+        )
+
+        val start = registerPortholeStart(
+            project = project,
+            variants = project.provider { listOf("debug") },
+            requestedVariant = project.providers.gradleProperty("porthole.variant"),
+            openUi = project.provider { true },
+        )
+
+        assertTrue("portholeStart must have no actions of its own", start.get().actions.isEmpty())
+    }
+}
+
+/**
+ * [registerPortholeStart]'s `mustRunAfter` wiring.
+ *
+ * QA on this ticket showed that `dependsOn` alone only says *that* four tasks
+ * run, not in what order: an unordered set is scheduled however Gradle likes,
+ * which tie-breaks alphabetically and happened to put `portholeUi` last by
+ * accident. That is dangerous specifically because `portholeUi` blocks until
+ * the person watching it stops it — if the tie-break ever landed differently,
+ * anything after it would simply never run, and a new user's first
+ * experience would be a hang.
+ *
+ * This asserts the real Gradle `mustRunAfter` `TaskDependency` on each narrow
+ * task (the same API [RegisterPortholeStartFunctionalTest] uses for
+ * `dependsOn`), which is what turns the order into a Gradle-enforced fact —
+ * independent of task names — rather than a naming coincidence.
+ */
+class PortholeStartOrderingTest {
+
+    private fun newProject(narrowTasks: List<String>): org.gradle.api.Project {
+        val project = ProjectBuilder.builder().build()
+        narrowTasks.forEach { name -> project.tasks.register(name) }
+        return project
+    }
+
+    private fun mustRunAfterNames(project: org.gradle.api.Project, taskName: String): Set<String> {
+        val task = project.tasks.getByName(taskName)
+        return task.mustRunAfter.getDependencies(task).map { it.name }.toSet()
+    }
+
+    @Test
+    fun `orders install, connect, mcp config, trace processor and ui as a real chain`() {
+        val project = newProject(
+            listOf("installDebug", "portholeConnect", "portholeMcpConfig", "portholeTraceProcessor", "portholeUi"),
+        )
+
+        registerPortholeStart(
+            project = project,
+            variants = project.provider { listOf("debug") },
+            requestedVariant = project.providers.gradleProperty("porthole.variant"),
+            openUi = project.provider { true },
+        )
+
+        assertEquals(setOf("installDebug"), mustRunAfterNames(project, "portholeConnect"))
+        assertEquals(setOf("installDebug", "portholeConnect"), mustRunAfterNames(project, "portholeMcpConfig"))
+        assertEquals(
+            setOf("installDebug", "portholeConnect", "portholeMcpConfig"),
+            mustRunAfterNames(project, "portholeTraceProcessor"),
+        )
+        assertEquals(
+            setOf("installDebug", "portholeConnect", "portholeMcpConfig", "portholeTraceProcessor"),
+            mustRunAfterNames(project, "portholeUi"),
+        )
+    }
+
+    @Test
+    fun `an ambiguous or absent variant orders around no install task, rather than failing`() {
+        // installTaskForOrdering must never throw: a standalone run of, say,
+        // ./gradlew portholeMcpConfig on an ambiguous module has nothing to
+        // do with portholeStart and must keep working exactly as before
+        // (AC3) -- it must not start failing just because portholeStart's
+        // ordering wiring was also registered on this project.
+        val project = newProject(
+            listOf("portholeConnect", "portholeMcpConfig", "portholeTraceProcessor", "portholeUi"),
+        )
+
+        registerPortholeStart(
+            project = project,
+            variants = project.provider { listOf("roomDebug", "sqldelightDebug") },
+            requestedVariant = project.providers.gradleProperty("porthole.variant"),
+            openUi = project.provider { true },
+        )
+
+        assertEquals(emptySet<String>(), mustRunAfterNames(project, "portholeConnect"))
+        assertEquals(setOf("portholeConnect"), mustRunAfterNames(project, "portholeMcpConfig"))
     }
 }
