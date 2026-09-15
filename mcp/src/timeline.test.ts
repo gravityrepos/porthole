@@ -3,28 +3,47 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { DeviceClient, DeviceEvent, Hello } from "./device.js";
 import { askTrace, findTraceProcessor, runScript } from "./perfetto.js";
 import { TimelineServer } from "./timeline.js";
 
+// Where GRA-113's `tracesDir()` (timeline.ts, via `resolveProjectRoot()`)
+// looks for this file's whole run — a throwaway temp directory, never the
+// real project root. `.porthole/traces/` is also where a developer's own
+// real captures live; this file's /api/traces tests `rm(tracesDir, {
+// recursive: true })` between tests, and pointing that at the real one the
+// first version of this file did cost a real capture mid-session while
+// writing this ticket. Set as a plain top-level statement (not inside
+// vi.mock's hoisted factory, which cannot see a `const` declared later in
+// the file) — resolveProjectRoot() itself is left real (see the adb.js mock
+// below) and reads this on every call.
+const PROJECT_ROOT = mkdtempSync(resolve(tmpdir(), "porthole-timeline-test-"));
+process.env.PORTHOLE_PROJECT_ROOT = PROJECT_ROOT;
+
+afterAll(async () => {
+  await rm(PROJECT_ROOT, { recursive: true, force: true });
+});
+
 // The only thing in here that touches the outside world besides trace_processor
 // (see the next mock). `restart` shells out to adb, and a test that
 // force-stopped whatever app happens to be installed would be a worse bug
-// than the one this file exists to catch. `resolveProjectRoot` is stubbed to
-// a fixed answer — `process.cwd()`, the same default it would reach on its
-// own — purely so every test in this file agrees on where `tracesDir()`
-// (timeline.ts) looks, regardless of any PORTHOLE_PROJECT_ROOT some other
-// suite left behind in this worker.
-vi.mock("./adb.js", () => ({
-  restartApp: vi.fn(() => ({ ok: true, output: "restarted" })),
-  resolveProjectRoot: vi.fn(() => ({ directory: process.cwd(), source: "cwd" as const })),
-}));
+// than the one this file exists to catch. `resolveProjectRoot` itself stays
+// real — it reads PORTHOLE_PROJECT_ROOT above, which is what actually pins
+// `tracesDir()` to the throwaway directory.
+vi.mock("./adb.js", async () => {
+  const actual = await vi.importActual<typeof import("./adb.js")>("./adb.js");
+  return {
+    ...actual,
+    restartApp: vi.fn(() => ({ ok: true, output: "restarted" })),
+  };
+});
 
 // findTraceProcessor and askTrace are stubbed so the /api/findings "trace"
 // branch can actually be reached in this test environment, which has no real
@@ -438,7 +457,7 @@ describe("GRA-157: the three sites that used to read hello without checking stat
   // own 400 before ever reaching the handshake/attachment branch they exist
   // to pin. `askTrace` is mocked (see this file's top), so nothing ever
   // reads this file's contents; it only has to exist.
-  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
   const traceFile = resolve(tracesDir, "gra157-fixture.pftrace");
 
   beforeEach(async () => {
@@ -672,7 +691,7 @@ describe("the websocket", () => {
 });
 
 describe("GET /api/traces (GRA-113)", () => {
-  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
 
   beforeEach(async () => {
     await rm(tracesDir, { recursive: true, force: true });
@@ -742,7 +761,7 @@ describe("GET /api/traces (GRA-113)", () => {
 });
 
 describe("/api/findings?trace= validation (GRA-113 AC5)", () => {
-  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
   const knownId = "validation-fixture";
 
   beforeEach(async () => {
@@ -816,7 +835,7 @@ describe("/api/findings?trace= validation (GRA-113 AC5)", () => {
 });
 
 describe("GRA-113 AC1: every finding carries window xor spanning, never neither", () => {
-  const tracesDir = resolve(process.cwd(), ".porthole", "traces");
+  const tracesDir = resolve(PROJECT_ROOT, ".porthole", "traces");
   const traceId = "both-sources-fixture";
 
   beforeEach(async () => {
