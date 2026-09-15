@@ -13,7 +13,7 @@ import {
 } from "./testing/harness.js";
 import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
-import { collapseBlankLines } from "./index.js";
+import { joinSummaryAndPayload } from "./index.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -1196,84 +1196,125 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
 });
 
 // -----------------------------------------------------------------------------
-// GRA-169: collapseBlankLines() itself, direct — not only through the three
-// tools that happen to call it
+// GRA-171: joinSummaryAndPayload() itself, direct — proving the structural
+// claim without going through a device fixture at all
 // -----------------------------------------------------------------------------
 //
-// The integration tests below prove the fix end to end, but every one of
-// them feeds exactly one blank-line shape (two adjacent "\n"s) through
-// exactly two fields. That is enough to prove the chokepoint is wired, not
-// that the function backing it is correct in general — the same "N tests
-// reddened is not N things defended" trap this project has hit before. A
-// direct unit test can cover shapes no device fixture here happens to
-// produce: whitespace sitting between the two newlines, three or more
-// blank lines in a row, and CRLF line endings, none of which "Pixel\n\n7a"
-// exercises.
-describe("GRA-169: collapseBlankLines()", () => {
-  it("collapses a plain blank line", () => {
-    expect(collapseBlankLines("summary\n\npayload")).toBe("summary payload");
+// GRA-169's collapseBlankLines() needed a direct unit suite because the
+// integration tests below only ever fed one blank-line shape through two
+// fields — enough to prove the chokepoint was wired, not that the function
+// behind it was correct in general. The structural design does not have
+// that problem in the first place: there is no regex whose coverage could
+// be incomplete, so one test that throws every adversarial shape at once
+// and checks the array shape and the JSON round-trip is a complete proof,
+// not a sample. That is the actual difference between "normalise harder"
+// and "make the class impossible" this ticket is asking for — it shows up
+// here as fewer, stronger tests, not merely different ones.
+describe("GRA-171: joinSummaryAndPayload()", () => {
+  it("returns exactly one block when called with no payload — fail()'s shape", () => {
+    const content = joinSummaryAndPayload("plain error message");
+    expect(content).toEqual([{ type: "text", text: "plain error message" }]);
   });
 
-  it("collapses a blank line with spaces or tabs on it", () => {
-    expect(collapseBlankLines("summary\n   \npayload")).toBe("summary payload");
-    expect(collapseBlankLines("summary\n\t\t\npayload")).toBe("summary payload");
+  it("returns exactly two blocks when called with a payload — ok()'s shape", () => {
+    const content = joinSummaryAndPayload("a summary", { a: 1 });
+    expect(content).toHaveLength(2);
+    expect(content[0]).toEqual({ type: "text", text: "a summary" });
+    expect(JSON.parse(content[1].text)).toEqual({ a: 1 });
   });
 
-  it("collapses three and four consecutive newlines, not just two", () => {
-    expect(collapseBlankLines("a\n\n\nb")).not.toContain("\n\n");
-    expect(collapseBlankLines("a\n\n\n\nb")).not.toContain("\n\n");
-    // And it must not merely hide the count — the text on both sides has
-    // to survive, or a version that collapsed too aggressively (e.g. to
-    // the empty string) would pass the toContain-only checks above.
-    expect(collapseBlankLines("a\n\n\n\nb")).toContain("a");
-    expect(collapseBlankLines("a\n\n\n\nb")).toContain("b");
+  it("keeps the payload block a real string even when the payload argument itself is `undefined`", () => {
+    // Argument COUNT decides whether there is a payload block, not whether
+    // the payload argument is falsy — `joinSummaryAndPayload(s, undefined)`
+    // (two arguments) must still produce ok()'s two-block shape, not
+    // fail()'s one-block shape. And JSON.stringify(undefined) is the JS
+    // value `undefined`, not a string, so a naive implementation would leak
+    // that into `text`, which the MCP content schema requires to be a
+    // string — `mcp/src/index.ts`'s `?? "null"` is what this pins.
+    const content = joinSummaryAndPayload("summary", undefined);
+    expect(content).toHaveLength(2);
+    expect(typeof content[1].text).toBe("string");
+    expect(content[1].text).toBe("null");
+    expect(JSON.parse(content[1].text)).toBeNull();
   });
 
-  it("collapses several separate blank lines in the same string", () => {
-    const result = collapseBlankLines("one\n\ntwo\n\nthree");
-    expect(result).not.toContain("\n\n");
-    expect(result).toBe("one two three");
+  // The full adversarial set this ticket must still parse (GRA-169's set,
+  // widened per GRA-171 AC5): CRLF pairs, 3 and 7 consecutive newlines
+  // (odd counts leave a dangling single "\n" under the old regex — see the
+  // measured probe in this ticket's report — so both parities are covered),
+  // whitespace-only lines, NBSP, form feed, vertical tab, U+2028, U+2029, a
+  // bare CR with no matching LF, leading and trailing blank lines, the
+  // empty string, and a literal "\n\n" itself. Every shape appears BOTH in
+  // the summary and inside a payload field, in the same string, at once —
+  // not one shape per test — because the structural fix's whole claim is
+  // that it does not matter which shape or how many: nothing here is ever
+  // scanned for a delimiter.
+  const ADVERSARIAL = [
+    "\r\n\r\n",
+    "\n\n\n",
+    "\n\n\n\n\n\n\n",
+    "\n   \n",
+    "\n\t\t\n",
+    "\n \n",
+    "\n\f\n",
+    "\n\n",
+    "  ",
+    "  ",
+    "\r\r",
+    "",
+    "\n\n",
+  ].join("|");
+  const DIRTY = `before[${ADVERSARIAL}]after`;
+
+  it("carries the summary through byte-for-byte, whatever shape it contains", () => {
+    const content = joinSummaryAndPayload(DIRTY, { ok: true });
+    expect(content[0].text).toBe(DIRTY);
   });
 
-  it("collapses a CRLF blank line", () => {
-    // QA round 1 (GRA-169): this used to assert `not.toContain("\n\n")`,
-    // which holds of an identity function too — "summary\r\n\r\npayload"
-    // never contains two adjacent bare "\n"s to begin with (there is a
-    // "\r" between them), so the assertion proved nothing about whether
-    // the `\r\n` → `\n` replace ran at all. `toBe(...)` pins the actual
-    // output, so deleting that replace now reddens this test by name
-    // instead of leaving it silently green — the GRA-160 shape: a test
-    // that passes for a reason unrelated to its own claim.
-    expect(collapseBlankLines("summary\r\n\r\npayload")).toBe("summary payload");
+  it("payload survives round-trip through JSON with every adversarial shape inside a field", () => {
+    const payload = { device: DIRTY, nested: { note: DIRTY }, list: [DIRTY] };
+    const content = joinSummaryAndPayload(DIRTY, payload);
+    expect(content).toHaveLength(2);
+    const parsed = JSON.parse(content[1].text) as typeof payload;
+    expect(parsed).toEqual(payload);
+    expect(parsed.device).toBe(DIRTY);
   });
 
-  it("leaves a single newline alone — this is not a linter, only blank lines are the target", () => {
-    // The notConnectedMessage() troubleshooting list (device.ts) is legible,
-    // deliberate multi-line prose. Collapsing every newline, not just blank
-    // ones, would flatten it and this function has no business doing that.
-    expect(collapseBlankLines("line one\nline two")).toBe("line one\nline two");
-  });
-
-  it("leaves ordinary text with no newlines at all untouched", () => {
-    expect(collapseBlankLines("nothing to collapse here")).toBe("nothing to collapse here");
+  it("no scan of either block ever happens — same result whether the summary appears before or after the payload's own delimiter-shaped text", () => {
+    // There is no "first occurrence" to get confused: swapping which side
+    // the adversarial text sits on cannot matter, because array position,
+    // not string content, decides which block is which.
+    const a = joinSummaryAndPayload(DIRTY, { x: "clean" });
+    const b = joinSummaryAndPayload("clean summary", { x: DIRTY });
+    expect(a[0].text).toBe(DIRTY);
+    expect(JSON.parse(a[1].text)).toEqual({ x: "clean" });
+    expect(b[0].text).toBe("clean summary");
+    expect(JSON.parse(b[1].text)).toEqual({ x: DIRTY });
   });
 });
 
 // -----------------------------------------------------------------------------
-// GRA-169: a blank line in interpolated device data must not break ok()'s
-// summary/payload split
+// GRA-169 / GRA-171: a blank line in interpolated device data must not break
+// ok()'s summary/payload split
 // -----------------------------------------------------------------------------
 //
-// `ok()` joins the human-readable summary and the JSON payload with a blank
-// line, and every consumer of that convention — an agent reading the tool's
-// own text, and this suite's own `parsePayload()` in testing/harness.ts —
-// finds the payload by looking for the FIRST blank line and parsing
-// everything after it. hello.device and hello.packageName arrive over the
-// wire from the device with nothing on either side guaranteeing they are
-// single-line, so a blank line inside either one used to re-split every
-// tool's answer at the wrong place: `parsePayload()` slices from the middle
-// of the summary's own prose, `JSON.parse` throws on it, and the tool's
-// payload is gone, not merely mislabelled.
+// `ok()` used to join the human-readable summary and the JSON payload with a
+// blank line, and every consumer of that convention — an agent reading the
+// tool's own text, and this suite's own `parsePayload()` in
+// testing/harness.ts — found the payload by looking for the FIRST blank line
+// and parsing everything after it. hello.device and hello.packageName arrive
+// over the wire from the device with nothing on either side guaranteeing
+// they are single-line, so a blank line inside either one used to re-split
+// every tool's answer at the wrong place: `parsePayload()` sliced from the
+// middle of the summary's own prose, `JSON.parse` threw on it, and the
+// tool's payload was gone, not merely mislabelled. GRA-169 fixed this by
+// normalising the summary before appending the delimiter; GRA-171 removed
+// the delimiter (and the normalisation defending it) entirely — summary and
+// payload are now two separate `content` blocks (see `joinSummaryAndPayload`
+// in index.ts), so there is no blank line, of any shape, for either field to
+// collide with. These tests still exercise the real risk — hello.device and
+// hello.packageName reaching a tool's prose unmodified from the wire — they
+// just no longer need a delimiter to survive.
 //
 // Two different fields, not one — a single working case would prove the
 // mechanism was fixed at its one measured trigger, not that interpolated
@@ -1281,7 +1322,7 @@ describe("GRA-169: collapseBlankLines()", () => {
 // shared `exitedProcessNotice()` sentence; hello.packageName reaches them
 // independently through each tool's own "just connected, nothing buffered
 // yet" branch. Two call sites, not one, for the same reason.
-describe("GRA-169: a blank line in interpolated device data must not break ok()'s summary/payload split", () => {
+describe("GRA-169 / GRA-171: a blank line in interpolated device data must not break ok()'s summary/payload split", () => {
   const DIRTY_DEVICE = "Pixel\n\n7a (rooted)";
   const DIRTY_PACKAGE = "com.example\n\nshop";
 
@@ -1414,26 +1455,34 @@ describe("GRA-169: a blank line in interpolated device data must not break ok()'
     });
   });
 
-  // QA round 1 (GRA-169): the comment that used to sit here claimed this
-  // test "proves" ok()'s post-collapse throw guard "from the test side" —
-  // it does not. `device: "Two\n\n\n\nblank lines"` is a shape
-  // `collapseBlankLines()` already collapses correctly (four newlines tile
-  // into two non-overlapping matches), so this test only exercises the
-  // *happy* path through `ok()` — collapse succeeds, the guard never
-  // fires — end to end, through a device fixture with more than the
-  // minimal two newlines. It is not a test of the guard itself: deleting
-  // the guard entirely leaves this test (and the rest of the suite) green,
-  // which is the disclosed, unclosed gap in this ticket's own report.
-  it("porthole_status's summary contains no blank line even when its own prose would have had one", async () => {
-    const hello = helloOf({ device: "Two\n\n\n\nblank lines" });
+  // GRA-171: this test used to prove (per QA round 1's correction of the
+  // comment that sat here) only that `ok()`'s happy path survived a device
+  // value with more than the minimal two newlines — the post-collapse throw
+  // guard it was originally written to exercise was never actually reached
+  // by it. That guard is deleted now (see index.ts), so there is nothing
+  // left for a test at this spot to prove about a guard. What replaced it:
+  // the structural fix's actual, positive claim — that the summary no
+  // longer needs to be rewritten at all — end to end through the real rig,
+  // not just through `joinSummaryAndPayload()` directly (see the GRA-171
+  // describe block above for that).
+  it("porthole_status's payload still parses AND its summary keeps the device's blank lines verbatim, unlike GRA-169's collapsed prose", async () => {
+    const DIRTY = "Two\n\n\n\nblank lines\r\n\r\nand a CRLF one";
+    const hello = helloOf({ device: DIRTY });
     const rig = await buildExitedRig(hello);
     try {
       const result = await rig.client.callTool("porthole_status", {});
-      // The ONE blank line allowed is ok()'s own delimiter, and only that
-      // one — split on the first occurrence and there must be no second.
-      const first = result.text.indexOf("\n\n");
-      expect(first).toBeGreaterThanOrEqual(0);
-      expect(result.text.indexOf("\n\n", first + 1)).toBe(-1);
+      // Structural proof: exactly one summary block and one payload block,
+      // by array shape — not "a blank line found somewhere in the text".
+      expect(result.content.filter((c) => c.type === "text")).toHaveLength(2);
+      expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+      expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(DIRTY);
+      // Prose-fidelity proof: GRA-169's `collapseBlankLines()` would have
+      // turned every one of DIRTY's blank lines into a single space before
+      // this text ever reached the summary block — asserting the raw value
+      // survives INSIDE the summary (not just the payload) is what pins
+      // "a structural delimiter does not need to touch the prose at all"
+      // as a behaviour, not just a claim in a comment.
+      expect(result.text).toContain(DIRTY);
     } finally {
       await rig.close();
     }
