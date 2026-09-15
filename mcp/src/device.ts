@@ -76,19 +76,19 @@ export type ConnectionState = "disconnected" | "connecting" | "handshaking" | "c
  * a close records the one that just ended, for whoever reads what is left
  * of it afterward.
  *
- * **This is the coordinator's assumption pending the founder's override,
- * not the founder's decision.**
- * **Assumed: option 2 — label answers as belonging to the exited process,
- * rather than clearing the ring or hiding them.**
- * Retaining `lastExited` (instead of, say, dropping it the moment the
- * socket closes, which would make a stale ring silently indistinguishable
- * from an empty one again) is that bet, placed here because this is where
- * someone unwinding it would start looking — a search of `index.ts` alone
- * would not show that a decision was made, only its consequences. If the
- * founder rules the other way, the fix is to stop setting this field (or to
- * clear it, and the ring, on close) rather than to hunt through every
- * caller. Five tests currently pin this bet and would need to change with
- * it: `index.test.ts`'s "AC1: with a non-empty ring and the device
+ * **Founder's decision, 2026-09-15: label answers as belonging to the
+ * exited process, rather than clearing the ring or hiding them.**
+ * This was built as an explicitly stated assumption and carried that label
+ * until the founder confirmed it; the wording is updated here so nobody
+ * reads a settled decision as an open bet. Retaining `lastExited` (instead
+ * of, say, dropping it the moment the socket closes, which would make a
+ * stale ring silently indistinguishable from an empty one again) is what
+ * that decision means in code, recorded here because this is where someone
+ * revisiting it would start looking — a search of `index.ts` alone would not
+ * show that a decision was made, only its consequences. Were it ever
+ * reversed, the change is to stop setting this field (or to clear it, and
+ * the ring, on close) rather than to hunt through every caller. Five tests
+ * pin it and would have to change with it: `index.test.ts`'s "AC1: with a non-empty ring and the device
  * disconnected, all three tools agree and none reports the dead process as
  * live", "AC2/AC5: with a non-empty ring and the device handshaking again,
  * no tool reports connected: true about the previous session's data", "AC3:
