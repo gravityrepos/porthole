@@ -375,6 +375,9 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
 | `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for [system traces](#system-traces) |
 | `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |
+| `PORTHOLE_SESSIONS` | on | set to `0` to turn off [sessions on disk](#sessions-on-disk) entirely |
+| `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
+| `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
 and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by
@@ -540,6 +543,45 @@ Start with recompositions {"from": 2057010, "to": 2075089} and logs
 Paste that at your assistant. `recompositions`, `logs` and `timeline` all take
 absolute `from`/`to`, so it asks about the moment you actually saw instead of
 guessing a lookback and hoping the windows overlap.
+
+## Sessions on disk
+
+The MCP server's own memory is a process, and that process restarts more
+often than you would like — it is usually owned by your MCP client, not by
+you. Everything the in-memory buffer holds is gone the moment it does, which
+used to mean a moment `findings` told you about eight minutes ago was simply
+no longer answerable: "not that nothing was happening — it is no longer
+held."
+
+`findings`, `what_was_happening` and `timeline` now fall back to a session
+recorded on disk whenever the live buffer cannot cover the window you asked
+for, so a restart, a crash, or reinstalling the app mid-session no longer
+loses the evidence. This is not a new capture mode and nothing you have to
+turn on — it is what the socket was already carrying, written down as it
+arrives.
+
+What's written is **exactly** the event stream that already crosses the
+socket: the same one [Payloads](#payloads-what-gets-captured-and-what-does-not)
+and [Security](#security) describe — already starred, redacted and
+body-capture-gated in-process, before any of this module ever sees it.
+Nothing new is captured for this feature; it records the wire, verbatim.
+
+A session is one contiguous run of one app process, identified by
+`(packageName, deviceId, startedAt)` — the same triple the timeline already
+uses to know when to start a fresh in-memory buffer. It lives at
+`<project root>/.porthole/sessions/<id>/`: `events.ndjson` (one JSON object
+per line, appended off the socket thread on an interval, never inline, so
+persistence cannot slow down what the socket is doing) plus `meta.json`
+(device profile, first/last recorded time, event counts by kind).
+`.porthole/` is already gitignored.
+
+Retention prunes by total size and by age, oldest session first, and never
+touches the session currently being written no matter how old or large it
+is. Defaults: 500MB total, 7 days. `PORTHOLE_SESSIONS_MAX_BYTES` and
+`PORTHOLE_SESSIONS_MAX_AGE_DAYS` override those (see the environment
+variable table above). `PORTHOLE_SESSIONS=0` is the off switch: set it and
+nothing is written to disk at all — the window-taking tools answer only from
+the live buffer, the same as before this feature existed.
 
 ## System traces
 
