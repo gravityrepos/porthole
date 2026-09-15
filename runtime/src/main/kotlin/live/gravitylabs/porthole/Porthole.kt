@@ -615,10 +615,22 @@ object Porthole {
      * [EventRing.DEFAULT_CAPACITY] — the same fallback shape
      * [portFromResources] uses for the port.
      */
-    private fun ringCapacityFromResources(context: Context): Int = runCatching {
-        val id = context.resources.getIdentifier(RES_RING_CAPACITY, "integer", context.packageName)
-        if (id != 0) context.resources.getInteger(id) else EventRing.DEFAULT_CAPACITY
-    }.getOrDefault(EventRing.DEFAULT_CAPACITY).let { if (it > 0) it else EventRing.DEFAULT_CAPACITY }
+    private fun ringCapacityFromResources(context: Context): Int = sanitizeRingCapacity(
+        runCatching {
+            val id = context.resources.getIdentifier(RES_RING_CAPACITY, "integer", context.packageName)
+            if (id != 0) context.resources.getInteger(id) else null
+        }.getOrNull(),
+    )
+
+    /**
+     * The clamp behind [ringCapacityFromResources], separated so it can be
+     * tested without a `Context`. It is load-bearing: `EventRing` indexes
+     * `slots[n % capacity]`, so a configured capacity of 0 (or below) that
+     * reached the constructor would throw on the first event. `null` means
+     * "no resource", which is the same case as an unusable value.
+     */
+    internal fun sanitizeRingCapacity(configured: Int?): Int =
+        if (configured != null && configured > 0) configured else EventRing.DEFAULT_CAPACITY
 
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
