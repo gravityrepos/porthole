@@ -1416,16 +1416,16 @@ token, a query-string token and a `Set-Cookie`, all containing the string
 `do-not-log`. Across a megabyte of everything the porthole emitted, it appears
 zero times.
 
-**950 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**970 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 366 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 359
+[Testing](#testing)): 386 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 379
 passed, 0 failed, 7 skipped), 450 in the MCP server (`cd mcp && npm test` —
 448 passed, 0 failed, 2 skipped), and 134 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 134 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 950 disagrees with the sum of the three suites' totals stated
+XML, and when 970 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1448,7 +1448,7 @@ this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 (gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 366 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
+the same 386 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
 pair) and the same 450 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
 sees 450/449/1, missing only that capture. The timeline UI is the one suite
