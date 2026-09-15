@@ -1420,9 +1420,9 @@ this runner is not. The server's 2 skips on ubuntu are `perfetto-stdout`
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 366 JVM tests with only 3 skipped (the POSIX-path case plus the AGP
-pair) and the same 451 server tests with 0 skipped, because it has the
+pair) and the same 450 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 451/450/1, missing only that capture. The timeline UI is the one suite
+sees 450/449/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 134/134/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
