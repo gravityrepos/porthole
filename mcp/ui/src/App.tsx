@@ -11,11 +11,18 @@ import { WindowPanel } from "./components/WindowPanel";
 import { useDeviceStream } from "./store/useDeviceStream";
 import { agentPrompt } from "./lib/agentPrompt";
 import { summariseWindow } from "./lib/analysis";
+import { FindingsLoader } from "./lib/findingsLoader";
 import { usePersistent } from "./lib/persist";
 import type { Hit } from "./lib/laneData";
 import { useSetup } from "./lib/setup";
 import { centreOn, fitView } from "./timeline/geometry";
-import type { ConnectionState, Hello, ViewWindow } from "./types";
+import type { ConnectionState, FindingsPayload, Hello, TraceListing, ViewWindow } from "./types";
+
+/** How often `/api/traces` is re-polled — new captures are rare and land
+ *  from an agent call, not from user interaction, so this only has to be
+ *  frequent enough that a freshly-taken capture shows up in the chooser
+ *  without a manual reload. Mirrors `useSetup`'s own re-ask interval. */
+const TRACES_POLL_MS = 8000;
 
 /** Window the event rate is averaged over, so the header reads steadily. */
 const RATE_WINDOW_MS = 2000;
@@ -132,6 +139,40 @@ export function protocolBanner(hello: Hello | null) {
   );
 }
 
+/**
+ * GRA-114 ruling 4: what `/api/traces` lists, polled rather than fetched
+ * once — a capture can land while the tab is open (an agent calling
+ * `capture_system_trace`), and the chooser should notice without a reload.
+ * `/api/traces` lists files on disk; unlike `useSetup`'s `/api/setup`, it
+ * needs no device attachment, so this polls unconditionally from mount.
+ */
+function useTraces(): TraceListing[] {
+  const [traces, setTraces] = useState<TraceListing[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const ask = async () => {
+      try {
+        const body: unknown = await fetch("/api/traces").then((r) => r.json());
+        const list = (body as { traces?: unknown }).traces;
+        if (!cancelled && Array.isArray(list)) setTraces(list as TraceListing[]);
+      } catch {
+        // The chooser simply keeps showing whatever it last knew about.
+      }
+    };
+
+    void ask();
+    const interval = setInterval(() => void ask(), TRACES_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  return traces;
+}
+
 export function App() {
   const { store, version } = useDeviceStream();
   const setup = useSetup(isAttached(store.connection));
@@ -157,6 +198,62 @@ export function App() {
   const [askLabel, setAskLabel] = useState("ask agent");
   const [copyLabel, setCopyLabel] = useState("copy trace");
   const [restartLabel, setRestartLabel] = useState("restart app");
+
+  // GRA-114: hoisted out of InsightsPanel. One FindingsLoader, constructed
+  // once, so the findings lane and the panel read the same fetch instead of
+  // each running its own — the "one request per settled view" ruling is
+  // structural because of this, not something either consumer has to get
+  // right on its own.
+  const [findingsPayload, setFindingsPayload] = useState<FindingsPayload | null>(null);
+  const [findingsLoading, setFindingsLoading] = useState(false);
+  const [findingsError, setFindingsError] = useState<string | null>(null);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const traces = useTraces();
+
+  const findingsLoaderRef = useRef<FindingsLoader | null>(null);
+  if (findingsLoaderRef.current === null) {
+    findingsLoaderRef.current = new FindingsLoader({
+      onStart: () => {
+        setFindingsLoading(true);
+        setFindingsError(null);
+      },
+      onSuccess: (body) => {
+        setFindingsPayload(body);
+        setFindingsLoading(false);
+      },
+      onError: (message) => {
+        setFindingsError(message);
+        setFindingsLoading(false);
+      },
+    });
+  }
+
+  useEffect(() => {
+    return () => findingsLoaderRef.current?.dispose();
+  }, []);
+
+  // Sub-pixel changes to `view` (every animation frame while panning or
+  // following) never reach this effect at all once rounded, the same
+  // reasoning InsightsPanel used to apply to its own `from`/`to` props.
+  const findingsFrom = Math.round(view.start);
+  const findingsTo = Math.round(view.end);
+
+  useEffect(() => {
+    findingsLoaderRef.current?.schedule(findingsFrom, findingsTo, selectedTraceId ?? undefined);
+  }, [findingsFrom, findingsTo, selectedTraceId]);
+
+  const refreshFindings = useCallback(
+    () => findingsLoaderRef.current?.runNow(findingsFrom, findingsTo, selectedTraceId ?? undefined),
+    [findingsFrom, findingsTo, selectedTraceId],
+  );
+
+  // A trace can vanish from `/api/traces` (or arrive with unreadable
+  // coverage) after it was chosen — falling back to null rather than
+  // whatever stale coverage was last known keeps the ruler's band honest.
+  const traceCoverage = useMemo(
+    () => traces.find((t) => t.id === selectedTraceId)?.coverage ?? null,
+    [traces, selectedTraceId],
+  );
 
   // Fit once, when the first batch arrives. After that the view is the user's,
   // and refitting under them would be rude.
@@ -299,6 +396,13 @@ export function App() {
             setup={setup}
             onSelect={setHit}
             selectedSeq={hit?.kind === "event" ? hit.event.seq : null}
+            findings={findingsPayload?.findings ?? []}
+            findingsWindow={findingsPayload?.window ?? null}
+            findingsLoading={findingsLoading}
+            hasFindingsPayload={findingsPayload !== null}
+            selectedFindingId={hit?.kind === "finding" ? hit.finding.id : null}
+            traceLoaded={selectedTraceId !== null}
+            traceCoverage={traceCoverage}
           />
           <LogPane
             store={store}
@@ -312,7 +416,15 @@ export function App() {
 
         <aside className="grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-3 overflow-y-auto bg-[var(--color-panel)] p-2">
           {/* Conclusions first: the panels below are the evidence for them. */}
-          <InsightsPanel from={view.start} to={view.end} />
+          <InsightsPanel
+            payload={findingsPayload}
+            loading={findingsLoading}
+            error={findingsError}
+            onRefresh={refreshFindings}
+            traces={traces}
+            selectedTraceId={selectedTraceId}
+            onSelectTrace={setSelectedTraceId}
+          />
           <SelectionPanel hit={hit} />
           <WindowPanel
             summary={summary}

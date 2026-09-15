@@ -1,9 +1,10 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { BUCKET_PX, TICK_COUNT, type Lane } from "./lanes";
+import { BUCKET_PX, FINDINGS_CEILING, FINDINGS_ROW_GAP, FINDINGS_ROW_HEIGHT, TICK_COUNT, type Lane } from "./lanes";
 import { toX } from "./geometry";
 import { isYours } from "../lib/spans";
-import type { DeviceEvent, Span, ViewWindow } from "../types";
+import type { FindingsLayout } from "../lib/findings";
+import type { DeviceEvent, Finding, Span, ViewWindow } from "../types";
 import { num } from "../types";
 
 export interface LaneScene {
@@ -15,6 +16,10 @@ export interface LaneScene {
   spans: Span[];
   color: string;
   showFramework: boolean;
+  /** Only set for the findings lane — its already-placed rows (lib/findings.ts). */
+  findingsLayout?: FindingsLayout;
+  /** Only set for the findings lane — the currently selected finding's id, if any, so its mark can be ringed the way a selected event's tick is on every other lane. */
+  selectedFindingId?: string | null;
 }
 
 export function readCss(name: string): string {
@@ -55,6 +60,9 @@ export function drawLane(lane: Lane, scene: LaneScene): void {
     case "markers":
       // Navigation markers are DOM: the route chip wants real text, with real
       // ellipsis and a real hover target, not glyphs painted into a bitmap.
+      break;
+    case "findings":
+      drawFindings(scene);
       break;
   }
 }
@@ -333,6 +341,91 @@ function drawArea(scene: LaneScene): void {
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   line(heap);
+}
+
+/** Same three CSS variables `InsightsPanel`'s `SEVERITY` table reads, so a
+ *  finding is the same colour there and here — "the panel and the lane are
+ *  obviously the same list" (GRA-114). */
+function severityColor(severity: Finding["severity"]): string {
+  switch (severity) {
+    case "error":
+      return readCss("--color-danger");
+    case "warning":
+      return readCss("--color-recompose");
+    case "note":
+      return readCss("--color-muted");
+  }
+}
+
+/**
+ * Encodes exactly the three things GRA-114 asks for and nothing else:
+ *  - severity → fill/stroke colour, shared with `InsightsPanel`;
+ *  - confidence → solid fill for `observed`, an outline only for
+ *    `correlated`, so the two are told apart without a hover;
+ *  - source → a small mark at the left edge, filled for `porthole` and
+ *    hollow for `trace` — the same solid/outline language as confidence,
+ *    applied to a different fact, on purpose: both are "how sure is this",
+ *    just about different things.
+ * A `spanning` finding (`item.band`) skips all of that and draws as a flat,
+ * low-alpha band instead — never a point, per the ticket's own wording.
+ */
+function drawFindings(scene: LaneScene): void {
+  const { ctx, width } = scene;
+  const layout = scene.findingsLayout;
+  if (!layout) return;
+
+  for (const item of layout.placed) {
+    const y = FINDINGS_CEILING + item.row * (FINDINGS_ROW_HEIGHT + FINDINGS_ROW_GAP);
+    const color = severityColor(item.finding.severity);
+
+    if (item.band) {
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = color;
+      ctx.fillRect(item.x, y, item.width, FINDINGS_ROW_HEIGHT);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (item.finding.confidence === "observed") {
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = color;
+      ctx.fillRect(item.x, y, item.width, FINDINGS_ROW_HEIGHT);
+    } else {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(item.x + 0.75, y + 0.75, Math.max(item.width - 1.5, 1), FINDINGS_ROW_HEIGHT - 1.5);
+    }
+
+    ctx.globalAlpha = 1;
+    const markX = item.x + 3;
+    const markY = y + FINDINGS_ROW_HEIGHT - 7;
+    if (item.finding.source === "porthole") {
+      ctx.fillStyle = readCss("--color-bright");
+      ctx.fillRect(markX, markY, 4, 4);
+    } else {
+      ctx.strokeStyle = readCss("--color-bright");
+      ctx.lineWidth = 1;
+      ctx.strokeRect(markX, markY, 4, 4);
+    }
+
+    if (item.finding.id === scene.selectedFindingId) {
+      ctx.strokeStyle = readCss("--color-bright");
+      ctx.lineWidth = 2;
+      ctx.strokeRect(item.x - 1, y - 1, item.width + 2, FINDINGS_ROW_HEIGHT + 2);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Ruling 1: a count glyph once findings stop fitting in the three rows,
+  // rather than hiding them or growing the lane under the cursor.
+  if (layout.overflow > 0) {
+    ctx.fillStyle = readCss("--color-dim");
+    ctx.font = "10px var(--font-mono, monospace)";
+    ctx.textAlign = "right";
+    ctx.fillText(`+${layout.overflow}`, width - 6, FINDINGS_CEILING + FINDINGS_ROW_HEIGHT - 6);
+    ctx.textAlign = "left";
+  }
 }
 
 /** Canvas has no colour-mix, so a token has to be resolved and re-emitted. */

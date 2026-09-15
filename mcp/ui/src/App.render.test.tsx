@@ -13,7 +13,7 @@
 // environment (see their own comments), so only the two files that actually
 // render pay happy-dom's cost. See this ticket's report for the measured
 // runtime.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { App } from "./App";
 import type { Hello } from "./types";
@@ -92,9 +92,23 @@ function hello(overrides: Partial<Hello> = {}): Hello {
   };
 }
 
+// GRA-114: App now also owns the findings fetch (`FindingsLoader`) and polls
+// `/api/traces` directly (`useTraces`) -- neither is under test in this
+// file, which only cares about the protocol banner, but both would
+// otherwise fire real fetches happy-dom tries to actually connect on. A
+// blanket empty-JSON stub, reapplied every test, keeps this file's tests
+// exactly as offline as they were before those two effects existed.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(JSON.stringify({ findings: [], traces: [] }), { status: 200 })),
+  );
+});
+
 afterEach(() => {
   cleanup();
   mockStore.hello = null;
+  vi.unstubAllGlobals();
 });
 
 describe("App renders the protocol-mismatch banner (GRA-167 AC2)", () => {

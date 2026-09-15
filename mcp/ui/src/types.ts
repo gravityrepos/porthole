@@ -80,6 +80,50 @@ export interface ViewWindow {
   end: number;
 }
 
+/**
+ * A finding as `/api/findings` sends it (`mcp/src/trace.ts`'s `Finding`,
+ * carrying `source` — GRA-113's window/spanning split, mirrored here rather
+ * than imported for the same reason `DeviceEvent`/`Hello` above are: the
+ * server type pulls in `node:*` at module scope.
+ *
+ * Every finding carries exactly one of `window` or `spanning`, never both and
+ * never neither (GRA-113 AC1) — but this is the wire format, produced by a
+ * server that could in principle drift from that rule or be a build ahead of
+ * this bundle, so nothing that reads this type is entitled to assume it. See
+ * `lib/findings.ts`'s `placeFindings`, which is the one place that has to
+ * survive a finding carrying neither.
+ */
+export interface Finding {
+  id: string;
+  severity: "error" | "warning" | "note";
+  confidence: "observed" | "correlated";
+  title: string;
+  detail?: string;
+  count?: number;
+  source: "porthole" | "trace";
+  window?: { from: number; to: number };
+  spanning?: true;
+}
+
+/** `/api/findings`'s whole response body. */
+export interface FindingsPayload {
+  window: { from: number; to: number; ms: number };
+  eventsExamined: number;
+  findings: Finding[];
+  notes: string[];
+}
+
+/** One entry of `/api/traces`'s `traces` array (`mcp/src/timeline.ts`'s
+ *  `TraceListing`). `coverage` is null when trace_processor could not read
+ *  the file's bounds — `reason` says why, and such a trace cannot be chosen. */
+export interface TraceListing {
+  id: string;
+  bytes: number;
+  recordedAt: string;
+  coverage: { from: number; to: number } | null;
+  reason?: string;
+}
+
 // --- accessors --------------------------------------------------------------
 // Everything below takes `unknown` because that is what JSON gives you.
 

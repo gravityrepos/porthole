@@ -1,13 +1,16 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import type { Lane } from "../timeline/lanes";
+import { FINDINGS_CEILING, FINDINGS_ROW_GAP, FINDINGS_ROW_HEIGHT, type Lane } from "../timeline/lanes";
 import { toTime, toX } from "../timeline/geometry";
 import { buildSpans, isYours } from "./spans";
-import type { DeviceEvent, Span, ViewWindow } from "../types";
+import type { PlacedFinding } from "./findings";
+import type { DeviceEvent, Finding, Span, ViewWindow } from "../types";
 import { num, str } from "../types";
 
 export type Hit =
-  { kind: "span"; lane: Lane; span: Span } | { kind: "event"; lane: Lane; event: DeviceEvent };
+  | { kind: "span"; lane: Lane; span: Span }
+  | { kind: "event"; lane: Lane; event: DeviceEvent }
+  | { kind: "finding"; lane: Lane; finding: Finding };
 
 /** One frame at 60Hz, which is the unit "peak per frame" is counted in. */
 const FRAME_MS = 16;
@@ -165,6 +168,12 @@ export function laneStat(
         ? `${warnings.length} · ${errors} error${errors === 1 ? "" : "s"}`
         : `${warnings.length} warnings`;
     }
+
+    // The findings lane's gutter text is driven by the fetch's own
+    // loading/stale/empty state, not by anything in `events` — TimelinePanel
+    // renders `FindingsLaneStatus` for this lane instead of this string.
+    case "findings":
+      return "";
   }
 }
 
@@ -183,6 +192,13 @@ export function hitLane(
 ): Hit | null {
   const time = toTime(x, view, width);
   const tolerance = ((view.end - view.start) / Math.max(width, 1)) * 4;
+
+  // The findings lane's data is not a DeviceEvent stream at all — it is hit
+  // and drawn from a separate placement pass (see `hitFindings` below and
+  // `lib/findings.ts`). Nothing here ever names "findings" as an event, so
+  // this would return null on its own regardless; the early return just
+  // says so rather than relying on that as an accident.
+  if (lane.kind === "findings") return null;
 
   if (lane.kind === "spans") {
     const span = spans.find(
@@ -217,6 +233,18 @@ export function hitLane(
   }
 
   return best && bestDistance <= tolerance * 3 ? { kind: "event", lane, event: best } : null;
+}
+
+/**
+ * The findings lane's own hit test: which already-placed finding, if any,
+ * sits under a pointer at `(x, y)` inside the plot. Row-first, because two
+ * findings can share the same x range and only differ by which of the
+ * stacked rows they landed in (that is the entire reason rows exist).
+ */
+export function hitFindings(placed: PlacedFinding[], x: number, y: number): PlacedFinding | null {
+  const row = Math.floor((y - FINDINGS_CEILING) / (FINDINGS_ROW_HEIGHT + FINDINGS_ROW_GAP));
+  if (row < 0) return null;
+  return placed.find((item) => item.row === row && x >= item.x && x <= item.x + item.width) ?? null;
 }
 
 export interface NavRule {
