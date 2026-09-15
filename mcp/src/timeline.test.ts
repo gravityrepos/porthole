@@ -759,6 +759,25 @@ describe("/api/findings?trace= validation (GRA-113 AC5)", () => {
     expect(response.status).toBe(400);
   });
 
+  it("400s an id with a character outside the allowed set, even when a matching real file exists", async () => {
+    // The two checks in resolveTraceFile() overlap heavily — a traversal
+    // shape fails the regex AND fails the resolve-vs-literal-concat
+    // comparison, so a test built only from traversal payloads cannot tell
+    // whether the character class is actually doing anything. A space is
+    // the case that separates them: it does not change what `resolve`
+    // normalises to, so the belt-and-suspenders check alone would let a
+    // real file called "weird id.pftrace" through. The character class is
+    // what has to refuse this one.
+    const weirdId = "weird id";
+    await writeFile(resolve(tracesDir, `${weirdId}.pftrace`), "");
+    try {
+      const response = await timeline.send(`/api/findings?trace=${encodeURIComponent(weirdId)}`);
+      expect(response.status).toBe(400);
+    } finally {
+      await rm(resolve(tracesDir, `${weirdId}.pftrace`), { force: true });
+    }
+  });
+
   it("400s a unix-style traversal", async () => {
     const response = await timeline.send(
       "/api/findings?trace=" + encodeURIComponent("../../../etc/passwd"),
