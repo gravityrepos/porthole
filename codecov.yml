@@ -1,0 +1,58 @@
+# GRA-190: coverage reporting on every PR. Uploaded from .github/workflows/pr.yml
+# — the Gradle job uploads jacoco XML under the `jvm` flag, the Node job
+# uploads each vitest suite's lcov under `server`/`ui`, on every leg.
+#
+# require_ci_to_pass: false — a red test suite still uploads whatever
+# coverage it produced (pr.yml's upload steps run `if: always()`), so a
+# failing PR doesn't also show as "no coverage data" on top of the real
+# failure.
+codecov:
+  require_ci_to_pass: false
+
+# Both checks are informational only: they show up on the PR but cannot
+# fail it, on purpose (GRA-190's ticket) — the founder turns this on for
+# real once there is a baseline worth gating on.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# "compact" from Codecov's own documented layout presets — validated against
+# https://codecov.io/validate before this file was committed.
+comment:
+  layout: "condensed_header, diff, flags, condensed_files, condensed_footer"
+  require_changes: false
+
+# One flag per suite pr.yml uploads separately. Paths scope each flag to the
+# module(s) that suite actually exercises, so a change to, say, mcp/ui/src/
+# shows up under `ui` and not also under `server`.
+flags:
+  jvm:
+    paths:
+      - gradle-plugin/
+      - runtime/
+  server:
+    paths:
+      - mcp/src/
+  ui:
+    paths:
+      - mcp/ui/src/
+
+# Generated output, docs and the parts of the tree nothing here measures.
+# mcp/src/testing/** and runtime-noop/** mirror the excludes already applied
+# at the suite level (mcp/vitest.config.ts's coverage.exclude, and
+# runtime-noop having no tests worth measuring at all) so a stray file
+# outside those suites' own reports can't sneak into a percentage anyway.
+ignore:
+  - site/**
+  - docs/**
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/*.test.ts"
+  - mcp/src/testing/**
+  - sample/**
+  - runtime-noop/**

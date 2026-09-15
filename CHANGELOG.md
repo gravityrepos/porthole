@@ -34,6 +34,10 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- Every PR now reports test coverage to Codecov: JaCoCo XML for the two
+  Kotlin modules under a `jvm` flag, and `lcov` from each vitest suite under
+  `server`/`ui`. Both status checks are informational and cannot fail a PR
+  (GRA-190).
 - Why the app died last time: a new runtime collector reads
   `ActivityManager.getHistoricalProcessExitReasons` on install (API 30+) and
   emits one `exit` event per death not already reported, deduplicated across
