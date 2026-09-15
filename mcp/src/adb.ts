@@ -404,11 +404,13 @@ export interface RunAdbAsyncOptions {
    * hypothesised: `index.test.ts`'s GRA-89 rig test used to set
    * `process.env.NODE_OPTIONS` globally for its ~3s capture window, and an
    * unrelated `cli.test.ts` case that spawns its own child process during
-   * that window failed intermittently, once in several full-suite runs,
-   * with an exit code its own assertions could not explain — a real
-   * instance of the leak this parameter exists to make unnecessary. Scoping
-   * the override to one `spawn()` call removes the shared mutable state
-   * instead of narrowing the window it is exposed for.
+   * that window failed intermittently — once, across the handful of
+   * full-suite runs made while building this fix, with an exit code its own
+   * assertions could not explain — and it did not recur once this parameter
+   * replaced the global mutation. A real instance of the leak this
+   * parameter exists to make unnecessary. Scoping the override to one
+   * `spawn()` call removes the shared mutable state instead of narrowing
+   * the window it is exposed for.
    */
   env?: NodeJS.ProcessEnv;
 }
