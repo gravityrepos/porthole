@@ -43,6 +43,7 @@ import live.gravitylabs.porthole.collect.MemoryCollector
 import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.protocol.DbPage
 import live.gravitylabs.porthole.protocol.DbTables
+import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.ExitTraceResult
 import live.gravitylabs.porthole.protocol.Inflight
 import live.gravitylabs.porthole.protocol.SetupEntry
@@ -531,17 +532,15 @@ object Porthole {
         }
 
         method("timeline") { params ->
-            val sinceSeq = params.long("sinceSeq")
-            val sinceMs = params.long("sinceMs")
-            val from = params.long("from")
-            val to = params.long("to")
-            val limit = params.int("limit") ?: 1000
-            val events = when {
-                from != null || to != null -> s.ring.between(from ?: 0L, to ?: Long.MAX_VALUE, limit)
-                sinceSeq != null -> s.ring.since(sinceSeq, limit)
-                sinceMs != null -> s.ring.sinceTime(nowMs() - sinceMs, limit)
-                else -> s.ring.since(s.ring.oldestSeq(), limit)
-            }
+            val events = timelineEvents(
+                ring = s.ring,
+                sinceSeq = params.long("sinceSeq"),
+                sinceMs = params.long("sinceMs"),
+                from = params.long("from"),
+                to = params.long("to"),
+                limit = params.int("limit") ?: 1000,
+                now = nowMs(),
+            )
             encode(
                 TimelinePage.serializer(),
                 TimelinePage(
@@ -704,6 +703,56 @@ object Porthole {
 
     private const val RES_PORT = "porthole_port"
     private const val RES_RING_CAPACITY = "porthole_ring_capacity"
+}
+
+/**
+ * The events `timeline` returns, assembled outside the RPC handler so the
+ * window logic can be checked without a device — same reason [blockingReport]
+ * lives out here.
+ *
+ * Four mutually-exclusive modes, not three: a cursor ([sinceSeq], for a
+ * client backfilling from where it last left off), the three time-bounded
+ * shapes every other collector already shares ([sinceMs], [from]/[to], or
+ * both — see [Window.resolve] for exactly what each combination means), and
+ * "give me everything buffered" when none of the four is given.
+ *
+ * The time-bounded shapes used to be handled by hand here, tested with
+ * `from != null || to != null` **first** — so a caller who sent both
+ * `sinceMs` and `to` (exactly what an agent does when it quotes a `findings`
+ * window into `timeline`) had `sinceMs` silently thrown away and got
+ * `between(0, to)` instead of the window it asked for. The same code also
+ * left the `sinceMs`-only branch with no ceiling at all, and used
+ * `to ?: Long.MAX_VALUE` as the from/to branch's ceiling — GRA-84's precise
+ * unbounded-ceiling defect, already fixed everywhere else. Routing through
+ * [Window.resolve] fixes all three at once by construction, and it is the
+ * same call `frames`' `report(sinceMs, from, to, limit)` makes, so the two
+ * resolve to the same range for the same arguments — that agreement is what
+ * `TimelineWindowTest` pins.
+ *
+ * The cursor mode is unchanged: `Window` has no concept of a sequence
+ * number, and folding it in was explicitly out of GRA-84's scope and stays
+ * out of this fix's too. It is also unconditionally ranked below the
+ * time-bounded shapes, exactly as `from`/`to` already outranked it before
+ * this change — no caller has ever sent `sinceSeq` alongside a time bound,
+ * so this is a distinction without a difference in practice, but it keeps
+ * the precedence rule simple: any of `sinceMs`/`from`/`to` present means a
+ * time-bounded request.
+ */
+internal fun timelineEvents(
+    ring: EventRing,
+    sinceSeq: Long?,
+    sinceMs: Long?,
+    from: Long?,
+    to: Long?,
+    limit: Int,
+    now: Long,
+): List<EventFrame> = when {
+    sinceMs != null || from != null || to != null -> {
+        val window = Window.resolve(sinceMs, from, to, now)
+        ring.between(window.first, window.last, limit)
+    }
+    sinceSeq != null -> ring.since(sinceSeq, limit)
+    else -> ring.since(ring.oldestSeq(), limit)
 }
 
 /**

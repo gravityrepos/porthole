@@ -185,6 +185,13 @@ PR that makes the change, not after the fact.
   pointed at a real JDK 17 source (GRA-98).
 - The publishing commands no longer reference a build cache they were
   never going to use (GRA-75).
+- `timeline` no longer silently drops `sinceMs` when `to` is also given —
+  it now resolves its window the same way `frames` and every other
+  time-bounded tool does, with a ceiling at now and no negative floor; its
+  `sinceSeq` cursor mode is untouched. The MCP server's own `resolveWindow`
+  now clamps a negative `from` to 0 and refuses an inverted window (`from`
+  after `to`) instead of handing one back, and `windowShape`'s `to`/`sinceMs`
+  descriptions say what the code actually defaults to (GRA-120).
 
 ## [0.1.0] - 2026-09-11
 
