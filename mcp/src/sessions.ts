@@ -206,6 +206,28 @@ export class SessionWriter {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** Chains flushes so an interval tick and an explicit flush() never interleave two appendFile calls on the same file. */
   private flushing: Promise<void> = Promise.resolve();
+  /**
+   * GRA-191: true for the whole span of an in-flight `open()` call — from
+   * before its first `await` to its `finally`, success or failure. This,
+   * not `dir`, is what lets `append()` tell "a session is being opened,
+   * queue this" apart from "nothing will ever open here, drop this": `dir`
+   * itself is not set until partway through `open()` (see below), so an
+   * event arriving in the gap before that line runs would otherwise look
+   * identical to one arriving with persistence off entirely.
+   */
+  private opening = false;
+  /**
+   * GRA-191: true once `close()` has run and no `open()` has run since.
+   * `DeviceClient.stop()` calls `close()` so nothing here outlives the
+   * caller (see that method); `append()` drops silently while this is true,
+   * the same "nowhere to put this" shape as never having opened at all,
+   * rather than queuing into a writer its owner has already said it is done
+   * with. `open()` clears it unconditionally, including on the idempotent
+   * "same identity" path, because a reconnect (stop() closed this writer; a
+   * fresh hello reopens it) must resume appending, not stay silently closed
+   * forever just because the identity did not change.
+   */
+  private closed = false;
 
   constructor(
     readonly root: string,
@@ -244,57 +266,78 @@ export class SessionWriter {
 
     const identity = sessionIdentity(hello);
     const dir = path.join(this.root, sessionDirName(identity));
+    // GRA-191: un-closes the writer even on the idempotent "same identity"
+    // path below — see `closed`'s own comment on why a reconnect must not
+    // stay closed just because nothing about the identity changed.
+    this.closed = false;
     if (this.dir === dir) return;
 
-    await this.flush();
+    this.opening = true;
+    try {
+      await this.flush();
 
-    this.dir = dir;
-    await mkdir(dir, dirOptions());
-    this.meta = (await readMeta(dir)) ?? {
-      packageName: identity.packageName,
-      deviceId: identity.deviceId,
-      startedAt: identity.startedAt,
-      device: hello.device,
-      sdkInt: hello.sdkInt,
-      versionName: hello.versionName,
-      firstT: null,
-      lastT: null,
-      eventCounts: {},
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    await writeFile(metaPath(dir), JSON.stringify(this.meta, null, 2), fileOptions());
+      this.dir = dir;
+      await mkdir(dir, dirOptions());
+      this.meta = (await readMeta(dir)) ?? {
+        packageName: identity.packageName,
+        deviceId: identity.deviceId,
+        startedAt: identity.startedAt,
+        device: hello.device,
+        sdkInt: hello.sdkInt,
+        versionName: hello.versionName,
+        firstT: null,
+        lastT: null,
+        eventCounts: {},
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      await writeFile(metaPath(dir), JSON.stringify(this.meta, null, 2), fileOptions());
 
-    // Every new (or resumed) session is a natural, cheap point to sweep: it
-    // is already the moment this writer is about to grow the directory it
-    // would prune from, and it means retention runs on the same cadence a
-    // long-lived MCP server actually sees `hello`s, not on a separate timer
-    // this ticket does not need. `activeDir` is *this* session, just opened
-    // above — never the one about to be pruned, no matter its age or size.
-    await enforceRetention(this.root, retentionOptionsFromEnv(), this.currentDir());
+      // Every new (or resumed) session is a natural, cheap point to sweep:
+      // it is already the moment this writer is about to grow the directory
+      // it would prune from, and it means retention runs on the same
+      // cadence a long-lived MCP server actually sees `hello`s, not on a
+      // separate timer this ticket does not need. `activeDir` is *this*
+      // session, just opened above — never the one about to be pruned, no
+      // matter its age or size.
+      await enforceRetention(this.root, retentionOptionsFromEnv(), this.currentDir());
+
+      // GRA-191: `device.ts` now emits its own "hello" — and lets a caller
+      // start sending events — before this method is even called, not just
+      // before it resolves (see that file's `connect()`). Anything
+      // `append()`ed during the disk I/O above was queued rather than
+      // dropped (see `append()`'s own comment); flush it now that `dir`
+      // exists, rather than waiting on `append()`'s own 250ms timer, so a
+      // caller that awaits `open()` and immediately reads the session back
+      // sees everything that arrived during the wait.
+      await this.flush();
+    } finally {
+      this.opening = false;
+    }
   }
 
   /**
    * Queues an event. The actual disk write happens on the next `flush()`,
    * arranged on a timer here — never inline, which is the whole point (AC4).
    *
-   * Silently does nothing without an open session: persistence being off (no
-   * root configured — see `device.ts`) or `hello` not having landed yet both
-   * look like this from the caller's side, and neither is an error.
+   * Silently does nothing with no session that will ever open to receive it:
+   * persistence being off (no root configured — see `device.ts`), a writer
+   * `close()` has already closed, or `open()` never having been called at
+   * all all look like this from the caller's side, and none of them is an
+   * error.
+   *
+   * GRA-191: does *not* require `dir` to already be set. `device.ts` now
+   * emits "hello" — and lets a caller start sending events — before it even
+   * calls `open()`, not just before `open()` resolves, so an event can
+   * legitimately arrive before `dir` exists yet. `opening` is what tells
+   * that apart from "no session will ever open here": queue in the former
+   * case (open()'s own trailing flush — see above — writes it out once
+   * `dir` exists), drop in the latter (nothing will ever flush a queue that
+   * never has an open directory behind it).
    */
   append(event: SessionEvent): void {
-    if (!this.dir) return;
-    // GRA-185: captured here, off the wire, rather than read back out of
-    // `events.ndjson` later — `meta.json` is the cheap, already-flushed
-    // record `resolveProfile` (trace.ts) consults once the live ring has
-    // moved past the one moment this event exists (`DeviceCollector` emits
-    // it once, at startup). `this.meta` is set before any event can reach
-    // here (`open()` awaited by `device.ts`'s `hello` handler, `append()`
-    // only ever called after), so this never needs to invent one.
-    if (this.meta) {
-      const profile = profileFromEvent(event as unknown as Parameters<typeof profileFromEvent>[0]);
-      if (profile) this.meta.profile = profile;
-    }
+    if (this.closed) return;
+    if (!this.dir && !this.opening) return;
     this.queue.push(event);
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
@@ -326,20 +369,47 @@ export class SessionWriter {
     const batch = this.queue;
     this.queue = [];
 
-    const lines = batch.map((event) => JSON.stringify(event)).join("\n") + "\n";
-    await mkdir(dir, dirOptions());
-    await appendFile(eventsPath(dir), lines, { encoding: "utf8", ...fileOptions() });
+    try {
+      const lines = batch.map((event) => JSON.stringify(event)).join("\n") + "\n";
+      await mkdir(dir, dirOptions());
+      await appendFile(eventsPath(dir), lines, { encoding: "utf8", ...fileOptions() });
 
-    const meta = this.meta ?? (await readMeta(dir));
-    if (meta) {
-      for (const event of batch) {
-        meta.eventCounts[event.event] = (meta.eventCounts[event.event] ?? 0) + 1;
-        meta.firstT = meta.firstT === null ? event.t : Math.min(meta.firstT, event.t);
-        meta.lastT = meta.lastT === null ? event.t : Math.max(meta.lastT, event.t);
+      const meta = this.meta ?? (await readMeta(dir));
+      if (meta) {
+        for (const event of batch) {
+          meta.eventCounts[event.event] = (meta.eventCounts[event.event] ?? 0) + 1;
+          meta.firstT = meta.firstT === null ? event.t : Math.min(meta.firstT, event.t);
+          meta.lastT = meta.lastT === null ? event.t : Math.max(meta.lastT, event.t);
+          // GRA-191: moved here from `append()`. `append()` can now queue an
+          // event before `this.meta` exists yet — the window `open()` is
+          // still in its own `mkdir`/`readMeta` (see `append()`'s comment) —
+          // so capturing the profile at append() time could silently miss
+          // it for whichever event happened to land in that window. Every
+          // event reaches this loop only once `meta` is known to exist (or
+          // there is genuinely nothing to capture into), so this is the one
+          // place the capture can never be skipped for lack of a meta
+          // object to put it in.
+          const profile = profileFromEvent(event as unknown as Parameters<typeof profileFromEvent>[0]);
+          if (profile) meta.profile = profile;
+        }
+        meta.updatedAt = Date.now();
+        this.meta = meta;
+        await writeFile(metaPath(dir), JSON.stringify(meta, null, 2), fileOptions());
       }
-      meta.updatedAt = Date.now();
-      this.meta = meta;
-      await writeFile(metaPath(dir), JSON.stringify(meta, null, 2), fileOptions());
+    } catch (error) {
+      // GRA-191: the session root can be removed out from under a still-
+      // armed flush — a test's teardown (or a real short-lived process)
+      // deleting `sessionsRoot` while an event was queued and the flush
+      // timer was still pending is the repro GRA-183 found. There is
+      // nowhere left to write, and `batch` (already spliced out of
+      // `this.queue` above) is not coming back — the same loss a killed
+      // process before any flush at all would already produce, not a new
+      // one this introduces, so treating it as "nothing to flush" rather
+      // than surfacing an unhandled rejection is honest, not a cover-up.
+      // Anything else (a permissions error, a full disk) is a real problem
+      // and must still surface — checking the code, rather than swallowing
+      // every error this method can raise, is what keeps that true.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
@@ -349,6 +419,23 @@ export class SessionWriter {
 
   currentMeta(): SessionMeta | null {
     return this.meta;
+  }
+
+  /**
+   * GRA-191: called from `DeviceClient.stop()` so nothing here outlives the
+   * caller. Flushes whatever is queued — which also cancels the pending
+   * flush timer, since `doFlush()`'s own first lines clear it unconditionally
+   * — rather than leaving a still-armed timer to fire later, potentially
+   * well after whatever root this writer lives under has been torn down (a
+   * test's `afterEach`, a real process exit). Also marks the writer closed
+   * (see `closed`'s own comment) so a straggling `append()` after this —
+   * `stop()` destroying the socket and the "close" handler both reacting to
+   * the same teardown — drops silently instead of queuing into a writer
+   * nothing will flush again until a new `open()`.
+   */
+  close(): void {
+    this.closed = true;
+    void this.flush();
   }
 }
 

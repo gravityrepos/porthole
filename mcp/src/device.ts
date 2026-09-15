@@ -208,6 +208,17 @@ export class DeviceClient extends EventEmitter {
     // that is still scheduled, so a subsequent disconnect never retries.
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    // GRA-191: close the writer here, synchronously with stop() itself,
+    // rather than relying solely on the "close" handler below reacting to
+    // socket.destroy() — that handler fires on a later tick (net sockets
+    // emit "close" asynchronously), which is exactly the gap that let a
+    // still-armed 250ms flush timer survive past a test's own teardown and
+    // fire against a sessions root the teardown had already removed
+    // (GRA-183's reproduction). close() flushes whatever is queued (which
+    // also cancels that timer — see SessionWriter.doFlush()'s own first
+    // lines) and marks the writer closed so nothing appended after this
+    // point queues into a writer nothing will flush again.
+    this.sessions?.close();
     this.socket?.destroy();
     this.socket = null;
     this.setState("disconnected");
@@ -242,15 +253,6 @@ export class DeviceClient extends EventEmitter {
           // also asserts this itself, so a future edit that reordered these
           // two lines would fail loudly instead of reintroducing the race.
           this.hello = hello;
-          // GRA-53 `#session-writer`: opens (or resumes) the on-disk session
-          // for this identity. Awaited, not fire-and-forget, so that
-          // "connected" — and the events a caller might start sending the
-          // instant it sees that state — never arrive before there is
-          // somewhere for `append()` below to put them; `append()` silently
-          // drops anything received while `sessions.currentDir()` is still
-          // null, by design, the same way it silently no-ops when
-          // persistence is off entirely.
-          if (this.sessions) await this.sessions.open(hello);
           // GRA-96: computed right where `hello` is set, not deferred to
           // whichever tool asks later — a caller reading `protocolMismatch`
           // right after the "hello" event below always sees the answer for
@@ -259,6 +261,9 @@ export class DeviceClient extends EventEmitter {
           // the app really did answer, so the rest of the surface (findings,
           // timeline, …) still works for whatever it can, and this is the
           // one specific, actionable fact layered on top (GRA-96 AC1/AC2).
+          // Synchronous, like the assignment above — that is what lets it
+          // sit between `this.hello = hello` and the emit below without
+          // reopening GRA-191's race (see that emit's own comment).
           this.protocolMismatch =
             hello.protocol === PROTOCOL_VERSION
               ? null
@@ -266,8 +271,41 @@ export class DeviceClient extends EventEmitter {
                 `${PROTOCOL_VERSION}. Update the app's Porthole runtime dependency to a version that ` +
                 `speaks protocol ${PROTOCOL_VERSION}, or pin the npm package this MCP server runs from ` +
                 `(in .mcp.json) to the version that matches the app.`;
-          this.setState("connected");
+          // GRA-191: `this.hello = hello` above and this emit must stay
+          // exactly this close together, with nothing between them that can
+          // yield to the event loop. GRA-53 used to put
+          // `await this.sessions.open(hello)` right here, reasoning that
+          // "connected" — and the events a caller might start sending the
+          // instant it sees that state — should never arrive before there
+          // was somewhere for `append()` to put them. That reasoning was
+          // right about `append()` and wrong about this emit: `open()` is
+          // real disk I/O (mkdir/readFile/writeFile/enforceRetention), and
+          // awaiting it here opened a window in which `timeline.ts`'s
+          // "hello" listener — the thing that clears its ring for a new
+          // session — had not run yet, so an event arriving in that window
+          // got pushed onto the ring first and was wiped a moment later when
+          // the delayed "hello" finally fired (GRA-183's reproduction).
+          // Moving the emit up here removes the window instead of narrowing
+          // it: every "hello" listener runs to completion before this
+          // function's own next line ever executes, so nothing can land
+          // between "the ring has cleared for this session" and "the ring
+          // is accepting this session's events" — there is no gap for
+          // anything to land in. Do not put an `await` of any kind between
+          // the assignment above and this emit — that is the exact mistake
+          // GRA-191 is about. `sessions.open()` still runs, just after, and
+          // `SessionWriter.append()` now queues anything that arrives while
+          // it is still in flight rather than dropping it (see sessions.ts),
+          // so nothing below this line depends on `open()` having already
+          // resolved.
           this.emit("hello", hello);
+          // GRA-53 `#session-writer`: opens (or resumes) the on-disk session
+          // for this identity. Awaited before `setState("connected")` below
+          // — not before the emit above any more — so "connected" still
+          // means what GRA-157's tests pin (a writer whose directory is
+          // guaranteed to exist by the time a caller sees that state)
+          // without that guarantee costing the emit its synchronicity.
+          if (this.sessions) await this.sessions.open(hello);
+          this.setState("connected");
         })
         .catch((error: Error) => {
           // The socket is still open and still usable — only the hello
@@ -351,8 +389,13 @@ export class DeviceClient extends EventEmitter {
       // GRA-53: queued, not written — SessionWriter.append() only ever
       // pushes to its own in-memory array and arms a flush timer, so this
       // line does not touch the filesystem and cannot be the reason a frame
-      // is processed late. `append()` is itself a no-op with no open session
-      // (persistence off, or hello has not landed/finished opening yet).
+      // is processed late. GRA-191: append() no longer needs the session's
+      // directory to already exist to accept this — persistence being off
+      // entirely, or a writer `close()` already closed, are the only cases
+      // it still silently drops; an event that arrives while `open()` is
+      // still awaiting disk I/O (or has not even been called yet — see
+      // `connect()`'s "hello" handler) is queued and written once the
+      // directory exists.
       this.sessions?.append(frame as SessionEvent);
       this.emit("event", frame);
       return;
