@@ -2164,7 +2164,12 @@ function setupFakeAdb(): FakeAdb {
     binaryPath,
     env: { ...process.env, NODE_OPTIONS: `--require=${preloadPath}` },
     cleanup() {
-      rmSync(root, { recursive: true, force: true });
+      // Windows can refuse to unlink a just-exited executable for a moment
+      // (EPERM while the OS or an antivirus scanner still holds it); CI's
+      // windows leg hit exactly that on the first run. Retrying is the
+      // documented remedy, and nothing here depends on the directory being
+      // gone instantly.
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     },
   };
 }
@@ -2213,7 +2218,7 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
     } finally {
       await rig.close();
       fakeAdb.cleanup();
-      rmSync(outputDir, { recursive: true, force: true });
+      rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }, 20_000);
 });
