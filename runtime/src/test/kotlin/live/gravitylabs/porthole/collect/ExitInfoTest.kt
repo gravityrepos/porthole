@@ -168,13 +168,23 @@ class ExitInfoTest {
         val event = exitEvents(ring).single()
         val mainStack = event.field("mainStack")?.jsonPrimitive?.content
             ?: error("expected a mainStack field on an ANR exit event")
+        // The raw fixture's true top frame is `java.lang.Thread.sleep` — a
+        // framework frame, not the app's — with the app's own frames sitting
+        // lower in the same thread. Asserting the app frame leads is only
+        // real evidence of reordering because of that: a collector that
+        // forgot to call StackFormat.order at all would produce a mainStack
+        // starting with `java.lang.Thread.sleep`, not the app frame, and
+        // this assertion would catch it. (An earlier version of this fixture
+        // put the app frame at the raw top too, which made this assertion
+        // pass whether or not reordering ever ran — see the mutation that
+        // caught that, quoted in the ticket's self-check.)
         assertTrue(
             "expected the app's own frame first, got: $mainStack",
             mainStack.startsWith("com.example.shop.data.CartRepository.blockingLoad"),
         )
-        // android.app.Activity.performCreate is the top frame the raw trace
-        // actually carries; it is real evidence and must survive reordering,
+        // The framework frame is real evidence and must survive reordering,
         // just not lead it.
+        assertTrue(mainStack.contains("java.lang.Thread.sleep"))
         assertTrue(mainStack.contains("android.app.Activity.performCreate"))
 
         assertEquals(1, event.field("otherThreadCount")?.jsonPrimitive?.content?.toInt())
@@ -314,6 +324,8 @@ class ExitInfoTest {
               | stack=0x0 stackSize=8188KB
               | held mutexes=
               native: #00 pc 00001234  /system/lib64/libc.so (nanosleep+123)
+              at java.lang.Thread.sleep(Native Method)
+              at java.lang.Thread.sleep(Thread.java:450)
               at com.example.shop.data.CartRepository.blockingLoad(CartRepository.kt:42)
               at com.example.shop.ui.CartViewModel.<init>(CartViewModel.kt:18)
               at android.app.Activity.performCreate(Activity.java:8000)
