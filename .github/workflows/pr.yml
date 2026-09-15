@@ -235,6 +235,25 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # GRA-172: `npm run build` type-checks src/ through tsc, but tsconfig.json
+      # excludes src/testing/** and *.test.ts on purpose (see that file's own
+      # comment — publishing dist/testing/ was GRA-90's tarball bug), so a type
+      # error there has always left `tsc --noEmit` and this build step both at
+      # exit 0. src/testing/stripComments.ts is now the shared engine behind
+      # the ConnectionState guard (surface.test.ts) and the PROTOCOL_VERSION
+      # drift scan (device.test.ts) — the project's only two source-text
+      # guards — so a silent type error in it would leave both unable to see
+      # their own input with nothing here saying so. This step runs a second,
+      # noEmit-only project (tsconfig.typecheck.json) that covers everything
+      # tsconfig.json excludes except *.test.ts (fixing pre-existing vitest
+      # mock-typing errors in test files is a separate, wider change — see
+      # GRA-172's Linear comment). noEmit means this can never write to dist/
+      # or change what `npm pack` publishes; it only fails the job on a type
+      # error, the same way the build step above already does for the rest of
+      # src/.
+      - name: Type-check src/testing/ (tsc --noEmit, second project)
+        run: npm run typecheck:src
+
       # GRA-164: unit tests for the parsing check-readme-vitest-counts.mjs
       # relies on (thousands-separator rejection especially). node:test, not
       # vitest, and deliberately not wired through `npm test` — see the test
