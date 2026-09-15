@@ -25,6 +25,12 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildTrace, type Finding } from "./trace.js";
+import {
+  UNKNOWN_DEVICE_ID,
+  fillWindowFromDisk,
+  sessionsRoot as sessionsRootPath,
+  type SessionEvent,
+} from "./sessions.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -137,7 +143,11 @@ export function joinSummaryAndPayload(summary: string, ...payload: [unknown] | [
 }
 
 export function createPortholeServer(options: PortholeServerOptions = {}): PortholeServer {
-  const device = options.device ?? new DeviceClient(HOST, PORT);
+  // GRA-53 `#window-fallback`: the real boot path gets on-disk session
+  // persistence; a test that injects its own `options.device` (the harness
+  // in `testing/harness.ts`, or a hand-built fake) is unaffected — this
+  // branch only runs when nothing was injected.
+  const device = options.device ?? new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory));
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
 
   const server = new McpServer({
@@ -326,12 +336,60 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   /** The span actually examined, resolved against the buffer so it can be quoted back. */
   function resolveWindow(w: Window): { from: number; to: number; ms: number } | null {
     const events = timeline.buffer();
-    if (events.length === 0) return null;
+    if (events.length === 0) {
+      // GRA-53: an empty *live* buffer used to mean "no window at all" —
+      // right when the only source was memory. It no longer is: an agent
+      // quoting a `window` from an earlier answer (the pattern every tool
+      // description here recommends) is asking about a moment on the device
+      // uptime clock, which is exactly as answerable from disk after the MCP
+      // server restarts as it was from the ring before. Only the explicit
+      // case is widened — `sinceMs`-relative-to-"now" still has no "now"
+      // without a live buffer to take it from, so that shape still returns
+      // null exactly as before.
+      if (w.from !== undefined && w.to !== undefined) {
+        return { from: w.from, to: w.to, ms: Math.max(0, w.to - w.from) };
+      }
+      return null;
+    }
     const newest = events[events.length - 1].t;
     const oldest = events[0].t;
     const to = w.to ?? newest;
     const from = w.from ?? (w.sinceMs !== undefined ? to - w.sinceMs : oldest);
     return { from, to, ms: Math.max(0, to - from) };
+  }
+
+  /**
+   * The identity `fillWindowFromDisk` should look up sessions under: the
+   * currently-connected process's `hello`, or — the post-mortem case this
+   * whole ticket is about — the last one `device.ts` saw exit. Null only
+   * when neither has ever existed (never connected, this process's whole
+   * life).
+   */
+  function currentIdentity(): { packageName: string; deviceId: string } | null {
+    const hello = device.hello ?? device.lastExited?.hello ?? null;
+    if (!hello) return null;
+    return {
+      packageName: hello.packageName,
+      deviceId: (hello as { deviceId?: string }).deviceId ?? UNKNOWN_DEVICE_ID,
+    };
+  }
+
+  /**
+   * `findings`/`what_was_happening`/`timeline`'s one shared call into
+   * `sessions.ts` — see that module's `fillWindowFromDisk` doc comment for
+   * why routing all three through the same function is the point, not an
+   * incidental convenience (GRA-163's history is full of what happens when
+   * three tools each hand-roll the same merge).
+   */
+  async function mergeWithDisk(from: number, to: number) {
+    return fillWindowFromDisk({
+      root: device.sessions?.root ?? sessionsRootPath(resolveProjectRoot().directory),
+      identity: currentIdentity(),
+      buffered: timeline.buffer() as unknown as SessionEvent[],
+      currentSessionDir: device.sessions?.currentDir() ?? null,
+      from,
+      to,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -976,6 +1034,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // Inert in practice (see findings' identical comment above) but the
         // strict sense, correctly, not whichever local is in scope.
         const notice = exitedProcessNotice(exitedProcess, false, pending === null);
+
+        // GRA-53: this is AC1's exact shape — the MCP server was just
+        // (re)started, so the live ring is empty by construction, but the
+        // moment being asked about may still be sitting on disk from before
+        // the restart. Tried before falling back to either "not connected"
+        // or "nothing buffered yet", since a real answer beats both.
+        if (at !== undefined) {
+          const merged = await mergeWithDisk(0, at + (spreadMs ?? 2_000));
+          if (merged.coveredFrom !== null && merged.coveredTo !== null && at >= merged.coveredFrom && at <= merged.coveredTo) {
+            const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], at, spreadMs ?? 2_000), clock: null };
+            return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
+          }
+        }
+
         if (pending !== null) {
           return ok(notice + pending, { moment: null, connected, exitedProcess });
         }
@@ -1031,6 +1103,23 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const oldest = events[0].t;
       const newest = events[events.length - 1].t;
       if (moment_at < oldest || moment_at > newest) {
+        // GRA-53: the ticket's headline scenario — the buffer rolled or the
+        // process restarted since, but the moment may still be on disk.
+        // `from: 0` rather than `oldest`: momentOf() needs the full nav
+        // history up to `moment_at` to say which screen was current (the
+        // last nav at-or-before the moment, not merely one inside the
+        // spread window), so the merge has to reach back further than the
+        // window actually returned.
+        const merged = await mergeWithDisk(0, moment_at + (spreadMs ?? 2_000));
+        if (
+          merged.coveredFrom !== null &&
+          merged.coveredTo !== null &&
+          moment_at >= merged.coveredFrom &&
+          moment_at <= merged.coveredTo
+        ) {
+          const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], moment_at, spreadMs ?? 2_000), clock };
+          return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
+        }
         return ok(
           notice +
             `That moment is outside what is buffered (${oldest}–${newest} on the uptime clock). ` +

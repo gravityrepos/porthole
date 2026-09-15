@@ -335,6 +335,47 @@ describe("fillWindowFromDisk", () => {
     expect(result.events).toHaveLength(3);
   });
 
+  it("does not report a quiet stretch inside a recorded session as clipped coverage", async () => {
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 5);
+    await writer.open(HELLO);
+    // A session that ran from t=0 to t=10_000 but only emitted two events,
+    // five seconds apart in the middle — a busy app can be quiet for a
+    // stretch without that stretch being unrecorded.
+    writer.append(event(0, 0));
+    writer.append(event(1, 10_000));
+    await writer.flush();
+
+    const result = await fillWindowFromDisk({
+      root,
+      identity: { packageName: HELLO.packageName, deviceId: HELLO.deviceId! },
+      buffered: [],
+      currentSessionDir: null,
+      from: 3_000,
+      to: 7_000, // a quiet middle stretch with no events in it at all
+    });
+
+    expect(result.events).toEqual([]);
+    // Coverage still spans the whole requested window: the session's own
+    // [firstT, lastT] is [0, 10_000], which contains [3000, 7000] entirely.
+    expect(result.coveredFrom).toBe(3_000);
+    expect(result.coveredTo).toBe(7_000);
+  });
+
+  it("reports no coverage at all for a window nothing overlaps", async () => {
+    const root = await tmpRoot();
+    const result = await fillWindowFromDisk({
+      root,
+      identity: { packageName: "com.nothing", deviceId: "x" },
+      buffered: [],
+      currentSessionDir: null,
+      from: 0,
+      to: 1_000,
+    });
+    expect(result.coveredFrom).toBeNull();
+    expect(result.coveredTo).toBeNull();
+  });
+
   it("returns nothing on disk when identity is null (never connected) but still reports the live buffer", async () => {
     const root = await tmpRoot();
     const result = await fillWindowFromDisk({

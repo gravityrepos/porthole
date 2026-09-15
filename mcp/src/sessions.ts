@@ -399,6 +399,25 @@ export interface WindowFill {
   /** `t` of the earliest event actually returned, or null if the merge found nothing. */
   oldest: number | null;
   newest: number | null;
+  /**
+   * The honest extent of the window that is actually *recorded* — from the
+   * live buffer's own bounds and every overlapping session's `[firstT,
+   * lastT]` — clipped to `[from, to]`. Null when nothing (buffer nor disk)
+   * overlaps the window at all.
+   *
+   * Deliberately not derived from `events`/`oldest`/`newest` above: a quiet
+   * stretch inside a fully-recorded session (nothing happened for five
+   * minutes of a busy app) must not read as "clipped" just because no event
+   * landed there — `clippedMs` (index.ts) is a coverage question, not a
+   * did-anything-happen question, and answering it from matched events
+   * alone would conflate the two. This is the union of coverage ranges that
+   * touch the window, which slightly overstates coverage across a genuine
+   * gap between two sessions (the device was actually off in between) —
+   * the same approximation the pre-ticket code already made using the live
+   * buffer's own bounds alone, not a new one introduced here.
+   */
+  coveredFrom: number | null;
+  coveredTo: number | null;
 }
 
 /**
@@ -447,9 +466,22 @@ export async function fillWindowFromDisk(params: {
     merged.push(event);
   };
 
+  let coveredFrom: number | null = null;
+  let coveredTo: number | null = null;
+  const widen = (rangeFrom: number, rangeTo: number) => {
+    const from = Math.max(params.from, rangeFrom);
+    const to = Math.min(params.to, rangeTo);
+    if (from > to) return; // this range does not actually touch the window
+    coveredFrom = coveredFrom === null ? from : Math.min(coveredFrom, from);
+    coveredTo = coveredTo === null ? to : Math.max(coveredTo, to);
+  };
+
   for (const event of params.buffered) {
     if (event.t < params.from || event.t > params.to) continue;
     take(event, params.currentSessionDir);
+  }
+  if (params.buffered.length > 0) {
+    widen(params.buffered[0].t, params.buffered[params.buffered.length - 1].t);
   }
 
   if (params.identity) {
@@ -457,6 +489,7 @@ export async function fillWindowFromDisk(params: {
     for (const session of sessions) {
       if (session.firstT === null || session.lastT === null) continue;
       if (session.lastT < params.from || session.firstT > params.to) continue;
+      widen(session.firstT, session.lastT);
       const fromDisk = await readSessionWindow(session.dir, params.from, params.to);
       for (const event of fromDisk) take(event, session.dir);
     }
@@ -467,6 +500,8 @@ export async function fillWindowFromDisk(params: {
     events: merged,
     oldest: merged.length > 0 ? merged[0].t : null,
     newest: merged.length > 0 ? merged[merged.length - 1].t : null,
+    coveredFrom,
+    coveredTo,
   };
 }
 
