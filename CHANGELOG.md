@@ -84,6 +84,18 @@ PR that makes the change, not after the fact.
   capture actually covers. The findings fetch itself moved out of the
   insights panel and into the app shell, so the panel and the lane share one
   request per settled view instead of doubling it (GRA-114).
+- Clicking a dropped frame, a main-thread stall, or a finding in the timeline
+  UI now offers **ask the trace**: it asks `GET /api/findings?trace=&from=&
+  to=` about that hit's own window (centred, floored at 200ms), scoped to
+  whichever listed capture's coverage actually reaches it, and renders the
+  answer under the selection — including a line for each of the five trace
+  questions that was answered but ruled nothing out, so a negative answer
+  reads as one. With no covering capture it says so and offers a copy-ready
+  capture prompt instead; either way a copy-ready prompt names the exact
+  window for pasting at an agent. The answer is cached per capture and window
+  for the session. `/api/findings` gained a minimal `asked: [{ id, answered
+  }]` field, one entry per trace question, so the UI can tell "answered, ruled
+  nothing out" apart from "never reached" (GRA-115).
 - `portholeTraceProcessor`, a Gradle task that fetches Perfetto's
   `trace_processor` (pinned v58.2, SHA-256 verified) and caches it under
   `~/.porthole/trace-processor/<version>/`.

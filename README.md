@@ -471,6 +471,23 @@ nothing to say about this window" (no bar reaches it) and "the trace says
 nothing was wrong here" (the bar reaches it and the lane is quiet), which
 otherwise look identical.
 
+Selecting a dropped frame, a main-thread stall, or a finding adds an
+**ask the trace** action to the selection panel — the gesture that replaces
+opening a trace viewer. It asks about that hit's own window (its duration,
+centred, floored at 200ms of total width — never the visible view) against
+whichever capture's coverage actually contains it: the one chosen above if
+its coverage reaches that far, otherwise the first listed capture that does,
+otherwise none. With none, the panel says plainly that no capture covers that
+moment and offers a copy-ready prompt for taking one. Otherwise it asks
+`GET /api/findings?trace=<id>&from=&to=` — the same endpoint the lane above
+already uses, no second implementation — and renders the answer sourced and
+confidence-labelled like every other finding, including a line for each
+question the trace answered that ruled something out rather than finding it:
+"the main thread was running for all of it" is as much an answer as a jank
+finding is. A copy-ready prompt names the same bounds for pasting at an agent.
+The answer is cached per capture and window for the session, so re-selecting
+the same hit never re-asks.
+
 The header also has **database**, a read-only inspector over the app's own
 tables — list, page, and run a SELECT — and **restart app**, which force-stops
 and relaunches over adb.
@@ -486,7 +503,11 @@ the device rather than assumed from the socket being loopback.
 finding sit in one list, on one severity vocabulary, each carrying a `source`.
 Add `?trace=<id>` to merge in what a system trace has to say about the same
 window; the id has to be one `GET /api/traces` just listed — an arbitrary
-filesystem path is refused, before anything is spawned.
+filesystem path is refused, before anything is spawned. When a trace was
+actually queried, the response also carries `asked`: one `{ id, answered }`
+per question `ask_system_trace` puts to it, so a caller can tell "this
+question was answered and ruled nothing out" apart from "this question was
+never reached" — the two look the same from the finding list alone.
 
 `GET /api/traces` lists what is under `.porthole/traces/`: `id` (the file name,
 without `.pftrace`), `bytes`, `recordedAt`, and `coverage` — the uptime window
