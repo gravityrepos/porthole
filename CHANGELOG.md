@@ -192,6 +192,20 @@ PR that makes the change, not after the fact.
   now clamps a negative `from` to 0 and refuses an inverted window (`from`
   after `to`) instead of handing one back, and `windowShape`'s `to`/`sinceMs`
   descriptions say what the code actually defaults to (GRA-120).
+- `findings` no longer prints a 60Hz frame budget on a higher-refresh-rate
+  panel just because the requested window misses the device's one startup
+  profile event; the resolved profile (live buffer, then the session's own
+  `meta.json`, then an honestly-labelled 60Hz guess) is now shared by every
+  trace-building path, and `frames`' own budget text agrees with `findings`'
+  instead of printing a different precision for the same panel (GRA-185).
+- `findings` no longer analyses a zero-length window and reports "0s
+  examined" when `since: "last"` finds nothing new past the watermark and no
+  earlier findings digest to reclassify against — it now says plainly that
+  nothing new has arrived, including on a fresh MCP process that has just
+  loaded that watermark from disk (GRA-189).
+- `porthole_status`'s `exitTrace` now accepts the ISO-8601 timestamp
+  `exits.recent` itself prints (`at`), not only the epoch-milliseconds
+  `timestamp` it already accepted (GRA-188).
 
 ## [0.1.0] - 2026-09-11
 

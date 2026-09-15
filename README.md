@@ -75,10 +75,11 @@ The event itself carries a *summary* of an ANR/native-crash trace, not the
 whole blob: the main thread's stack, app frames first (the same ordering
 `blocking` uses), plus a count of the other threads and the states they were
 in. The full trace — up to 256 KB, with a note if it was cut short — is one
-more call away: `porthole_status {"exitTrace": <timestamp>}`, the `timestamp`
-copied from an entry in `exits`. Both the summary and the full trace go
-through the same redaction every other captured string does, before either
-ever leaves the process.
+more call away: `porthole_status {"exitTrace": <timestamp>}`, copying either
+the epoch-milliseconds `timestamp` or the ISO-8601 `at` from that same entry
+in `exits` — both are accepted and converted. Both the summary and the full
+trace go through the same redaction every other captured string does,
+before either ever leaves the process.
 
 ## Layout
 
@@ -1025,7 +1026,7 @@ it mattered.
 worst ones, where the time went:
 
 ```
-157 of 241 frames janky (65.1%), budget 16ms.
+157 of 241 frames janky (65.1%), budget 16.7ms at 60Hz.
   222ms  missed 13  worst=swapBuffers
   100ms  missed  6  worst=animation
 ```

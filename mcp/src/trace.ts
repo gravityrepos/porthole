@@ -314,6 +314,103 @@ export function frameBudgetMs(refreshHz: number): number {
 }
 
 /**
+ * The budget clause every place that names a frame budget in prose shares
+ * (GRA-185's "second, smaller thing": `frames` and `findings` used to print
+ * the same quantity two different ways on the same panel). `findingsOf`'s
+ * own `frames-dropped` title and `frames`' tool text (index.ts) both call
+ * this, so the two cannot drift apart again the way GRA-185 found them.
+ *
+ * When `assumed` is true this is a guess dressed as one, not printed as an
+ * observed fact — `resolveProfile`'s own doc comment explains why the
+ * fallback matters enough to say so in the sentence itself.
+ */
+export function describeBudget(profile: { refreshHz: number; assumed: boolean }): string {
+  const ms = frameBudgetMs(profile.refreshHz);
+  return profile.assumed
+    ? `${ms}ms (assumed ${Math.round(profile.refreshHz)}Hz; no display profile seen)`
+    : `${ms}ms at ${Math.round(profile.refreshHz)}Hz`;
+}
+
+/** The fields a `device`/`profile` event, or a session's `meta.json`, carries about the device. Structurally what `sessions.ts`'s `SessionMeta.profile` stores. */
+export interface ProfileData {
+  model: string;
+  sdkInt: number;
+  abi: string;
+  cores: number;
+  deviceRamMb: number;
+  refreshHz: number;
+  lowRamDevice: boolean;
+}
+
+/**
+ * `null` unless `event` is a `device`/`profile` event — the one place that
+ * shape is read off the wire, shared by `resolveProfile` below (the live-
+ * buffer scan) and `sessions.ts`'s `SessionWriter.append` (capturing it into
+ * `meta.json` as it flows past), so the two readings can never disagree
+ * about what a profile event means.
+ */
+export function profileFromEvent(event: DeviceEvent): ProfileData | null {
+  if (event.event !== "device" || str(event.data.kind) !== "profile") return null;
+  return {
+    model: str(event.data.model),
+    sdkInt: num(event.data.sdkInt),
+    abi: str(event.data.abi),
+    cores: num(event.data.cores),
+    deviceRamMb: num(event.data.deviceRamMb),
+    refreshHz: num(event.data.refreshHz, 60),
+    lowRamDevice: event.data.lowRamDevice === "true" || event.data.lowRamDevice === true,
+  };
+}
+
+/** What `buildTrace` needs to know about the device: the resolved refresh rate, and whether that number is something the device actually reported (`assumed: false`, `full` carries the rest) or a guess (`assumed: true`, `full` absent). */
+export type ResolvedProfile = { assumed: false; refreshHz: number; full: ProfileData } | { assumed: true; refreshHz: number };
+
+/**
+ * GRA-185 ruling 1: the device profile used for the frame budget must not
+ * depend on whether the requested window happens to contain the one
+ * `device`/`profile` event `DeviceCollector` emits at startup — a window
+ * that starts after startup used to silently fall back to 60Hz and print it
+ * as though it were observed. Resolved in one order, everywhere:
+ *
+ *  1. The most recent profile event in the *live* buffer at or before the
+ *     window's end, **regardless of the window's start** — `liveEvents`
+ *     here must be the whole ring (or run), never pre-filtered to `from`.
+ *  2. Else the profile recorded in the current session's `meta.json`
+ *     (`SessionWriter.append` captures it as it flows past — see that
+ *     function's own comment) — covers a window the live ring has already
+ *     rolled the startup event out of, or a disk-only read
+ *     (`saveFromSessions`) with no live ring at all.
+ *  3. Else the fallback: assumed 60Hz, `assumed: true`. Every caller
+ *     (`findings`, `save_moment`, `porthole save`, `/api/findings`,
+ *     `/api/save`, and `frames`' own prose) resolves through this one
+ *     function — no second copy of the search order to drift from it.
+ */
+export function resolveProfile(params: {
+  /** The full live buffer/run, unfiltered by the window's own `from` — see point 1 above. Pass `[]` when there is no live buffer to search (the CLI's disk-only path). */
+  liveEvents: DeviceEvent[];
+  /** Only a profile at or before this counts — never one from later than what is being described. */
+  windowTo: number;
+  /** `meta.json`'s own `profile` field for the session in force, if any is on disk. */
+  sessionProfile?: ProfileData | null;
+  hello: Record<string, unknown> | null;
+}): ResolvedProfile {
+  const { liveEvents, windowTo, sessionProfile } = params;
+
+  let latest: { t: number; data: ProfileData } | null = null;
+  for (const event of liveEvents) {
+    if (event.t > windowTo) continue;
+    const data = profileFromEvent(event);
+    if (!data) continue;
+    if (!latest || event.t > latest.t) latest = { t: event.t, data };
+  }
+  if (latest) return { assumed: false, refreshHz: latest.data.refreshHz, full: latest.data };
+
+  if (sessionProfile) return { assumed: false, refreshHz: sessionProfile.refreshHz, full: sessionProfile };
+
+  return { assumed: true, refreshHz: 60 };
+}
+
+/**
  * What was still running when the recording stopped.
  *
  * Its own finding rather than a line folded into the counts, because an
@@ -359,6 +456,8 @@ export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
   refreshHz: number,
+  /** GRA-185: true when `refreshHz` is the 60Hz fallback rather than something the device reported — flips `frames-dropped` from `observed` to `correlated` and says so in the title, instead of stating a guess as fact. Defaults to false so every existing caller (a bare refresh rate, no opinion on how it was derived) keeps behaving exactly as before. */
+  assumed = false,
 ): Finding[] {
   const findings: Finding[] = [];
   const db = spans(events, "db");
@@ -477,8 +576,8 @@ export function findingsOf(
     findings.push({
       id: "frames-dropped",
       severity: "warning",
-      confidence: "observed",
-      title: `${missed} frames missed their deadline (budget ${frameBudgetMs(refreshHz)}ms at ${Math.round(refreshHz)}Hz)`,
+      confidence: assumed ? "correlated" : "observed",
+      title: `${missed} frames missed their deadline (budget ${describeBudget({ refreshHz, assumed })})`,
       detail: commonest
         ? `worst ${num(worst.data.totalMs)}ms · most often in ${commonest[0]}`
         : undefined,
@@ -634,21 +733,14 @@ export function buildTrace(options: {
   hello: Record<string, unknown> | null;
   durationMs: number;
   withEvents: boolean;
+  /** GRA-185: resolved once, by `resolveProfile` below, and handed in rather than re-derived here — see that function's own doc comment for why every caller must resolve it the same way. */
+  profile: ResolvedProfile;
 }): Trace {
-  const { events, hello } = options;
+  const { events, hello, profile } = options;
 
-  const profile = events.find((e) => e.event === "device" && str(e.data.kind) === "profile");
-  const device = profile
-    ? {
-        model: str(profile.data.model),
-        sdkInt: num(profile.data.sdkInt),
-        abi: str(profile.data.abi),
-        cores: num(profile.data.cores),
-        deviceRamMb: num(profile.data.deviceRamMb),
-        refreshHz: num(profile.data.refreshHz, 60),
-        lowRamDevice: profile.data.lowRamDevice === "true",
-      }
-    : { model: str(hello?.device), sdkInt: num(hello?.sdkInt), refreshHz: 60 };
+  const device = profile.assumed
+    ? { model: str(hello?.device), sdkInt: num(hello?.sdkInt), refreshHz: profile.refreshHz }
+    : { ...profile.full, refreshHz: profile.refreshHz };
 
   const marks = events
     .filter((e) => e.event === "mark")
@@ -671,7 +763,7 @@ export function buildTrace(options: {
     device,
     marks,
     metrics: metricsOf(events),
-    findings: findingsOf(events, marks, num(device.refreshHz, 60)),
+    findings: findingsOf(events, marks, profile.refreshHz, profile.assumed),
     events: options.withEvents ? events : undefined,
   };
 }
