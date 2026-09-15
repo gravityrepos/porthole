@@ -280,10 +280,13 @@ describe("a saved trace works with report/compare unmodified", () => {
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     try {
       const code = await compare(savedFile, capturedFile);
-      // Not 2 ("refused to compare") — a real comparison happened, which is
-      // the property this AC is actually about: the saved trace was not
-      // rejected as incomparable.
-      expect(code).not.toBe(2);
+      // Both traces come from the identical events, so a real comparison
+      // reports no regression (exit 0) — not merely "not refused" (2), which
+      // a stub that always returned 0 or 1 would also satisfy.
+      expect(code).toBe(0);
+      const printed = stdout.mock.calls.map((c) => String(c[0])).join("");
+      expect(printed).toContain("nothing moved");
+      expect(printed).not.toContain("refusing to compare");
     } finally {
       stdout.mockRestore();
     }
@@ -314,7 +317,10 @@ describe("a saved trace works with report/compare unmodified", () => {
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     try {
       const code = await compare(capturedFile, savedFile);
-      expect(code).not.toBe(2);
+      expect(code).toBe(0);
+      const printed = stdout.mock.calls.map((c) => String(c[0])).join("");
+      expect(printed).toContain("nothing moved");
+      expect(printed).not.toContain("refusing to compare");
     } finally {
       stdout.mockRestore();
     }
@@ -389,6 +395,29 @@ describe("saveFromSessions (porthole save)", () => {
     const content = JSON.parse(await readFile(outFile, "utf8"));
     expect(content.clippedMs).toEqual({ start: 10_000, end: 0 }); // 0..10000 genuinely never recorded
     expect(content.durationMs).toBe(20_000); // the full requested window, not a shortened one
+  });
+
+  it("honors an explicit --to that differs from the session's own last event, rather than silently substituting it", async () => {
+    // Deliberately distinct from the AC4 fixture above: there `to` and the
+    // session's own `lastT` happened to be the same value (20_000), which
+    // is exactly the shape a mutation that ignores `options.to` entirely and
+    // always uses `latest.lastT` would pass right through unnoticed —
+    // caught by mutation testing (self-check b) on this file's first pass.
+    const root = await tmpRoot();
+    const writer = new SessionWriter(root, 60_000);
+    await writer.open(HELLO);
+    writer.append({ event: "recompose", t: 10_000, seq: 0, data: {} });
+    writer.append({ event: "recompose", t: 90_000, seq: 1, data: {} }); // session's own lastT — far past the window asked for
+    await writer.flush();
+
+    const result = await saveFromSessions({ root, projectRoot: root, from: 10_000, to: 20_000, scenario: "mid" });
+    expect(result.code).toBe(0);
+    const outFile = defaultOutPath(root, "mid");
+    const content = JSON.parse(await readFile(outFile, "utf8"));
+    expect(content.durationMs).toBe(10_000); // the requested 10_000..20_000, not 10_000..90_000
+    // Fully covered: the session's own recorded span [10_000, 90_000]
+    // encloses the requested [10_000, 20_000] window.
+    expect(content.clippedMs).toEqual({ start: 0, end: 0 });
   });
 
   it("defaults scenario to moment-<from>-<to> and out to .porthole/traces/<scenario>.json", async () => {
@@ -564,6 +593,14 @@ describe("save_moment (MCP tool)", () => {
   let fakeDevice: FakeDevice | null = null;
 
   afterEach(async () => {
+    // Flush every SessionWriter before anything is torn down: `device.stop()`
+    // does not touch `device.sessions` (it only closes the socket), so its
+    // 250ms flush timer is still armed and unref'd — free to fire *after*
+    // this afterEach has already removed the tmp root, which surfaced as an
+    // unhandled rejection (ENOENT on meta.json) from a later test entirely.
+    // Flushing here, before the `rm`, is what makes that impossible rather
+    // than merely unlikely.
+    await Promise.all(devices.map((d) => d.sessions?.flush()));
     await Promise.all(clients.splice(0).map((c) => c.close().catch(() => {})));
     for (const device of devices.splice(0)) device.stop();
     for (const timeline of timelines.splice(0)) timeline.stop();
@@ -625,6 +662,10 @@ describe("save_moment (MCP tool)", () => {
     expect(saveResult.isError).toBeFalsy();
     const savePayload = saveResult.json as SaveMomentPayload;
 
+    // The caller's own scenario name is honored, not silently replaced by
+    // the moment-<from>-<to> default (caught by mutation testing: a mutant
+    // that always used the default passed every other assertion here).
+    expect(savePayload.scenario).toBe("ac1-test");
     expect(savePayload.clippedMs).toEqual(findingsPayload.clippedMs);
     expect(savePayload.findings).toEqual(findingsPayload.findings);
 
