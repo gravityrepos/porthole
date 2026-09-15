@@ -378,6 +378,48 @@ describe("every tool that declares a window examines the same span", () => {
     },
   );
 
+  it("sinceMs anchors to `to`, not to the newest buffered event, when the two differ (QA round 1 on GRA-120)", async () => {
+    // The first test above happens to use `to` equal to the newest event, so
+    // a host that anchored the lookback to `newest` instead of `to` passed it
+    // — QA's mutation survived. Here `to` is 4_000 with events out to 8_000:
+    // anchored to `to` the floor is 3_700; anchored to newest it would be
+    // 7_700, and the device would be asked about a window this call never
+    // named.
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 4_000, data: {} },
+        { event: "recompose", t: 8_000, data: {} },
+      ]);
+      const frames = await rig.client.callTool("frames", { sinceMs: 300, to: 4_000 });
+      const asked = (frames.json as { askedWindow: { from?: number; to?: number } }).askedWindow;
+      expect(asked.from).toBe(3_700);
+      expect(asked.to).toBe(4_000);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("sinceMs with an explicit `to` is resolved on the host even with nothing buffered, so the device is never asked to anchor it to its own clock (QA round 1 on GRA-120)", async () => {
+    // A fresh or just-reconnected host has an empty live buffer. Before this
+    // fix that path forwarded `{ sinceMs, to }` raw, and the device's own
+    // resolver anchored the lookback to device-now — contradicting the
+    // description that promises `(to - sinceMs)..to`. The bounds the device
+    // receives must be absolute here.
+    const rig = await buildRig();
+    try {
+      const frames = await rig.client.callTool("frames", { sinceMs: 5_000, to: 1_000_000 });
+      const asked = (frames.json as { askedWindow: { from?: number; to?: number; sinceMs?: number } })
+        .askedWindow;
+      expect(asked.sinceMs).toBeUndefined();
+      expect(asked.from).toBe(995_000);
+      expect(asked.to).toBe(1_000_000);
+    } finally {
+      await rig.close();
+    }
+  });
+
   it("timeline(sinceMs, to) and frames(sinceMs, to) resolve to the same window on the host, for all three shapes (AC1)", async () => {
     // The MCP-side half of AC1 — the runtime-side half (that `timelineEvents`
     // and `FrameCollector.report` resolve identically) is

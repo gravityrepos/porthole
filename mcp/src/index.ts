@@ -423,9 +423,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .positive()
       .optional()
       .describe(
-        "Look back this many milliseconds from `to` (or from this host's best estimate of the " +
-          "device's current time, if `to` is omitted — see `to`'s description). Ignored if `from` " +
-          "is given.",
+        "Look back this many milliseconds from `to`. If `to` is omitted, from this host's best " +
+          "estimate of the device's current time (see `to`'s description), or from the device's " +
+          "own current time when nothing is buffered here yet. Ignored if `from` is given.",
       ),
     from: z
       .number()
@@ -513,6 +513,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // Refused the same way the tool already refuses a bad window:
         // `resolveWindow` returning null, which every caller already treats
         // as "nothing to answer from" rather than a distinct error path.
+        if (from > to) return null;
+        return { from, to, ms: Math.max(0, to - from) };
+      }
+      // GRA-120 QA round 1: `sinceMs` with an explicit `to` needs no "now"
+      // at all — the rule is `(to - sinceMs)..to` on both halves — so it is
+      // resolved here even on a cold buffer. Forwarding it raw would let the
+      // device anchor the lookback to its own clock instead, which is the
+      // disagreement this ticket exists to remove. Only `sinceMs` alone (no
+      // `to`) still returns null: that shape genuinely needs a "now", and the
+      // device's is the right one when this host has nothing buffered.
+      if (w.sinceMs !== undefined && w.to !== undefined) {
+        const to = w.to;
+        const from = Math.max(0, to - w.sinceMs);
         if (from > to) return null;
         return { from, to, ms: Math.max(0, to - from) };
       }
