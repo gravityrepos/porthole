@@ -1,0 +1,8 @@
+# trace_processor_shell's real stdout, captured verbatim (GRA-113/GRA-111).
+# It writes CRLF line endings even on this Windows-hosted capture and must
+# arrive at every reader exactly as it left the binary — parseRows() (in
+# ../../perfetto.ts) is tested against these exact bytes, not against
+# whatever a line-ending normalisation would leave behind. The root
+# .gitattributes' `* text=auto eol=lf` would otherwise rewrite these to LF on
+# checkout, which is a different byte stream than the one that produced them.
+*.csv -text

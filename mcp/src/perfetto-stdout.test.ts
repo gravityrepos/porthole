@@ -33,9 +33,14 @@ describe("parseRows, on what trace_processor prints", () => {
       "MIN(dur)",
       "MAX(dur)",
       "AVG(dur)",
+      // GRA-113: carried through so a finding derived from this row can be
+      // placed on the device's uptime clock — see QUESTIONS' own comment in
+      // perfetto.ts on which of the five questions this applies to.
+      "MIN(ts)",
+      "MAX(ts)",
     ]);
     expect(first.jank_type).toBe("App Deadline Missed");
-    expect(Number(first["MAX(dur)"])).toBe(117264766);
+    expect(Number(first["MAX(dur)"])).toBe(108576381);
   });
 
   it("strips the quotes from quoted values and leaves bare numbers alone", () => {
@@ -61,7 +66,10 @@ describe("parseRows, on what trace_processor prints", () => {
   it("reads every row of every question", () => {
     expect(rows("jank")).toHaveLength(3);
     expect(rows("thread_states")).toHaveLength(112);
-    expect(rows("binder")).toHaveLength(3);
+    // 4 as of GRA-113's regenerated fixture (was 3): the trace's own binder
+    // activity over its full bounds, not an edited number — see
+    // fixtures/stdout/PROVENANCE.md.
+    expect(rows("binder")).toHaveLength(4);
     expect(rows("render")).toHaveLength(30);
     expect(rows("slices")).toHaveLength(200);
   });
@@ -101,7 +109,10 @@ describe("interpret, on what trace_processor prints", () => {
   it("finds the missed deadline Android itself recorded", () => {
     const jank = byId("trace-frame-deadline");
     expect(jank?.severity).toBe("error");
-    expect(jank?.evidence?.worstMs).toBe(117.3);
+    // 108.6 as of GRA-113's regenerated jank.csv (was 117.3) — the same
+    // capture's real MAX(dur), read via the new MIN(ts)/MAX(ts)-carrying
+    // query rather than edited by hand.
+    expect(jank?.evidence?.worstMs).toBe(108.6);
   });
 
   it("sees the main thread waiting for a CPU", () => {
@@ -124,7 +135,8 @@ describe("interpret, on what trace_processor prints", () => {
   it("names the process the app was blocked calling into", () => {
     const binder = byId("trace-binder");
     expect(binder?.evidence?.worstTarget).toBe("system_server");
-    expect(binder?.evidence?.worstMs).toBeCloseTo(9.4, 1);
+    // 8.2 as of GRA-113's regenerated binder.csv (was 9.4) — real data, not edited.
+    expect(binder?.evidence?.worstMs).toBeCloseTo(8.2, 1);
   });
 
   it("attributes the render path to the render thread", () => {
@@ -142,6 +154,68 @@ describe("interpret, on what trace_processor prints", () => {
     // Five questions, five interpretations: a regression in any single query
     // shows up here as a missing finding rather than as silence.
     expect(findings.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+/**
+ * GRA-113: the same real stdout above, this time with a converter wired up —
+ * ns → ms only, no offset, so the expected values below are the fixtures'
+ * own real MIN(ts)/MAX(ts) divided by 1e6, not invented numbers. Real
+ * trace_processor rows are what QUESTIONS' own comment (perfetto.ts) claims
+ * carry a placeable window; this is that claim, run.
+ */
+describe("interpret + toUptimeMs, on real stdout (GRA-113)", () => {
+  const toUptimeMs = (bootNs: number) => bootNs / 1e6;
+  const all: Rows = {
+    jank: rows("jank"),
+    thread_states: rows("thread_states"),
+    binder: rows("binder"),
+    render: rows("render"),
+    slices: rows("slices"),
+  };
+  const findings = interpret(all, toUptimeMs);
+  const byId = (id: string) => findings.find((f) => f.id === id);
+
+  it("places trace-frame-deadline from jank.csv's own MIN(ts)/MAX(ts)", () => {
+    const jank = byId("trace-frame-deadline");
+    const row = rows("jank").find((r) => r.jank_type === "App Deadline Missed");
+    const at = Number(row?.["MIN(ts)"]) / 1e6;
+    expect(jank?.window).toEqual({ from: at, to: at });
+    expect(jank?.spanning).toBeUndefined();
+  });
+
+  it("keeps trace-main-thread-contention spanning even with a real converter available — thread_states.csv has no ts to place with", () => {
+    const contention = byId("trace-main-thread-contention");
+    expect(contention?.spanning).toBe(true);
+    expect(contention?.window).toBeUndefined();
+  });
+
+  it("places trace-binder from only the blocking target's (system_server's) own group in binder.csv, not every target's", () => {
+    const binder = byId("trace-binder");
+    const row = rows("binder").find((r) => r.target === "system_server");
+    expect(binder?.window).toEqual({
+      from: Number(row?.["MIN(ts)"]) / 1e6,
+      to: Number(row?.["MAX(ts)"]) / 1e6,
+    });
+  });
+
+  it("places trace-render across render.csv's full envelope", () => {
+    const render = byId("trace-render");
+    const renderRows = rows("render");
+    const from = Math.min(...renderRows.map((r) => Number(r["MIN(ts)"]))) / 1e6;
+    const to = Math.max(...renderRows.map((r) => Number(r["MAX(ts)"]))) / 1e6;
+    expect(render?.window).toEqual({ from, to });
+  });
+
+  it("every finding produced from real stdout carries exactly one of window/spanning (GRA-113 AC1)", () => {
+    expect(findings.length).toBeGreaterThan(0);
+    for (const f of findings) {
+      const hasWindow = f.window !== undefined;
+      const hasSpanning = f.spanning === true;
+      expect(hasWindow !== hasSpanning, `${f.id}: ${JSON.stringify({ window: f.window, spanning: f.spanning })}`).toBe(
+        true,
+      );
+    }
   });
 });
 
