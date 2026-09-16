@@ -95,6 +95,8 @@ vi.mock("./perfetto.js", async () => {
 class FakeDevice extends EventEmitter {
   readonly calls: { method: string; params: Record<string, unknown> }[] = [];
   hello: Hello | null = null;
+  /** GRA-197: mirrors DeviceClient.packageMismatch — unset by every existing test, which is the "unset" case. */
+  packageMismatch: string | null = null;
   state = "connected";
   port = 8677;
   /** What the device answers. Throw from here to be a device that failed. */
@@ -625,6 +627,69 @@ describe("the websocket", () => {
     const result = await connect(timeline.port);
     expect(result.ok).toBe(true);
     if (result.ok) expect(JSON.parse(result.message).type).toBe("init");
+  });
+
+  /**
+   * GRA-197: the UI cannot derive a package mismatch locally the way it does
+   * `protocolMismatch` (App.tsx's own `EXPECTED_PROTOCOL_VERSION`) — it has
+   * no way to know what this server was configured for, so the fact has to
+   * actually cross the wire. `init` is what a client connecting *after* the
+   * mismatch was established sees (mirrors "hands a connected client the
+   * buffer it has" above, for the same reason: a page opened mid-session
+   * must not see less than one open when the mismatch happened).
+   */
+  it("carries packageMismatch in the 'init' message a newly connecting client gets", async () => {
+    timeline.device.saidHello();
+    timeline.device.packageMismatch =
+      "Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`.";
+
+    const result = await connect(timeline.port);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const init = JSON.parse(result.message) as { type: string; packageMismatch: string | null };
+      expect(init.type).toBe("init");
+      expect(init.packageMismatch).toContain("com.acme.app");
+    }
+  });
+
+  it("carries packageMismatch in the 'hello' broadcast, alongside hello itself", async () => {
+    // A second client, connected before the hello that produces the
+    // mismatch — the live-broadcast path, distinct from `init`'s
+    // already-connected-client path above.
+    const socket = new (await import("ws")).WebSocket(`ws://127.0.0.1:${timeline.port}/ws`);
+    const helloMessage = new Promise<{ type: string; packageMismatch: string | null }>((resolve) => {
+      let seenInit = false;
+      socket.on("message", (data: Buffer) => {
+        const parsed = JSON.parse(data.toString()) as { type: string; packageMismatch?: string | null };
+        // The socket's own "init" arrives first (see the test above); only
+        // the "hello" broadcast after it is what this test is about.
+        if (!seenInit && parsed.type === "init") {
+          seenInit = true;
+          return;
+        }
+        resolve(parsed as { type: string; packageMismatch: string | null });
+      });
+    });
+    await new Promise<void>((resolve) => socket.once("open", resolve));
+
+    timeline.device.packageMismatch =
+      "Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`.";
+    timeline.device.emit("hello", { packageName: "com.example.shop", device: "Pixel 8", startedAt: 1 });
+
+    const message = await helloMessage;
+    expect(message.type).toBe("hello");
+    expect(message.packageMismatch).toContain("com.acme.app");
+    socket.close();
+  });
+
+  it("omits nothing — packageMismatch is null in 'init' when the server has no mismatch (the default)", async () => {
+    timeline.device.saidHello();
+    const result = await connect(timeline.port);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const init = JSON.parse(result.message) as { packageMismatch: string | null };
+      expect(init.packageMismatch).toBeNull();
+    }
   });
 
   it("refuses an upgrade from a foreign Origin", async () => {

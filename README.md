@@ -1789,16 +1789,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1517 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1520 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 455 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 447
-passed, 0 failed, 8 skipped), 768 in the MCP server (`cd mcp && npm test` —
-765 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 771 in the MCP server (`cd mcp && npm test` —
+768 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 294 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1517 disagrees with the sum of the three suites' totals stated
+XML, and when 1520 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1823,21 +1823,23 @@ reaches `PortholeExtension`) are not among the eight: unlike the AGP
 compatibility set, they need only an SDK, not `-Pporthole.agpVersion`, so
 `ubuntu-latest`'s preinstalled `ANDROID_HOME` runs them for real on every PR
 — a checkout with no SDK at all (no `ANDROID_HOME`, no `local.properties`
-next to the plugin) is the only place they skip. GRA-197 also adds 8 server
-tests (the `packageMismatch` rig and its "leads an unrelated tool's banner"
-proof) and 18 UI tests (the header pill's danger tone, the header's
-per-state neighbour text, and `TimelineStore`'s new wire field) — none of
-them platform-gated, so they add to every leg's passed count and change no
-leg's skip count. The server's 3 skips on
+next to the plugin) is the only place they skip. GRA-197 also adds 11 server
+tests (the `packageMismatch` rig, its "leads an unrelated tool's banner"
+proof, and the `TimelineServer` WebSocket tests proving it actually reaches
+a connecting client, since the UI cannot derive it locally the way it does
+`protocolMismatch`) and 18 UI tests (the header pill's danger tone, the
+header's per-state neighbour text, and `TimelineStore`'s new wire field) —
+none of them platform-gated, so they add to every leg's passed count and
+change no leg's skip count. The server's 3 skips on
 ubuntu are `perfetto-stdout` and GRA-113's real-coverage check
 (both gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
 the same 455 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
 set — the same SDK that keeps it at 4 also runs GRA-197's two tests for
-real) and the same 768 server tests with 0 skipped, because it has the
+real) and the same 771 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 768/766/2, missing only that capture. The timeline UI is the one suite
+sees 771/769/2, missing only that capture. The timeline UI is the one suite
 whose split does not move: 294/294/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
