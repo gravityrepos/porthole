@@ -160,8 +160,41 @@ PR that makes the change, not after the fact.
   in the window on the clipboard as an unbounded JSON blob none of
   `capture`'s own tools could read (GRA-116).
 
+- Spans still open when a recording or a saved moment ends are no longer
+  dropped. They are emitted with `open: true` and a duration that is a floor
+  (the capture's last event minus the span's start), counted in `http.calls`,
+  `db.queries` and `work.runs`, reported under new `http.stillOpen` /
+  `db.stillOpen` metrics and by a warning finding that names the oldest one,
+  and excluded from every percentile, which cover completed spans only — a
+  request that never returned is the shape of a hang, and it used to be the
+  one span the trace could not show (GRA-92).
+- The terminal readout of `findings` and `porthole report` colours severity,
+  honouring `NO_COLOR` (GRA-142).
+- One release command: `./gradlew release "-Pversion=X.Y.Z"` bumps the
+  version, cuts this changelog, runs the full suite, commits and tags, and
+  never publishes; `releaseDryRun` rehearses all of it against `mavenLocal()`
+  with no credentials and proves the declared Porthole artifacts actually
+  resolve (GRA-100, GRA-165).
+
 ### Fixed
 
+- The runtime's `hello` carries a protocol version that the server now
+  checks: a mismatch is reported in `porthole_status` as `protocolMismatch`
+  instead of being silently accepted, and the receiving side validates the
+  rest of what it is handed (GRA-96).
+- A process that has died no longer leaves every tool answering from the
+  stale ring as though it were still connected: the handshake has its own
+  `ConnectionState`, the ring is cleared on the boundary, and the sampled
+  proof on a real device is in `docs/verified.md` (GRA-157, GRA-163).
+- `porthole_status` says where it looked, and `findings` no longer reports
+  "not connected" while the app is connected (GRA-152).
+- The timeline UI no longer shows a red "disconnected" pill for two seconds
+  on every connect (GRA-161), and the insights pane no longer flickers on
+  and off on first launch before there is anything to show (GRA-173).
+- `ask_system_trace` loads `trace_processor` once per question, off the
+  event loop, instead of once per query (GRA-82).
+- The generated `.mcp.json` tells the server the port and nothing else
+  (GRA-119).
 - `Porthole.shutdown()` no longer leaks the collectors it started (GRA-86),
   and the same leak defences now actually run where CI runs (GRA-137).
 - The timeline server refuses an origin it was not also addressed to
@@ -170,7 +203,10 @@ PR that makes the change, not after the fact.
   (GRA-76); `portholeDisconnect` no longer reports itself up to date when
   it isn't (GRA-118).
 - The Gradle plugin looks for the Android SDK in one place instead of
-  several inconsistent ones (GRA-87).
+  several inconsistent ones (GRA-87), through one resolver rather than two
+  mirrored copies (GRA-150), and a relative `sdk.dir` is anchored on the
+  project directory every time instead of on two different directories in
+  one code path (GRA-160).
 - Zero-duration nav and stall markers now render with width instead of
   vanishing; trace slices are named by shape rather than by statement or
   instance, so high-cardinality names stop exploding tracks.
