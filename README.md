@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-5ec8b0?style=flat-square"></a>
+  <a href="https://codecov.io/gh/gravityrepos/porthole"><img alt="Test coverage on main, from Codecov" src="https://img.shields.io/codecov/c/github/gravityrepos/porthole?style=flat-square&label=coverage"></a>
   <img alt="Android API 26 and up" src="https://img.shields.io/badge/android-API%2026%2B-56c88c?style=flat-square">
   <img alt="Debug builds only" src="https://img.shields.io/badge/builds-debug%20only-f0883e?style=flat-square">
   <img alt="Version 0.1.0, published" src="https://img.shields.io/badge/version-0.1.0%20published-9aa6b8?style=flat-square">
