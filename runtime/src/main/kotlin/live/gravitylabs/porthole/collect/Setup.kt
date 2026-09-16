@@ -32,7 +32,54 @@ internal object Setup {
     private fun onClasspath(className: String): Boolean =
         runCatching { Class.forName(className, false, Setup::class.java.classLoader) }.isSuccess
 
-    fun report(): List<SetupEntry> = INTEGRATIONS.map { integration ->
+    // -- the socket's own bind result (GRA-196) -----------------------------
+    //
+    // Not an "integration" in the sense the entries below are - nothing has
+    // to wire the socket up, it either bound or it didn't - so it is kept as
+    // separate state rather than forced into the INTEGRATIONS shape, and
+    // report() below assembles it into the same list only because `setup` is
+    // the one RPC method a later, successful connection already has to ask
+    // this question with. There is deliberately no host-side channel of its
+    // own: a socket that never bound at all cannot be asked anything, by
+    // construction - the only case this can ever surface is a retry that
+    // eventually succeeded, or a caller connecting on a *second* attempt at
+    // the same port after the first `install()` gave up.
+
+    @Volatile private var socketListening: Boolean? = null
+    @Volatile private var socketFailure: String? = null
+    @Volatile private var socketBindAttempts: Int = 0
+
+    /**
+     * Called once [live.gravitylabs.porthole.transport.PortholeSocketServer]'s
+     * bind has settled, win or lose.
+     */
+    fun recordSocketBind(listening: Boolean, failure: String?, attempts: Int) {
+        socketListening = listening
+        socketFailure = failure
+        socketBindAttempts = attempts
+    }
+
+    private fun socketEntry(): SetupEntry? {
+        val listening = socketListening ?: return null
+        return SetupEntry(
+            name = "socket",
+            // Not a classpath question for this one - the socket is this
+            // module, not a dependency it might or might not have pulled in
+            // - so `true` here means "applicable", the only sense onClasspath
+            // can have for it.
+            onClasspath = true,
+            instrumented = listening,
+            hint = when {
+                !listening -> socketFailure
+                socketBindAttempts > 1 ->
+                    "bound after $socketBindAttempts attempts " +
+                        "(a previous instance of this app was likely still releasing the port)"
+                else -> null
+            },
+        )
+    }
+
+    private fun integrationEntries(): List<SetupEntry> = INTEGRATIONS.map { integration ->
         val present = onClasspath(integration.probeClass)
         val wired = integration.wired()
         SetupEntry(
@@ -45,12 +92,26 @@ internal object Setup {
         )
     }
 
+    fun report(): List<SetupEntry> = buildList {
+        socketEntry()?.let(::add)
+        addAll(integrationEntries())
+    }
+
     /**
      * Logged once, a few seconds in, because the answer is only meaningful after
      * the app has had a chance to build its clients.
+     *
+     * Deliberately reads [integrationEntries] rather than [report]: the
+     * socket either bound (and already got its own `Log.i`/`Log.e` from
+     * [live.gravitylabs.porthole.transport.PortholeSocketServer] at the
+     * moment it happened) or it never bound at all, in which case there is
+     * no live connection left for this delayed log line to reach anyway.
+     * Folding it into "not instrumented: ..." here would also mislabel it -
+     * a socket that needed a retry was not left uninstrumented, it just
+     * took a moment.
      */
     fun log() {
-        val missing = report().filter { it.hint != null }
+        val missing = integrationEntries().filter { it.hint != null }
         if (missing.isEmpty()) return
         Log.i(
             TAG,

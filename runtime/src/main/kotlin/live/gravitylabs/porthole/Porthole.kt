@@ -206,7 +206,24 @@ object Porthole {
             // later reordering could quietly break.
             val finalCollectors = collectors.toList()
 
-            val server = PortholeSocketServer(port, ring)
+            // The "installed on ..." line used to print unconditionally right
+            // here, before the bind (which runs on the io executor, inside
+            // server.start() below) had even been attempted — so a failed
+            // bind still got announced as a success. onBindResult fires once
+            // the bind has actually settled one way or the other, so the line
+            // now only ever appears once the socket is genuinely listening;
+            // a failed bind gets PortholeSocketServer's own Log.e instead,
+            // with nothing here that could contradict it.
+            val server = PortholeSocketServer(
+                port,
+                ring,
+                packageName = app.packageName,
+                onBindResult = { ok ->
+                    if (ok) {
+                        Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
+                    }
+                },
+            )
             // Held as fields, not posted from a value nobody keeps, so
             // shutdown() can cancel this specific callback rather than
             // leaving it to fire into a session that has already ended. Ten
@@ -244,7 +261,6 @@ object Porthole {
             server.start()
             writeConnectionFile(app, port)
             session = s
-            Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
             // After the app has had a chance to build its clients. Asking
             // now would report everything as missing.
             setupHandler.postDelayed(setupTask, SETUP_REPORT_DELAY_MS)
