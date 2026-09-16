@@ -1,0 +1,12 @@
+# The landing page is the static `site/` directory and nothing is built on
+# Vercel (vercel.json: no framework, no build, outputDirectory "site"), so the
+# CLI has no reason to upload the rest of the repository. Without this file,
+# `vercel deploy` walks the whole checkout — Gradle outputs, `.claude/`
+# worktrees, anything not in its short built-in ignore list — and trips the
+# 15,000-file upload limit. Ignore everything, then allow back only what the
+# deployment reads.
+*
+!site
+!site/**
+!vercel.json
+!.vercelignore

@@ -65,3 +65,6 @@ __pycache__/
 
 # site/api is deliberately NOT ignored. It is Dokka output, committed on
 # purpose, because the host that serves it cannot build it. See the README.
+
+.vercel
+.env*

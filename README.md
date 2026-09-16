@@ -1270,6 +1270,12 @@ gradle.publish.key=...
 gradle.publish.secret=...
 ```
 
+The last of those is normally unnecessary: the Vercel project is linked to
+this GitHub repository, so every push to `main` already deploys `site/` to
+production. Run it only when a deploy has to happen without a push, and
+note that it uploads only what `.vercelignore` allows through (`site/` and
+`vercel.json`), because nothing is built on Vercel.
+
 `publishToMavenCentral` stages without releasing, and
 `SONATYPE_AUTOMATIC_RELEASE=false` keeps it that way: the staged bundle is
 promoted by hand after you have looked at it. `RELEASE_SIGNING_ENABLED=true`
