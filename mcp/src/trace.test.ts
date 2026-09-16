@@ -3,7 +3,16 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceEvent } from "./device.js";
 import { compareMetrics } from "./report.js";
-import { buildTrace, describeBudget, findingsOf, frameBudgetMs, metricsOf, resolveProfile } from "./trace.js";
+import {
+  alsoInWindowOf,
+  alsoInWindowSentence,
+  buildTrace,
+  describeBudget,
+  findingsOf,
+  frameBudgetMs,
+  metricsOf,
+  resolveProfile,
+} from "./trace.js";
 
 function event(name: string, t: number, data: Record<string, unknown> = {}): DeviceEvent {
   return { event: name, t, seq: t, data };
@@ -615,6 +624,111 @@ describe("findingsOf", () => {
         exitEvent("REASON_ANR", { timestamp: 2 }),
       ]);
       expect(findings.map((f) => f.severity)).toEqual(["error", "note"]);
+    });
+  });
+});
+
+// GRA-200: findingsOf is deliberately selective (see its own comment on
+// exit reasons) -- alsoInWindowOf is the other half, an inventory of the
+// same events rather than a second judgement about them.
+describe("alsoInWindowOf / alsoInWindowSentence", () => {
+  const exitEvent = (reason: string, extra: Record<string, unknown> = {}) =>
+    event("exit", 1000, { reason, timestamp: 1_700_000_000_000, ...extra });
+
+  const deviceEvent = (kind: string, t = 1000) => event("device", t, { kind });
+
+  it("finds nothing in an empty run", () => {
+    expect(alsoInWindowOf([])).toBeUndefined();
+    expect(alsoInWindowSentence(undefined)).toBe("");
+  });
+
+  it("is absent (not an empty object) for a window with none of these -- the common case's payload stays byte-identical", () => {
+    // recompose/state_write/frame/nav/http/db/log are the "nine UI-facing
+    // kinds" this ticket does not touch at all; none of them should ever
+    // put anything into alsoInWindow.
+    const events = [
+      event("recompose", 1000),
+      event("nav", 1000, { route: "cart" }),
+      event("frame", 1000, { totalMs: "8" }),
+    ];
+    expect(alsoInWindowOf(events)).toBeUndefined();
+  });
+
+  describe("exits: an inventory, not a second opinion", () => {
+    it("lists a REASON_SIGNALED exit even though findingsOf produces no finding for it at all", () => {
+      const events = [exitEvent("REASON_SIGNALED")];
+      expect(findingsOf(events, [], 60)).toEqual([]);
+
+      const also = alsoInWindowOf(events);
+      expect(also?.exits).toEqual([
+        { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000, at: "2023-11-14T22:13:20.000Z" },
+      ]);
+      expect(alsoInWindowSentence(also)).toBe(
+        "Also in this window: 1 process exit (REASON_SIGNALED, full record via " +
+          "`porthole_status { exitTrace: 1700000000000 }`).",
+      );
+      expect(alsoInWindowSentence(also)).toContain("porthole_status");
+    });
+
+    it("still lists an exit that DID already produce a finding -- the finding is the judgement, this is the inventory", () => {
+      const events = [exitEvent("REASON_ANR")];
+      expect(findingsOf(events, [], 60)).toHaveLength(1); // the judgement
+      expect(alsoInWindowOf(events)?.exits).toHaveLength(1); // the inventory, same event
+    });
+
+    it("(missing-input case) a reason-less exit does not throw and reports an empty reason", () => {
+      const events = [event("exit", 1000, { timestamp: 1_700_000_000_000 })];
+      expect(() => alsoInWindowOf(events)).not.toThrow();
+      expect(alsoInWindowOf(events)?.exits?.[0].reason).toBe("");
+    });
+
+    it("names more than one exit without pretending each has its own paragraph", () => {
+      const events = [
+        exitEvent("REASON_SIGNALED", { timestamp: 1 }),
+        exitEvent("REASON_CRASH", { timestamp: 2 }),
+      ];
+      const also = alsoInWindowOf(events);
+      expect(also?.exits).toHaveLength(2);
+      expect(alsoInWindowSentence(also)).toContain("2 process exits");
+      expect(alsoInWindowSentence(also)).toContain("REASON_CRASH"); // the most recent
+    });
+  });
+
+  describe("device / memory / gc / trim: raw counts, pointed at timeline", () => {
+    it("counts device and memory events under any threshold, and says where the raw detail is", () => {
+      const events = [
+        deviceEvent("rotation", 1000),
+        deviceEvent("theme", 1001),
+        deviceEvent("power", 1002),
+        deviceEvent("network", 1003),
+        event("memory", 1000, { heapUsedMb: "40" }),
+      ];
+      const also = alsoInWindowOf(events);
+      expect(also).toEqual({ device: 4, memory: 1 });
+      const sentence = alsoInWindowSentence(also);
+      expect(sentence).toContain("4 device events");
+      expect(sentence).toContain("1 memory event");
+      expect(sentence).toContain("raw detail via `timeline`");
+    });
+
+    it("counts every gc event, not only the blocking ones findingsOf turns into a finding", () => {
+      const events = [
+        event("gc", 1000, { count: "1" }), // not blocking: no finding
+        event("gc", 1001, { count: "1", blocking: "1", pausedMs: "40" }), // blocking: a finding too
+      ];
+      expect(findingsOf(events, [], 60)).toHaveLength(1);
+      expect(alsoInWindowOf(events)?.gc).toBe(2);
+    });
+
+    it("splits trimMemory out of the plain device count instead of double-labelling it", () => {
+      const events = [deviceEvent("rotation"), deviceEvent("trimMemory", 1001)];
+      const also = alsoInWindowOf(events);
+      expect(also).toEqual({ device: 1, trim: 1 });
+    });
+
+    it("(missing-input case) a device event with no data.kind at all counts as a plain device event, not a trim", () => {
+      const also = alsoInWindowOf([event("device", 1000, {})]);
+      expect(also).toEqual({ device: 1 });
     });
   });
 });

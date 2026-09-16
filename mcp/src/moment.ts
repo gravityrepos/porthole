@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import type { DeviceEvent } from "./device.js";
+import { alsoInWindowOf, alsoInWindowSentence, type AlsoInWindow } from "./trace.js";
 
 /**
  * What the app was doing at one moment.
@@ -48,6 +49,15 @@ export interface Moment {
   stalls: Array<{ durationMs: number; top: string; at: number }>;
   frames: { missed: number; worstMs: number };
   logs: Array<{ level: string; tag: string; message: string; at: number }>;
+  /**
+   * GRA-200: the same inventory `findings`' payload carries, scoped to this
+   * moment's own `window` rather than to whatever span `findings` was asked
+   * about — so a process exit that lands inside the few seconds either side
+   * of `at` is visible here even when nobody has called `findings` for this
+   * window at all. Absent, not empty, when there is nothing to add — see
+   * `alsoInWindowOf`'s own comment in trace.ts.
+   */
+  alsoInWindow?: AlsoInWindow;
 }
 
 /**
@@ -232,6 +242,12 @@ export function momentOf(events: DeviceEvent[], at: number, spreadMs = 2_000): M
 
   const frames = events.filter((e) => e.event === "frame" && within(e));
 
+  // GRA-200: scoped to this moment's own window, not the whole buffer — the
+  // same function `findings` calls, on a different slice of the same
+  // `events`, which is what keeps the two tools' wording identical for the
+  // same underlying fact instead of two hand-written descriptions of it.
+  const alsoInWindow = alsoInWindowOf(events.filter(within));
+
   return {
     at,
     window: { from, to },
@@ -268,6 +284,7 @@ export function momentOf(events: DeviceEvent[], at: number, spreadMs = 2_000): M
         message: str(e.data.message).slice(0, 300),
         at: e.t,
       })),
+    ...(alsoInWindow ? { alsoInWindow } : {}),
   };
 }
 
@@ -301,6 +318,13 @@ export function describe(moment: Moment): string {
     const keys = [...new Set(moment.stateWrites.map((w) => w.key))].slice(0, 3);
     parts.push(`State written just before: ${keys.join(", ")}.`);
   }
+
+  // GRA-200: the same sentence findings' own summary appends for the same
+  // underlying fact (see alsoInWindowOf/alsoInWindowSentence in trace.ts) —
+  // most often an exit that falls inside this moment's window, which
+  // otherwise had no way to surface here at all.
+  const alsoSentence = alsoInWindowSentence(moment.alsoInWindow);
+  if (alsoSentence) parts.push(alsoSentence);
 
   return parts.join(" ");
 }
