@@ -384,7 +384,7 @@ to the device.
   "mcpServers": {
     "porthole": {
       "command": "npx",
-      "args": ["-y", "@gravitylabsllc/porthole"],
+      "args": ["-y", "@gravitylabsllc/porthole", "mcp"],
       "env": { "PORTHOLE_PORT": "8677" }
     }
   }

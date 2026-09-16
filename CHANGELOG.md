@@ -19,6 +19,11 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+- The generated `.mcp.json` now launches `porthole mcp`. The entry ran the
+  package's default bin with no subcommand, which printed the CLI's usage
+  and exited, so an MCP client saw a server that started and immediately
+  ended. The README's example entry was wrong the same way (GRA-193).
+
 ## [0.2.0] - 2026-09-15
 
 ### Changed
