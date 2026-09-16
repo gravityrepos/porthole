@@ -272,9 +272,14 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         if (sdkDir != null) {
             env["PORTHOLE_SDK_DIR"] = sdkDir.absolutePath
         }
+        // GRA-193: the package declares two bins, `porthole` (the CLI) and
+        // `porthole-mcp`. npx runs the one named like the package, so without
+        // a subcommand this launched the CLI's usage screen, which exited at
+        // once — an MCP client saw a server that started and ended. `mcp` is
+        // the CLI branch that boots the same server `dist/index.js` does.
         return linkedMapOf(
             "command" to "npx",
-            "args" to listOf("-y", PORTHOLE_UI_PACKAGE),
+            "args" to listOf("-y", PORTHOLE_UI_PACKAGE, "mcp"),
             "env" to env,
         )
     }
