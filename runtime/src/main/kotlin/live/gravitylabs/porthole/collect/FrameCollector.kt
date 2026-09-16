@@ -17,6 +17,7 @@ import androidx.annotation.RequiresApi
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.FrameReport
 import live.gravitylabs.porthole.protocol.JankyFrame
 import live.gravitylabs.porthole.store.EventRing
@@ -146,7 +147,7 @@ internal class FrameCollector(private val ring: EventRing) {
         }
 
         ring.emit(
-            "frame",
+            EventKinds.FRAME,
             JsonObject(
                 mapOf(
                     "totalMs" to JsonPrimitive(frame.totalMs),

@@ -7,6 +7,7 @@ import android.util.Log
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.LogEntry
 import live.gravitylabs.porthole.protocol.LogPage
 import live.gravitylabs.porthole.store.EventRing
@@ -180,7 +181,7 @@ internal class LogCollector(
                 evicted.incrementAndGet()
             }
         }
-        lastEmittedSeq = ring.emit("log", entry.toJson()).seq
+        lastEmittedSeq = ring.emit(EventKinds.LOG, entry.toJson()).seq
     }
 
     /** Extra lines for an entry already sent, addressed by its sequence. */
@@ -188,7 +189,7 @@ internal class LogCollector(
         val seq = lastEmittedSeq
         if (seq < 0) return
         ring.emit(
-            "log_append",
+            EventKinds.LOG_APPEND,
             JsonObject(
                 mapOf(
                     "seq" to JsonPrimitive(seq),

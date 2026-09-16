@@ -9,6 +9,7 @@ import live.gravitylabs.porthole.nowMs
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.RecompositionNode
 import live.gravitylabs.porthole.protocol.RecompositionReport
 import live.gravitylabs.porthole.protocol.StateWriteCount
@@ -87,7 +88,7 @@ internal class RecompositionCollector(
             while (samples.size > SAMPLE_CAPACITY) samples.removeFirst()
         }
         ring.emit(
-            "recompose",
+            EventKinds.RECOMPOSE,
             JsonObject(
                 mapOf(
                     "id" to JsonPrimitive(nodeId),

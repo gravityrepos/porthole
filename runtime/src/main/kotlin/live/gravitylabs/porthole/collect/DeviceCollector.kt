@@ -24,6 +24,8 @@ import android.view.WindowManager
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.clockOffsets
+import live.gravitylabs.porthole.protocol.DeviceEventKinds
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
 
 /**
@@ -81,7 +83,7 @@ internal class DeviceCollector(private val ring: EventRing) {
         val stat = runCatching { StatFs(app.filesDir.absolutePath) }.getOrNull()
 
         emit(
-            "profile",
+            DeviceEventKinds.PROFILE,
             buildMap {
                 put("model", Build.MANUFACTURER + " " + Build.MODEL)
                 put("sdkInt", Build.VERSION.SDK_INT.toString())
@@ -119,7 +121,7 @@ internal class DeviceCollector(private val ring: EventRing) {
     fun emitClocks() {
         val clocks = clockOffsets()
         emit(
-            "clocks",
+            DeviceEventKinds.CLOCKS,
             mapOf(
                 "uptimeMs" to clocks.uptimeMs.toString(),
                 "bootMs" to clocks.bootMs.toString(),
@@ -148,7 +150,7 @@ internal class DeviceCollector(private val ring: EventRing) {
                 started += 1
                 if (started == 1 && !foreground) {
                     foreground = true
-                    emit("foreground", mapOf("activity" to activity.javaClass.simpleName))
+                    emit(DeviceEventKinds.FOREGROUND, mapOf("activity" to activity.javaClass.simpleName))
                 }
             }
 
@@ -156,7 +158,7 @@ internal class DeviceCollector(private val ring: EventRing) {
                 started = (started - 1).coerceAtLeast(0)
                 if (started == 0 && foreground) {
                     foreground = false
-                    emit("background", mapOf("activity" to activity.javaClass.simpleName))
+                    emit(DeviceEventKinds.BACKGROUND, mapOf("activity" to activity.javaClass.simpleName))
                 }
             }
 
@@ -183,7 +185,7 @@ internal class DeviceCollector(private val ring: EventRing) {
                 if (rotation != lastRotation) {
                     lastRotation = rotation
                     emit(
-                        "rotation",
+                        DeviceEventKinds.ROTATION,
                         mapOf(
                             "rotation" to rotationName(rotation),
                             "orientation" to
@@ -199,12 +201,12 @@ internal class DeviceCollector(private val ring: EventRing) {
                 val dark = isDark(configuration)
                 if (dark != lastDark) {
                     lastDark = dark
-                    emit("theme", mapOf("darkMode" to dark.toString()))
+                    emit(DeviceEventKinds.THEME, mapOf("darkMode" to dark.toString()))
                 }
 
                 if (configuration.fontScale != lastFontScale) {
                     lastFontScale = configuration.fontScale
-                    emit("fontScale", mapOf("fontScale" to configuration.fontScale.toString()))
+                    emit(DeviceEventKinds.FONT_SCALE, mapOf("fontScale" to configuration.fontScale.toString()))
                 }
             }
 
@@ -213,12 +215,12 @@ internal class DeviceCollector(private val ring: EventRing) {
              * there is that the app is about to be killed for using too much.
              */
             override fun onTrimMemory(level: Int) {
-                emit("trimMemory", mapOf("level" to trimName(level), "raw" to level.toString()))
+                emit(DeviceEventKinds.TRIM_MEMORY, mapOf("level" to trimName(level), "raw" to level.toString()))
             }
 
             @Deprecated("Required by ComponentCallbacks2 below API 34")
             override fun onLowMemory() {
-                emit("lowMemory", emptyMap())
+                emit(DeviceEventKinds.LOW_MEMORY, emptyMap())
             }
         }
         componentCallbacks = callbacks
@@ -242,7 +244,7 @@ internal class DeviceCollector(private val ring: EventRing) {
         val listener = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 emit(
-                    "power",
+                    DeviceEventKinds.POWER,
                     buildMap {
                         put("change", intent.action?.substringAfterLast('.') ?: "unknown")
                         put("batteryPercent", batteryPercent(context).toString())
@@ -271,7 +273,7 @@ internal class DeviceCollector(private val ring: EventRing) {
         // The opening state, so a trace that never sees a change still says
         // whether the device was dozing the whole time.
         emit(
-            "power",
+            DeviceEventKinds.POWER,
             buildMap {
                 put("change", "initial")
                 put("batteryPercent", batteryPercent(app).toString())
@@ -295,7 +297,7 @@ internal class DeviceCollector(private val ring: EventRing) {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 emit(
-                    "network",
+                    DeviceEventKinds.NETWORK,
                     mapOf(
                         "transport" to transportName(caps),
                         "metered" to
@@ -309,7 +311,7 @@ internal class DeviceCollector(private val ring: EventRing) {
             }
 
             override fun onLost(network: Network) {
-                emit("network", mapOf("transport" to "none"))
+                emit(DeviceEventKinds.NETWORK, mapOf("transport" to "none"))
             }
         }
 
@@ -362,7 +364,7 @@ internal class DeviceCollector(private val ring: EventRing) {
 
     private fun emit(kind: String, fields: Map<String, String>) {
         ring.emit(
-            "device",
+            EventKinds.DEVICE,
             JsonObject(
                 buildMap {
                     put("kind", JsonPrimitive(kind))

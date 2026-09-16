@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
 import live.gravitylabs.porthole.protocol.DeepLink
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.NavEntry
 import live.gravitylabs.porthole.protocol.NavState
 import live.gravitylabs.porthole.store.EventRing
@@ -62,7 +63,7 @@ internal class NavCollector(
             // them here means an app does not register each one by hand.
             state?.let { ViewModelScan.register(controller.currentBackStackEntry, it, seenViewModels) }
             ring.emit(
-                "nav",
+                EventKinds.NAV,
                 JsonObject(
                     mapOf(
                         "route" to JsonPrimitive(route),
