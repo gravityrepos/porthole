@@ -172,6 +172,12 @@ containing the serial is the driving script this pass wrote itself.
    "at least one device at 90Hz or above, with frame findings using the right
    budget", and it fails. See GRA-185.
 
+   **Fixed 2026-09-15 (GRA-185).** The resolved profile is now shared by
+   every trace-building path (live buffer, then the session's `meta.json`,
+   then an honestly-labelled 60 Hz guess), so a window without the startup
+   event keeps the panel's real budget, and `frames` and `findings` print it
+   to the same precision. Not yet re-run on this device.
+
 2. **A Perfetto capture on this device carried no Porthole labels.** Two
    ten-second captures while driving the app, one with the package defaulted
    and one with `packages: ["com.example.shop"]` named explicitly, both
@@ -186,6 +192,18 @@ containing the serial is the driving script this pass wrote itself.
    or span collector. This contradicts the 2026-09-14 Pixel 10 Pro XL result
    and fails GRA-67's "a Perfetto capture with Porthole labels present, on both
    devices". See GRA-186.
+
+   **Root-caused and fixed on this device, 2026-09-15 evening (GRA-186).**
+   This build reads the app trace tag only at process start, so a process
+   already running when the capture begins never annotates it; classic
+   `atrace` behaves identically here, and the Pixel 10 Pro XL's build picks
+   the tag up live, which is the whole difference between the two results.
+   `capture_system_trace { restartApp: true }` force-stops and relaunches the
+   app once the on-device trace file exists. Proof on this phone, read from
+   the traces themselves: **4** Porthole labels with `restartApp`, **0**
+   without, same session, same build. So "labels present on both devices" is
+   now met, with the option, and the zero-label sentence names both causes
+   when the option is off.
 
 3. **`frames` and `findings` print the same quantity differently.** `frames`
    reports `frameIntervalMs: 8` and says "budget 8ms"; `findings` says
@@ -270,8 +288,11 @@ to 183 ns across nine minutes, so one `clock_snapshot` per capture is enough.
 - Two devices end to end: **not met.** One broad pass (Pixel 9 Pro Fold) and
   two narrow sessions on a second device.
 - A blocking GC observed: **not met**, with the reason written above.
-- Perfetto labels on both devices: **not met** — present on the Pixel 10 Pro XL
-  on 09-14, absent on the Pixel 9 Pro Fold on 09-15.
+- Perfetto labels on both devices: **met, with `restartApp: true`** — present
+  on the Pixel 10 Pro XL on 09-14 unaided, and on the Pixel 9 Pro Fold on
+  09-15 once the app is relaunched into the capture (GRA-186, above).
+- The 120 Hz frame budget (GRA-185): fixed in code, not yet re-run on the
+  Fold.
 - Thermal throttling reached: **not met**, deliberately.
 - Navigation 3's back stack: **not met** — the sample does not use Navigation 3.
 - A cheap or old device: never attached.

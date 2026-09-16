@@ -7,7 +7,7 @@
   <a href="https://codecov.io/gh/gravityrepos/porthole"><img alt="Test coverage on main, from Codecov" src="https://img.shields.io/codecov/c/github/gravityrepos/porthole?style=flat-square&label=coverage"></a>
   <img alt="Android API 26 and up" src="https://img.shields.io/badge/android-API%2026%2B-56c88c?style=flat-square">
   <img alt="Debug builds only" src="https://img.shields.io/badge/builds-debug%20only-f0883e?style=flat-square">
-  <img alt="Version 0.1.0, published" src="https://img.shields.io/badge/version-0.1.0%20published-9aa6b8?style=flat-square">
+  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-9aa6b8?style=flat-square">
 </p>
 
 # Porthole
@@ -1176,8 +1176,9 @@ recorded.
 
 ## Publishing
 
-0.1.0 is live on Maven Central and npm; the Gradle Plugin Portal submission
-was pending review at last check. Publishing itself is still a deliberate,
+0.2.0 is the current release (see [CHANGELOG.md](CHANGELOG.md)); 0.1.0 is
+live on Maven Central and npm, and its Gradle Plugin Portal submission was
+pending review at last check. Publishing itself is still a deliberate,
 credentialed act that this repo never performs on its own — but the bump,
 changelog, full-suite run and tag that used to precede it by hand are now one
 command, and the rehearsal that used to mean actually publishing something is
@@ -1692,8 +1693,9 @@ Copyright 2026 Gravity Labs.
 
 ## Status
 
-Version 0.1.0, live on Maven Central and npm; the Gradle Plugin Portal
-submission was pending review at last check (see [Publishing](#publishing)).
+Version 0.2.0 (see [CHANGELOG.md](CHANGELOG.md)); 0.1.0 is live on Maven
+Central and npm, and its Gradle Plugin Portal submission was pending review
+at last check (see [Publishing](#publishing)).
 Verified end to end on an emulator against
 `sample/`: the plugin puts `:runtime` on debug and `:runtime-noop` on release,
 the porthole installs itself on process start, and every tool returns real data
@@ -1832,3 +1834,12 @@ tag mask: the only `porthole` strings in either capture are the runtime's own
 thread names, with no `porthole: ` section names anywhere. So the honest
 statement is that the mechanism worked on one device and one fingerprint and
 did not work on another; see [docs/verified.md](docs/verified.md).
+
+**Resolved the same evening (GRA-186).** The Fold's build reads the app
+trace tag only when a process starts, so a process that was already running
+when the capture began never annotates it; classic `atrace` behaves the same
+there, and the Pixel 10 Pro XL's build picks the tag up live. `capture_system_trace
+{ restartApp: true }` force-stops and relaunches the app once the on-device
+trace file exists: four Porthole labels on the Fold with it, zero without,
+checked in the trace itself. Without the option, a zero-label capture now
+says which of the two causes it cannot tell apart.
