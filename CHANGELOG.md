@@ -15,6 +15,14 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.2.2] - 2026-09-16
+
+### Added
+
 - `findings` and `what_was_happening` now carry `alsoInWindow`: an inventory
   of every process exit in the window (including ones that already produced
   a finding above), plus raw counts of device, memory, GC and memory-trim
