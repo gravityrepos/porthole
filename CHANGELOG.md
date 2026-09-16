@@ -19,6 +19,10 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+## [0.2.1] - 2026-09-15
+
+### Fixed
+
 - The timeline's wheel handling now knows which gesture it is looking at:
   ctrl/⌘ + wheel or a trackpad pinch zooms at the cursor by an amount that
   scales with the delta (clamped to 2× per event), shift + wheel or a

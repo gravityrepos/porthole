@@ -4,7 +4,7 @@
 # Porthole's own release version, and the only place it is written. The
 # runtime, the no-op, the plugin and the version the plugin hands consumers
 # all read this; PortholeVersion.kt is generated from it.
-porthole = "0.2.0"
+porthole = "0.2.1"
 
 agp = "8.13.2"
 kotlin = "2.1.0"
