@@ -44,6 +44,7 @@ import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.protocol.DbPage
 import live.gravitylabs.porthole.protocol.DbTables
 import live.gravitylabs.porthole.protocol.EventFrame
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.ExitTraceResult
 import live.gravitylabs.porthole.protocol.Inflight
 import live.gravitylabs.porthole.protocol.SetupEntry
@@ -362,7 +363,7 @@ object Porthole {
     fun mark(label: String, detail: String? = null) {
         val s = session ?: return
         s.ring.emit(
-            "mark",
+            EventKinds.MARK,
             JsonObject(
                 buildMap {
                     put("label", JsonPrimitive(label))

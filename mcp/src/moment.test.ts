@@ -112,6 +112,39 @@ suite("the summary", () => {
   });
 });
 
+suite("alsoInWindow (GRA-200): what_was_happening says the same sentence findings does", () => {
+  it("names a process exit that falls inside this moment's own window", () => {
+    const withExit = [
+      ...session,
+      at(5_650, "exit", { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000 }),
+    ];
+    const moment = momentOf(withExit, 5_600);
+    expect(moment.alsoInWindow?.exits).toEqual([
+      { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000, at: new Date(1_700_000_000_000).toISOString() },
+    ]);
+    // Same wording findings' own summary uses for the same fact — see
+    // alsoInWindowSentence in trace.ts, which both tools call.
+    expect(describe(moment)).toContain(
+      "1 process exit (REASON_SIGNALED, full record via `porthole_status { exitTrace: 1700000000000 }`)",
+    );
+  });
+
+  it("does not name an exit that falls outside this moment's spread", () => {
+    // Same session, but the exit is 5s before the moment — well outside the
+    // default 2s spread on either side.
+    const farExit = [...session, at(600, "exit", { reason: "REASON_SIGNALED", timestamp: 1 })];
+    const moment = momentOf(farExit, 5_600);
+    expect(moment.alsoInWindow).toBeUndefined();
+    expect(describe(moment)).not.toContain("Also in this window");
+  });
+
+  it("(missing-input case) a reason-less exit event does not throw, and reports an empty reason rather than crashing", () => {
+    const noReason = [...session, at(5_650, "exit", { timestamp: 1_700_000_000_000 })];
+    const moment = momentOf(noReason, 5_600);
+    expect(moment.alsoInWindow?.exits?.[0].reason).toBe("");
+  });
+});
+
 suite("toBootNs (GRA-113): the reverse trip, for scoping a trace query", () => {
   it("round-trips through fromBootMs", () => {
     // The stall at Porthole 5_600 is boot-time 10_600 (session slept 5s

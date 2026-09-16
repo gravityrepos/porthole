@@ -123,6 +123,133 @@ internal data class Hello(
 internal const val PROTOCOL_VERSION = 1
 
 // ---------------------------------------------------------------------------
+// event kinds
+// ---------------------------------------------------------------------------
+
+/**
+ * Every value [EventFrame.event] can carry, named once instead of typed as a
+ * string literal at each of the dozen call sites that used to spell it out
+ * separately (`DeviceCollector.emit`, `InflightCollector.emit`,
+ * `LogCollector.record`, and the rest — see GRA-200's own history for the
+ * grep that found them). No behaviour change: every value here is the exact
+ * string that travelled on the wire before this object existed, and a
+ * collector referencing `EventKinds.NAV` instead of `"nav"` produces an
+ * identical `EventFrame`.
+ *
+ * This is also the set `mcp/src/eventKinds.ts`'s own `EVENT_KINDS` is meant
+ * to equal — `eventKinds.test.ts` reads this file's source as text and
+ * compares the two, so a kind added on only one side of the wire fails a
+ * test instead of silently going unrecognised by whichever side did not
+ * hear about it. That test parses exactly this object (`object EventKinds
+ * { ... }`, one `const val NAME = "value"` per line), which is why
+ * [DeviceEventKinds] below — real kinds, but nested inside a `device`
+ * event's own `data.kind` rather than carried as [EventFrame.event] itself
+ * — lives in a separate object rather than inside this one: mixing the two
+ * would make "every kind `timeline`'s `kinds` filter actually admits" and
+ * "every kind `EventFrame.event` can equal" the same list when they are not.
+ */
+internal object EventKinds {
+    /** A Compose node recomposed. RecompositionCollector. */
+    const val RECOMPOSE = "recompose"
+
+    /** A tracked `MutableState`/`StateFlow`/plain field was written. SnapshotWatcher. */
+    const val STATE_WRITE = "state_write"
+
+    /** One rendered frame, with its phase breakdown. FrameCollector. */
+    const val FRAME = "frame"
+
+    /** A navigation to a new destination, from either NavController or an app-owned back stack. NavCollector, BackStackCollector. */
+    const val NAV = "nav"
+
+    /** An HTTP call began. InflightCollector. */
+    const val HTTP_START = "http_start"
+
+    /** An HTTP call finished, failed, or was canceled. InflightCollector. */
+    const val HTTP_END = "http_end"
+
+    /** A database query began. InflightCollector. */
+    const val DB_START = "db_start"
+
+    /** A database query finished. InflightCollector. */
+    const val DB_END = "db_end"
+
+    /** One captured logcat line. LogCollector. */
+    const val LOG = "log"
+
+    /** A continuation line (a stack trace frame) for a `log` entry already sent. LogCollector. */
+    const val LOG_APPEND = "log_append"
+
+    /** An app- or test-authored marker, from `Porthole.mark()`. */
+    const val MARK = "mark"
+
+    /** Device/app/system state changed; see [DeviceEventKinds] for what `data.kind` names. DeviceCollector. */
+    const val DEVICE = "device"
+
+    /** The process died; `ExitInfoCollector` replayed it from `ApplicationExitInfo` at the next install. */
+    const val EXIT = "exit"
+
+    /** A WorkManager job started running. WorkManagerPorthole. */
+    const val WORK_START = "work_start"
+
+    /** A WorkManager job stopped running (succeeded, failed, or went back to enqueued for a retry). WorkManagerPorthole. */
+    const val WORK_END = "work_end"
+
+    /** The main thread did not respond to a scheduled ping for longer than the watchdog's threshold. MainThreadWatchdog. */
+    const val BLOCKED = "blocked"
+
+    /** One garbage collection, sampled from ART's own counters. MemoryCollector. */
+    const val GC = "gc"
+
+    /** A periodic heap/native/RAM sample. MemoryCollector. */
+    const val MEMORY = "memory"
+}
+
+/**
+ * Values [DeviceCollector]'s own `data.kind` field can carry, inside an
+ * [EventKinds.DEVICE] event. These are real, named kinds — the server
+ * matches on several of them by name (`trace.ts`'s `resolveProfile` reads
+ * `"profile"`, its `trims` reads `"trimMemory"`) — but they never appear as
+ * [EventFrame.event] itself, so they cannot be passed to `timeline`'s
+ * `kinds` filter the way [EventKinds]'s members can. Kept in a separate
+ * object from [EventKinds] for that reason: see that object's own doc
+ * comment for why the cross-language test depends on the two staying apart.
+ */
+internal object DeviceEventKinds {
+    /** The one-time device/app/display profile emitted at install. */
+    const val PROFILE = "profile"
+
+    /** Porthole's clock against the system's, so a timestamp from elsewhere can be placed. */
+    const val CLOCKS = "clocks"
+
+    /** The app's first activity started. */
+    const val FOREGROUND = "foreground"
+
+    /** The app's last activity stopped. */
+    const val BACKGROUND = "background"
+
+    /** The display rotated. */
+    const val ROTATION = "rotation"
+
+    /** Dark mode toggled. */
+    const val THEME = "theme"
+
+    /** The system font scale changed. */
+    const val FONT_SCALE = "fontScale"
+
+    /** `ComponentCallbacks2.onTrimMemory` — the system asking for memory back. */
+    const val TRIM_MEMORY = "trimMemory"
+
+    /** `ComponentCallbacks2.onLowMemory`, the deprecated pre-API-34 signal. */
+    const val LOW_MEMORY = "lowMemory"
+
+    /** Battery/doze/power-save state changed. */
+    const val POWER = "power"
+
+    /** The active network transport changed, or was lost. */
+    const val NETWORK = "network"
+}
+
+// ---------------------------------------------------------------------------
 // recompositions
 // ---------------------------------------------------------------------------
 

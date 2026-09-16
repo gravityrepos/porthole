@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.collect.InflightCollector
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.WorkJob
 import live.gravitylabs.porthole.store.EventRing
 import java.util.concurrent.TimeUnit
@@ -136,7 +137,7 @@ internal class WorkManagerPorthole {
             )
             running[key] = open
             emit(
-                "work_start",
+                EventKinds.WORK_START,
                 open.spanId,
                 buildMap {
                     put("name", nameOf(info))
@@ -151,7 +152,7 @@ internal class WorkManagerPorthole {
         private fun close(key: String, open: Open, state: String, attempt: Int) {
             running.remove(key)
             emit(
-                "work_end",
+                EventKinds.WORK_END,
                 open.spanId,
                 buildMap {
                     put("state", state)

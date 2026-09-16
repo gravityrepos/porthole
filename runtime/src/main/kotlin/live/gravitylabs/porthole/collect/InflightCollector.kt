@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
 import live.gravitylabs.porthole.protocol.BodyPreview
 import live.gravitylabs.porthole.protocol.DbQuery
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.HttpCall
 import live.gravitylabs.porthole.protocol.Inflight
 import live.gravitylabs.porthole.protocol.WorkJob
@@ -160,7 +161,7 @@ internal class InflightCollector(
     fun httpStart(token: Any, method: String, url: String) {
         val call = OpenHttp(nextId("http"), method, redact(url), now(), "queued")
         http[token] = call
-        emit("http_start", call.id, mapOf("method" to method, "url" to call.url))
+        emit(EventKinds.HTTP_START, call.id, mapOf("method" to method, "url" to call.url))
 
         // Also into the system trace, so this call is visible in a Perfetto
         // capture rather than only in Porthole's own timeline.
@@ -255,7 +256,7 @@ internal class InflightCollector(
         }
 
         emit(
-            "http_end",
+            EventKinds.HTTP_END,
             call.id,
             buildMap {
                 put("method", call.method)
@@ -296,7 +297,7 @@ internal class InflightCollector(
         Atrace.begin(open.traceName, open.traceCookie)
 
         emit(
-            "db_start",
+            EventKinds.DB_START,
             id,
             buildMap {
                 put("sql", sql.collapse())
@@ -319,7 +320,7 @@ internal class InflightCollector(
             }
         }
         emit(
-            "db_end",
+            EventKinds.DB_END,
             id,
             buildMap {
                 put("sql", q.sql.collapse())

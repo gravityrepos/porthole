@@ -4,6 +4,7 @@ package live.gravitylabs.porthole.collect
 
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
 
 /**
@@ -27,7 +28,7 @@ internal class BackStackCollector(private val ring: EventRing) {
         val top = routes.lastOrNull() ?: return
 
         ring.emit(
-            "nav",
+            EventKinds.NAV,
             JsonObject(
                 mapOf(
                     "route" to JsonPrimitive(top),

@@ -24,6 +24,8 @@ dist/cli.js
 dist/cli.js.map
 dist/device.js
 dist/device.js.map
+dist/eventKinds.js
+dist/eventKinds.js.map
 dist/index.js
 dist/index.js.map
 dist/moment.js
@@ -52,6 +54,7 @@ src/args.ts
 src/capture.ts
 src/cli.ts
 src/device.ts
+src/eventKinds.ts
 src/index.ts
 src/moment.ts
 src/perfetto.ts

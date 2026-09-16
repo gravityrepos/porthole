@@ -750,6 +750,84 @@ describe("findings", () => {
       await rig.close();
     }
   });
+
+  describe("alsoInWindow (GRA-200): findings never hides an exit", () => {
+    it("stays byte-identical to before this ticket when the window has none of this to report", async () => {
+      // Exactly the first test in this describe block's own scenario, which
+      // is already known to produce a deterministic, banner-free summary —
+      // reused here so this is a real regression pin against the exact
+      // string, not a guess at what "unaffected" should look like.
+      const rig = await buildRig();
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: {} },
+          { event: "recompose", t: 2_000, data: {} },
+        ]);
+        const result = await rig.client.callTool("findings", { from: 1_500, to: 1_500 });
+        expect(result.isError).toBeFalsy();
+        expect(result.text).toBe(
+          "Nothing crossed a threshold in the 0s examined (0 events). That is not the same as the app being fast.",
+        );
+        expect(result.text).not.toContain("Also in this window");
+        expect((result.json as { alsoInWindow?: unknown }).alsoInWindow).toBeUndefined();
+        expect(Object.hasOwn(result.json as object, "alsoInWindow")).toBe(false);
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("inventories a REASON_SIGNALED exit that produces no finding of its own, and names porthole_status", async () => {
+      const rig = await buildRig();
+      try {
+        await rig.pushEvents([
+          {
+            event: "exit",
+            t: 1_000,
+            data: { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000 },
+          },
+        ]);
+        const result = await rig.client.callTool("findings", { from: 0, to: 2_000 });
+        expect(result.isError).toBeFalsy();
+
+        const payload = result.json as {
+          findings: unknown[];
+          alsoInWindow?: { exits?: Array<{ reason: string; timestamp: number; at: string }> };
+        };
+        // The judgement: REASON_SIGNALED crosses no severity worth a finding.
+        expect(payload.findings).toEqual([]);
+        // The inventory: the exit is still visible.
+        expect(payload.alsoInWindow?.exits).toEqual([
+          { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000, at: "2023-11-14T22:13:20.000Z" },
+        ]);
+        expect(result.text).toContain("porthole_status");
+        expect(result.text).toContain("REASON_SIGNALED");
+        expect(result.text).toContain("exitTrace: 1700000000000");
+      } finally {
+        await rig.close();
+      }
+    });
+
+    it("counts device and memory events under threshold, and the prose says where the raw detail is", async () => {
+      const rig = await buildRig();
+      try {
+        await rig.pushEvents([
+          { event: "device", t: 1_000, data: { kind: "rotation", rotation: "90" } },
+          { event: "device", t: 1_001, data: { kind: "network", transport: "wifi" } },
+          { event: "memory", t: 1_002, data: { heapUsedMb: "40" } },
+        ]);
+        const result = await rig.client.callTool("findings", { from: 0, to: 2_000 });
+        expect(result.isError).toBeFalsy();
+
+        const payload = result.json as { alsoInWindow?: { device?: number; memory?: number } };
+        expect(payload.alsoInWindow).toEqual({ device: 2, memory: 1 });
+        expect(result.text).toContain("2 device events");
+        expect(result.text).toContain("1 memory event");
+        expect(result.text).toContain("raw detail via `timeline`");
+      } finally {
+        await rig.close();
+      }
+    });
+  });
 });
 
 describe("porthole_status, findings and what_was_happening agree during the handshake (GRA-157)", () => {

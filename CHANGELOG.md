@@ -15,7 +15,28 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- `findings` and `what_was_happening` now carry `alsoInWindow`: an inventory
+  of every process exit in the window (including ones that already produced
+  a finding above), plus raw counts of device, memory, GC and memory-trim
+  events that never cross a finding's own threshold. Present only when there
+  is something to add — a REASON_SIGNALED exit, or any other event a
+  finding's severity mapping does not cover, used to be invisible to both
+  tools; now it is a plain count with a pointer to where the detail lives
+  (`porthole_status` for an exit, `timeline` for the rest) (GRA-200).
+- The runtime's event kinds are now named constants (`EventKinds`,
+  `DeviceEventKinds` in `Protocol.kt`) instead of a string literal repeated
+  at each collector's own call site, and `mcp/src/eventKinds.ts` mirrors the
+  wire-facing set — a test on each side keeps the two lists honest against
+  each other (GRA-200).
+
 ### Changed
+
+- `timeline`'s `kinds` parameter description now lists and narrates every
+  kind the filter actually accepts, grouped by where each one is better
+  read — `porthole_status` for `exit`, `findings`/`frames` for `device`'s
+  startup profile, `timeline` itself for the rest — generated from the same
+  list `eventKinds.test.ts` checks against the runtime, so the description
+  cannot silently fall out of sync with what the filter admits (GRA-200).
 
 ### Fixed
 

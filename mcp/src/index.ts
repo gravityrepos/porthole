@@ -24,7 +24,17 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { buildTrace, describeBudget, num, resolveProfile, str, type Finding } from "./trace.js";
+import {
+  alsoInWindowOf,
+  alsoInWindowSentence,
+  buildTrace,
+  describeBudget,
+  num,
+  resolveProfile,
+  str,
+  type Finding,
+} from "./trace.js";
+import { timelineKindsDescription } from "./eventKinds.js";
 import {
   UNKNOWN_DEVICE_ID,
   clippedMsOf,
@@ -1099,7 +1109,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "there being nothing there.\n\n" +
         "An empty list means nothing crossed a threshold in this window. It does not mean the app " +
         "is fast, and it does not mean the window contained the problem — check `window` against " +
-        "the moment you care about before concluding anything from silence.",
+        "the moment you care about before concluding anything from silence.\n\n" +
+        "`alsoInWindow` (present only when there is something to say) is an inventory, not a second " +
+        "opinion: process exits, device events, memory samples, GC and memory-trim signals that " +
+        "were in the window whether or not they crossed a threshold worth a finding — an exit " +
+        "already covered by a finding above still appears here too, because a finding is a " +
+        "judgement and this is a count. Absent means genuinely nothing to add, not that this tool " +
+        "declined to look.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
@@ -1265,6 +1281,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const findings = trace.findings.map(withFollowUp);
 
+      // GRA-200: built from the same windowed `events` `trace` itself came
+      // from, so this can never name a different window than the findings
+      // beside it. See alsoInWindowOf's own comment in trace.ts for why an
+      // exit that already produced a finding still appears here too.
+      const also = alsoInWindowOf(events);
+      const alsoSentence = alsoInWindowSentence(also);
+
       // GRA-55: classified against whatever the *previous* findings call
       // left in the watermark, before this call's own digest overwrites it
       // — order matters here, `recordDigest` below must come after reading
@@ -1301,6 +1324,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         findings: classified.findings,
         connected,
         exitedProcess,
+        // GRA-200: absent, not `{}` or all-undefined, when there is nothing
+        // to list — see alsoInWindowOf's own comment for why this is what
+        // keeps the common case's payload byte-identical to before this
+        // ticket. The spread (not `alsoInWindow: also`) is what actually
+        // omits the key when `also` is `undefined`, rather than shipping a
+        // key whose value happens to be `undefined`.
+        ...(also ? { alsoInWindow: also } : {}),
       };
 
       const shortfall = clipped.start + clipped.end;
@@ -1318,7 +1348,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
                 "it is a question the buffer cannot answer."
               : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
                 `(${events.length} events). That is not the same as the app being fast.${missing}`) +
-            classificationNote,
+            classificationNote +
+            (alsoSentence ? ` ${alsoSentence}` : ""),
           payload,
         );
       }
@@ -1335,7 +1366,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       return ok(
         notice +
           `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
-          `Worst: ${worst.title} [${worst.confidence}].${missing}${classificationNote}`,
+          `Worst: ${worst.title} [${worst.confidence}].${missing}${classificationNote}` +
+          (alsoSentence ? ` ${alsoSentence}` : ""),
         payload,
       );
     },
@@ -2407,13 +2439,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "what the app was doing while a call was open.",
       inputSchema: {
         ...windowShape,
-        kinds: z
-          .array(z.string())
-          .optional()
-          .describe(
-            "Filter by event name: recompose, state_write, frame, nav, http_start, http_end, " +
-              "db_start, db_end, log.",
-          ),
+        kinds: z.array(z.string()).optional().describe(timelineKindsDescription()),
         limit: z
           .number()
           .int()

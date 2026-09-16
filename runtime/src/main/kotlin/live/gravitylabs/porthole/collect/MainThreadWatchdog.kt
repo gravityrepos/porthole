@@ -7,6 +7,7 @@ import android.os.Looper
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.MainThreadStall
 import live.gravitylabs.porthole.store.EventRing
 import java.util.ArrayDeque
@@ -129,7 +130,7 @@ internal class MainThreadWatchdog(
             while (stalls.size > CAPACITY) stalls.removeFirst()
         }
         ring.emit(
-            "blocked",
+            EventKinds.BLOCKED,
             JsonObject(
                 mapOf(
                     "durationMs" to JsonPrimitive(durationMs),

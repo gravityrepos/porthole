@@ -10,6 +10,7 @@ import android.os.Build
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.protocol.ExitTraceResult
 import live.gravitylabs.porthole.store.EventRing
 import java.io.File
@@ -95,7 +96,7 @@ internal class ExitInfoCollector(
             if (record.timestamp in alreadyReported) continue
             val (versionName, versionAssumed) = resolveVersionName(record, currentVersionName)
             ring.emit(
-                "exit",
+                EventKinds.EXIT,
                 buildExitEvent(record, reasonName, versionName, versionAssumed, parsed),
                 at = nowMs(),
             )

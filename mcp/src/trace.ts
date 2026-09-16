@@ -726,6 +726,127 @@ const EXIT_ERROR_REASONS = new Set([
   "REASON_EXCESSIVE_RESOURCE_USAGE",
 ]);
 
+// ---------------------------------------------------------------------------
+// GRA-200: alsoInWindow — an inventory, not a second opinion
+// ---------------------------------------------------------------------------
+//
+// findingsOf above answers "what is wrong" and is deliberately selective: a
+// REASON_SIGNALED exit, a non-blocking gc, a plain memory sample produce no
+// finding at all, because none of them is evidence of anything on their own.
+// That selectivity is correct for `findings`' own job and was never the
+// problem — the problem is that it left no OTHER way for an agent reading
+// just `findings` to learn those events happened at all. `alsoInWindow` is
+// that other way: a plain count (or, for exits, a full list) of what the
+// window contained, built from the exact same `events` findingsOf was given,
+// so the two can never disagree about which window they describe.
+//
+// "Also in this window" therefore intentionally overlaps `findings` rather
+// than complementing it — an exit that already produced a finding still
+// appears in `alsoInWindow.exits`, and a blocking gc still counts toward
+// `alsoInWindow.gc`. The finding is the judgement; this is the inventory.
+// Collapsing the two into "only show what findings missed" would silently
+// reintroduce the exact bug this ticket exists to close the moment a second
+// exit arrived in the same window as a first one that did get a finding.
+
+export interface AlsoInWindowExit {
+  reason: string;
+  /** Epoch ms — `ApplicationExitInfo.getTimestamp()`'s own unit, exactly what `porthole_status`'s `exitTrace` param accepts (GRA-188). */
+  timestamp: number;
+  /** The same instant as `timestamp`, ISO-8601 — the same spelling `porthole_status`'s `exits.recent[].at` uses. */
+  at: string;
+}
+
+export interface AlsoInWindow {
+  /** Every exit event in the window, including ones that already produced a finding. Absent (not `[]`) when there were none. */
+  exits?: AlsoInWindowExit[];
+  /**
+   * `device` events other than a `trimMemory` sub-kind — profile, lifecycle,
+   * rotation, theme, power, network. Counted separately from [trim] so a
+   * reader is not left guessing whether a "4 device events" count already
+   * includes the memory-pressure signal named right next to it.
+   */
+  device?: number;
+  /** Periodic memory samples — never their own finding, always worth knowing they exist. */
+  memory?: number;
+  /** All `gc` events, blocking or not — `findingsOf` only turns the blocking ones into a finding. */
+  gc?: number;
+  /** `device` events whose `data.kind` is `trimMemory` — always already a finding when present (`findingsOf`'s `trim-memory`), counted again here for the same reason an exit is. */
+  trim?: number;
+}
+
+/**
+ * Builds the block above from the same `events` `findingsOf` was given.
+ * Returns `undefined` — not an object with every field absent — when there
+ * is nothing to list, which is what keeps a `findings` payload with none of
+ * this in its window byte-identical to what it returned before this ticket.
+ */
+export function alsoInWindowOf(events: DeviceEvent[]): AlsoInWindow | undefined {
+  const exits = events
+    .filter((e) => e.event === "exit")
+    .map((e): AlsoInWindowExit => {
+      const timestamp = num(e.data.timestamp);
+      return { reason: str(e.data.reason), timestamp, at: new Date(timestamp).toISOString() };
+    });
+
+  const deviceEvents = events.filter((e) => e.event === "device");
+  const trimEvents = deviceEvents.filter((e) => str(e.data.kind) === "trimMemory");
+  const device = deviceEvents.length - trimEvents.length;
+  const trim = trimEvents.length;
+  const memory = events.filter((e) => e.event === "memory").length;
+  const gc = events.filter((e) => e.event === "gc").length;
+
+  const also: AlsoInWindow = {
+    ...(exits.length > 0 ? { exits } : {}),
+    ...(device > 0 ? { device } : {}),
+    ...(memory > 0 ? { memory } : {}),
+    ...(gc > 0 ? { gc } : {}),
+    ...(trim > 0 ? { trim } : {}),
+  };
+  return Object.keys(also).length > 0 ? also : undefined;
+}
+
+/**
+ * One sentence naming what [alsoInWindowOf] found, or `""` when it found
+ * nothing. `findings`' own summary and `what_was_happening`'s `describe()`
+ * both append exactly this — one function, not two hand-written near-copies
+ * that would drift the way this codebase's own history (see BRIEFING.md's
+ * "GRA-53: the third consumer") warns two independent copies always do.
+ */
+export function alsoInWindowSentence(also: AlsoInWindow | undefined): string {
+  if (!also) return "";
+  const parts: string[] = [];
+
+  if (also.exits?.length) {
+    const n = also.exits.length;
+    if (n === 1) {
+      const exit = also.exits[0];
+      parts.push(
+        `${n} process exit (${exit.reason}, full record via ` +
+          `\`porthole_status { exitTrace: ${exit.timestamp} }\`)`,
+      );
+    } else {
+      const latest = also.exits[also.exits.length - 1];
+      parts.push(
+        `${n} process exits (most recent ${latest.reason}, full records via \`porthole_status\`)`,
+      );
+    }
+  }
+  // Unlike an exit, none of these four carries a pointer of its own — a
+  // count with nowhere to go for the detail is a dead end, so one shared
+  // pointer to `timeline` (where every one of them is a raw, inspectable
+  // event) covers all four rather than repeating the same clause four times.
+  const rawCounts: string[] = [];
+  if (also.device) rawCounts.push(`${also.device} device event${also.device === 1 ? "" : "s"}`);
+  if (also.memory) rawCounts.push(`${also.memory} memory event${also.memory === 1 ? "" : "s"}`);
+  if (also.gc) rawCounts.push(`${also.gc} GC event${also.gc === 1 ? "" : "s"}`);
+  if (also.trim) rawCounts.push(`${also.trim} memory-trim event${also.trim === 1 ? "" : "s"}`);
+  if (rawCounts.length > 0) {
+    parts.push(`${rawCounts.join(", ")} (raw detail via \`timeline\`)`);
+  }
+
+  return parts.length > 0 ? `Also in this window: ${parts.join(", ")}.` : "";
+}
+
 export function buildTrace(options: {
   scenario: string;
   driver?: string;

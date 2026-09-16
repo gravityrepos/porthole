@@ -52,6 +52,23 @@ them they cover:
 Everything is debug-only. Release builds link a no-op artifact with identical
 signatures, so the calls stay in your code and compile to nothing.
 
+### What `timeline` admits
+
+`timeline`'s `kinds` filter takes any of: `recompose`, `state_write`, `frame`,
+`nav`, `http_start`, `http_end`, `db_start`, `db_end`, `log` (the nine kinds
+the UI lanes already show), plus `log_append`, `mark`, `work_start`,
+`work_end`, `blocked` (raw here too, with no lane of their own), `device`
+(raw here; its one-time startup profile is what `findings` and `frames` read
+their frame budget from, and its other sub-kinds cover lifecycle changes,
+rotation, theme, font scale, power and network), `memory`/`gc` (raw here;
+`gc` becomes a finding only when a collection blocks the app, and `device`'s
+`trimMemory` sub-kind becomes one whenever the system actually asks for
+memory back), and `exit` (narrated in `porthole_status`, and inventoried —
+not just reported when it happened to cross a finding's threshold — in
+`findings`' own `alsoInWindow`; see "Why it died" below). This list is kept
+in sync with the runtime's own `EventKinds` object
+(`runtime/.../protocol/Protocol.kt`) by a test that reads both sides.
+
 ### Why it died
 
 The process holding the ring buffer is the process that crashed, so the ring
@@ -81,6 +98,20 @@ the epoch-milliseconds `timestamp` or the ISO-8601 `at` from that same entry
 in `exits` — both are accepted and converted. Both the summary and the full
 trace go through the same redaction every other captured string does,
 before either ever leaves the process.
+
+Not every exit reaches that `error`/`note` severity table — `REASON_OTHER`
+and a plain `REASON_SIGNALED` kill produce no finding at all, because on
+their own they are not evidence of anything. That used to mean an exit like
+that was invisible to `findings` entirely, silence indistinguishable from "no
+exit happened." `findings` and `what_was_happening` now both carry
+`alsoInWindow`, present only when there is something to add: every process
+exit in the window — including ones that already produced a finding above,
+since the finding is the judgement and this is the inventory — plus plain
+counts of device, memory, GC and memory-trim events that never rise to a
+finding on their own. `alsoInWindow.exits` gives the same `reason`/`timestamp`
+shape `exits` does, so `porthole_status {"exitTrace": <timestamp>}` still
+works without a second lookup. The field, and the one sentence both tools
+append for it, are absent — not empty — when there is nothing to add.
 
 ## Layout
 
@@ -1789,16 +1820,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1523 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1555 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 455 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 447
-passed, 0 failed, 8 skipped), 774 in the MCP server (`cd mcp && npm test` —
-771 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
+[Testing](#testing)): 461 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 453
+passed, 0 failed, 8 skipped), 800 in the MCP server (`cd mcp && npm test` —
+797 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 294 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1523 disagrees with the sum of the three suites' totals stated
+XML, and when 1555 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1833,13 +1864,20 @@ none of them platform-gated, so they add to every leg's passed count and
 change no leg's skip count. The server's 3 skips on
 ubuntu are `perfetto-stdout` and GRA-113's real-coverage check
 (both gated on a cached `trace_processor` capture no CI runner has — gitignored
-and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
+and per-checkout) and the one Windows-only case GRA-160 added. GRA-200 adds
+3 runtime tests (`EventKindsTest`, pinning every `EventKinds`/
+`DeviceEventKinds` literal and proving none collide — +6 on the JVM total,
+once per build type) and 26 server tests (the Protocol.kt↔`eventKinds.ts`
+cross-language check, `alsoInWindowOf`/`alsoInWindowSentence`'s own unit
+tests, `momentOf`'s exit-in-window case, and three rig tests through the real
+`findings` tool) — none of them platform-gated either, so they too only move
+passed counts. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 455 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
+the same 461 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
 set — the same SDK that keeps it at 4 also runs GRA-197's two tests for
-real) and the same 774 server tests with 0 skipped, because it has the
+real) and the same 800 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 774/773/1, missing only that capture. The timeline UI is the one suite
+sees 800/799/1, missing only that capture. The timeline UI is the one suite
 whose split does not move: 294/294/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager

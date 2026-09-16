@@ -8,6 +8,7 @@ import androidx.compose.runtime.snapshots.ObserverHandle
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.nowMs
 import live.gravitylabs.porthole.store.EventRing
 import java.lang.ref.WeakReference
@@ -82,7 +83,7 @@ internal class SnapshotWatcher(
         val named = write.keys.filterNot { isUnnamed(it) }
         val yours = write.keys.filter { isUnnamed(it) && hintFor(it) != null }
         ring.emit(
-            "state_write",
+            EventKinds.STATE_WRITE,
             JsonObject(
                 mapOf(
                     "keys" to JsonArray(write.keys.map { JsonPrimitive(it) }),

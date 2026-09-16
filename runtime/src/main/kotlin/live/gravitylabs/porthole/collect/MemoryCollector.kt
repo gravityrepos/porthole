@@ -6,6 +6,7 @@ import android.os.Debug
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
+import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
 import java.io.File
 import java.util.concurrent.Executors
@@ -99,7 +100,7 @@ internal class MemoryCollector(private val ring: EventRing) {
             // clicked like anything else on the timeline.
             if (sinceLast > 0) {
                 ring.emit(
-                    "gc",
+                    EventKinds.GC,
                     JsonObject(
                         buildMap {
                             put("count", JsonPrimitive(sinceLast))
@@ -114,7 +115,7 @@ internal class MemoryCollector(private val ring: EventRing) {
             }
 
             ring.emit(
-                "memory",
+                EventKinds.MEMORY,
                 JsonObject(
                     buildMap {
                         put("heapUsedMb", JsonPrimitive(mb(used)))
