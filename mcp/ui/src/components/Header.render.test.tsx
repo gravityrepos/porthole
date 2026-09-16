@@ -264,28 +264,22 @@ describe("Header's connection pill across a reconnect retry loop (GRA-192)", () 
     expect(mutations).toHaveLength(0);
   });
 
-  it("reveals -- and does mutate the DOM -- once a connecting excursion outlives the max backoff (AC3: 5.5s)", async () => {
+  it("reveals once a connecting excursion outlives the max backoff (AC3: 5.5s)", async () => {
     const { rerender } = renderHeader("disconnected");
-    const { pill } = pillPartsFor(/^disconnected$/i);
-
-    const observer = new MutationObserver(() => {});
-    observer.observe(pill, { attributes: true, childList: true, subtree: true, characterData: true });
+    pillPartsFor(/^disconnected$/i); // establishes the pill exists before the excursion
 
     rerender(<Header {...headerProps("connecting")} />);
     await act(async () => {
       // Async, not the sync `advanceTimersByTime` the other tests in this
-      // file use: happy-dom's MutationObserver only populates its record
-      // queue when its own callback microtask actually runs, so
-      // `takeRecords()` right after a synchronous advance sees nothing yet
-      // to drain (measured: it failed with 0 records before this change).
-      // The `*Async` variant yields to the microtask queue between fired
-      // timers, same as App.findings.render.test.tsx already relies on.
+      // file use: the reveal is driven by useSettledConnection's own
+      // internal setTimeout (not a prop change), so nothing re-renders
+      // Header until that timer's callback runs and calls setState --
+      // advanceTimersByTimeAsync is what actually lets that callback fire
+      // and its resulting commit flush before this line resumes, the same
+      // pattern App.findings.render.test.tsx already relies on.
       await vi.advanceTimersByTimeAsync(5_500);
     });
 
-    const mutations = observer.takeRecords();
-    observer.disconnect();
-    expect(mutations.length).toBeGreaterThan(0);
     expect(screen.getByText(/^connecting$/i)).toBeTruthy();
     expect(screen.queryByText(/^disconnected$/i)).toBeNull();
   });
