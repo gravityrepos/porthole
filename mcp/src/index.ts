@@ -7,7 +7,7 @@ import { z } from "zod";
 import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { resolveProjectRoot, resolveSdkDir, runAdb, runAdbAsync } from "./adb.js";
+import { resolveProjectRoot, resolveSdkDir, restartAppAsync, runAdb, runAdbAsync } from "./adb.js";
 import { describe as describeMoment, fromBootMs, momentOf, toBoot } from "./moment.js";
 import {
   CPU_PROBE,
@@ -52,6 +52,41 @@ const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
  * asked to run for.
  */
 const CAPTURE_ADB_TIMEOUT_BUFFER_MS = 30_000;
+
+/**
+ * GRA-186: how long `capture_system_trace`'s `restartApp: true` path polls
+ * for the on-device trace file before giving up and restarting anyway.
+ *
+ * The recording itself is one `runAdbAsync` call that only resolves when the
+ * whole `-t Ns` window is over (GRA-89), so it gives no mid-flight signal
+ * that the session has actually started — restarting the app before it has
+ * would just repeat the case this option exists to fix, restarting after the
+ * whole window is over would restart to no purpose at all. Perfetto creates
+ * its output file on-device as soon as the session starts, before it writes
+ * a single event into it, so polling for that file's existence is the
+ * smallest reliable "it has started" signal available without parsing
+ * perfetto's own stderr. If it never appears within this bound the restart
+ * still goes ahead — the whole point is to make the app tag visible to the
+ * target process, and doing that late is far better than not doing it.
+ */
+const RESTART_POLL_TIMEOUT_MS = 5_000;
+const RESTART_POLL_INTERVAL_MS = 150;
+
+interface AdbCallOptions {
+  serial?: string;
+  env?: NodeJS.ProcessEnv;
+  binary?: string;
+}
+
+async function waitForCaptureToStart(devicePath: string, options: AdbCallOptions): Promise<void> {
+  const deadline = Date.now() + RESTART_POLL_TIMEOUT_MS;
+  for (;;) {
+    const probe = await runAdbAsync(["shell", "test", "-e", devicePath], { ...options, timeoutMs: 2_000 });
+    if (probe.ok) return;
+    if (Date.now() >= deadline) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, RESTART_POLL_INTERVAL_MS));
+  }
+}
 
 export interface PortholeServerOptions {
   /** Injected in tests; a real one is created in `createPortholeServer` otherwise. */
@@ -1485,6 +1520,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "out below the app, or jank blamed on swapBuffers — and you need to see what the rest of " +
         "the system was doing at that moment. `findings` gives you the window worth looking at; " +
         "this gives you the depth at it.\n\n" +
+        "`restartApp` force-stops and relaunches the target app right after the capture starts — " +
+        "needed on builds that only read the app trace tag at process start (seen on a Pixel 9 " +
+        "Pro Fold, Android 17), where an already-running process's own sections would otherwise " +
+        "be silently missing, at the cost of the trace containing a cold start.\n\n" +
         "Blocks for the requested duration. Reproduce the problem while it runs.",
       inputSchema: {
         seconds: z
@@ -1513,10 +1552,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "attached to. Without one, the trace has no Porthole slices in it.",
           ),
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
+        restartApp: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Force-stop and relaunch the target app right after the capture starts, since on " +
+              "builds that only read the app trace tag at process start (seen on a Pixel 9 Pro " +
+              "Fold, Android 17) an already-running process's own sections never appear — the " +
+              "trade-off is a cold start inside the trace. The package is the first entry of " +
+              "`packages`, or the attached app when `packages` is omitted. Default false.",
+          ),
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ seconds, categories, outputDir, packages, serial }): Promise<ToolResult> => {
+    async ({ seconds, categories, outputDir, packages, serial, restartApp }): Promise<ToolResult> => {
       // GRA-157: `device.hello ? [...] : []` used to fall through to an
       // unscoped capture — silently, with nothing in the result saying so —
       // whenever this landed in the handshake window, since state was
@@ -1538,6 +1588,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // whose sections are worth recording, and asking for it again is friction.
       const apps = packages?.length ? packages : device.hello ? [device.hello.packageName] : [];
       const plan = planCapture({ seconds, categories, apps });
+      const adbCallOptions: AdbCallOptions = { serial, env: adbEnv, binary: adbBinary };
 
       // GRA-89: async, awaited spawn for all three adb calls below, not
       // `runAdb`'s `spawnSync` — that used to freeze the whole MCP server
@@ -1548,10 +1599,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // (the plan's own duration plus room for adb's own startup and
       // teardown) rather than `runAdbAsync`'s short default, which exists
       // for calls — the pull, the cleanup — that are supposed to be quick.
-      const recorded = await runAdbAsync(captureArgs(plan), {
-        serial,
-        env: adbEnv,
-        binary: adbBinary,
+      //
+      // GRA-186: not awaited here any more. `restartApp: true` has to act
+      // *during* this recording, not after it — awaiting first would mean
+      // "restarting" only once the whole window is already over, which is
+      // the exact bug this option exists to work around.
+      const recordingPromise = runAdbAsync(captureArgs(plan), {
+        ...adbCallOptions,
         timeoutMs: plan.seconds * 1000 + CAPTURE_ADB_TIMEOUT_BUFFER_MS,
         onProgress: (elapsedMs) =>
           process.stderr.write(
@@ -1559,6 +1613,34 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               `${plan.seconds}s elapsed...\n`,
           ),
       });
+
+      // GRA-186: on a build that only reads ATRACE_TAG_APP at process
+      // attach (Pixel 9 Pro Fold, Android 17), a process already running
+      // when the session starts never picks the tag up — a process that
+      // (re)starts after the session has begun does. Restarting here, once
+      // `waitForCaptureToStart` has the best available signal that the
+      // session is live, is the fix; see systrace.ts's zero-label sentence
+      // for the diagnosis this is a remedy for.
+      let restarted = false;
+      const restartNotes: string[] = [];
+      if (restartApp) {
+        const target = apps[0];
+        if (!target) {
+          restartNotes.push(
+            "Could not restart the app for this capture: no package is attached or named, so " +
+              "there is nothing to restart.",
+          );
+        } else {
+          await waitForCaptureToStart(plan.devicePath, adbCallOptions);
+          const restartResult = await restartAppAsync(target, adbCallOptions);
+          restarted = restartResult.ok;
+          if (!restartResult.ok) {
+            restartNotes.push(`Could not restart ${target} for this capture: ${restartResult.output}`);
+          }
+        }
+      }
+
+      const recorded = await recordingPromise;
       if (!recorded.ok) {
         return fail(
           `Could not record: ${recorded.output}\n` +
@@ -1572,9 +1654,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       mkdirSync(dir, { recursive: true });
       const local = join(dir, plan.devicePath.split("/").pop() as string);
 
-      const pulled = await runAdbAsync(["pull", plan.devicePath, local], { serial, env: adbEnv, binary: adbBinary });
+      const pulled = await runAdbAsync(["pull", plan.devicePath, local], adbCallOptions);
       // Tidy up regardless: the device's trace directory is not ours to fill.
-      await runAdbAsync(["shell", "rm", "-f", plan.devicePath], { serial, env: adbEnv, binary: adbBinary });
+      await runAdbAsync(["shell", "rm", "-f", plan.devicePath], adbCallOptions);
 
       if (!pulled.ok) return fail(`Recorded, but could not pull it: ${pulled.output}`);
 
@@ -1584,10 +1666,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         bytes,
         seconds: plan.seconds,
         categories: plan.categories,
+        apps: plan.apps,
+        restarted,
         // GRA-89: streamed in chunks by countPortholeLabels itself now, not
         // a whole-file readFileSync handed to it — see systrace.ts.
         portholeLabels: await countPortholeLabels(local),
-        notes: plan.notes,
+        notes: [...plan.notes, ...restartNotes],
       };
       return ok(describeCapture(result), result);
     },

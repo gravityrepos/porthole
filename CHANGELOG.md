@@ -38,6 +38,10 @@ PR that makes the change, not after the fact.
   Kotlin modules under a `jvm` flag, and `lcov` from each vitest suite under
   `server`/`ui`. Both status checks are informational and cannot fail a PR
   (GRA-190).
+- `capture_system_trace` gains a `restartApp` option: force-stop and relaunch
+  the target app right after the capture starts, for builds (seen on a Pixel
+  9 Pro Fold, Android 17) that only read the app trace tag at process start
+  and so never annotate a process that was already running (GRA-186).
 - Why the app died last time: a new runtime collector reads
   `ActivityManager.getHistoricalProcessExitReasons` on install (API 30+) and
   emits one `exit` event per death not already reported, deduplicated across
