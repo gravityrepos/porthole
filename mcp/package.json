@@ -1,6 +1,6 @@
 {
   "name": "@gravitylabsllc/porthole",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server and live timeline for Porthole: query a running Android app for recomposition counts, frame timing, main-thread stalls, navigation, state, in-flight work and logs, and capture and query Perfetto system traces.",
   "type": "module",
   "bin": {

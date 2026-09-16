@@ -13,6 +13,14 @@ PR that makes the change, not after the fact.
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.2.0] - 2026-09-15
+
 ### Changed
 
 - **Breaking:** every MCP tool's answer now returns its human-readable
