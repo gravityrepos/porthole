@@ -251,6 +251,17 @@ Two things worth knowing before you run it:
   for this machine (`PORTHOLE_PROJECT_ROOT`, `PORTHOLE_SDK_DIR`), so commit
   it only if everyone on the project regenerates it with
   `./gradlew portholeMcpConfig` rather than sharing one copy.
+- **If nothing responds once "connected", something is already holding the
+  port** — on either end. `portholeConnect`'s `adb forward` succeeds
+  whether or not anything else on this machine is already holding the
+  port, so if the MCP server still can't reach the app, check what is
+  listening on `PORTHOLE_PORT` locally and stop it, or set a different one.
+  On the device, another Porthole app already running there (the sample
+  counts, and it is exactly what running the sample and then your own app
+  produces) can be holding the socket before your app ever tries to bind —
+  `adb logcat -s Porthole:E` names it, with the port, this app's own
+  package, and the fix: stop the other app, or give this one its own
+  `porthole { port.set(...) }`.
 
 The runtime starts with the process through androidx.startup and finds the
 current Activity on its own, which gives it the view it needs for the
@@ -1764,16 +1775,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1481 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1487 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 445 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 437
+[Testing](#testing)): 451 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 443
 passed, 0 failed, 8 skipped), 760 in the MCP server (`cd mcp && npm test` —
 757 passed, 0 failed, 3 skipped), and 276 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 276 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1481 disagrees with the sum of the three suites' totals stated
+XML, and when 1487 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1796,7 +1807,7 @@ this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA
 (both gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 445 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
+the same 451 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
 set) and the same 760 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
 sees 760/758/2, missing only that capture. The timeline UI is the one suite
