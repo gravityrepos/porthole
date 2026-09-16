@@ -43,6 +43,12 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HOST = process.env.PORTHOLE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
 const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
+/**
+ * GRA-197: the plugin's own knowledge of which app this server is for, when
+ * it wrote one — absent (not empty) when it did not, which is what tells
+ * `DeviceClient` to skip the check entirely rather than compare against "".
+ */
+const APPLICATION_ID = process.env.PORTHOLE_APPLICATION_ID || undefined;
 
 /**
  * GRA-89: how much longer than the plan's own recording duration
@@ -215,7 +221,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   // persistence; a test that injects its own `options.device` (the harness
   // in `testing/harness.ts`, or a hand-built fake) is unaffected — this
   // branch only runs when nothing was injected.
-  const device = options.device ?? new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory));
+  const device =
+    options.device ??
+    new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory), APPLICATION_ID);
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
   const adbEnv = options.adbEnv;
   const adbBinary = options.adbBinary;
@@ -1028,6 +1036,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // reading structured data (not just the text) can branch on it
         // without string-matching `summary`.
         protocolMismatch: device.protocolMismatch,
+        // GRA-197: same shape, beside it — null unless PORTHOLE_APPLICATION_ID
+        // was configured and disagrees with the connected hello.
+        packageMismatch: device.packageMismatch,
         sdkDir: sdkDir.directory,
         sdkDirSource: sdkDir.source,
         projectRoot: projectRoot.directory,
@@ -1036,17 +1047,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         exits,
         exitTrace: exitTraceResult,
       };
-      // GRA-96: a protocol mismatch takes priority over the normal "here is
+      // GRA-96/GRA-197: a mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
-      // but the one thing worth saying is that the two sides disagree on the
-      // wire format, not the collector list a mismatched build may not even
-      // be able to report honestly. This is what turns AC1's "specific,
-      // actionable message... not a generic failure" into the actual summary
-      // text an agent reads, rather than a field it has to know to check.
+      // but the one thing worth saying is that something disagrees, not the
+      // collector list a mismatched build may not even be able to report
+      // honestly. packageMismatch leads: talking to the wrong app entirely
+      // is the more fundamental problem, and its protocol is not this
+      // server's concern until it is talking to the right one. This is what
+      // turns AC1's "specific, actionable message... not a generic failure"
+      // into the actual summary text an agent reads, rather than a field it
+      // has to know to check.
       const summary =
         notice +
         deathNotice +
         (pending ??
+          device.packageMismatch ??
           device.protocolMismatch ??
           `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
             `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`);
@@ -1117,6 +1132,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         const notice = exitedProcessNotice(exitedProcess, false, pending === null);
         if (pending !== null) {
           return ok(notice + pending, { window: null, findings: [], connected, exitedProcess });
+        }
+        // GRA-197: the same "leads with it" rule porthole_status's summary
+        // follows, on an otherwise unrelated tool — a mismatched app is worth
+        // saying here too, not only from porthole_status, since this is
+        // often the first tool an agent calls.
+        if (device.packageMismatch) {
+          return ok(notice + device.packageMismatch, { window: null, findings: [], connected, exitedProcess });
         }
         const summary = `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`;
         return ok(notice + summary, { window: null, findings: [], connected, exitedProcess });

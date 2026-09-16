@@ -1521,6 +1521,75 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
   });
 });
 
+describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
+  // The default fixture's hello() always answers as com.example.shop (see
+  // testing/harness.ts's defaultHandlers()) — exactly the shape a real
+  // "another Porthole app is holding the port" incident produces once this
+  // server is configured, via applicationId, for a different app.
+  it("porthole_status names both the connected and configured package instead of the normal connected summary", async () => {
+    const rig = await buildRig({ applicationId: "com.acme.app" });
+    try {
+      expect(rig.device.state).toBe("connected");
+      expect(rig.device.packageMismatch).not.toBeNull();
+
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      expect(status.text).not.toContain("Collectors:");
+      expect(status.text).toContain("com.example.shop");
+      expect(status.text).toContain("com.acme.app");
+      expect(status.text).toContain("PORTHOLE_APPLICATION_ID");
+      // Structured data agrees with the summary text, same convention as
+      // protocolMismatch above.
+      const payload = status.json as { packageMismatch: string | null };
+      expect(payload.packageMismatch).not.toBeNull();
+      expect(status.text.startsWith(payload.packageMismatch as string)).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("is absent from porthole_status for a matching applicationId, the normal case", async () => {
+    const rig = await buildRig({ applicationId: "com.example.shop" });
+    try {
+      expect(rig.device.packageMismatch).toBeNull();
+      const status = await rig.client.callTool("porthole_status", {});
+      const payload = status.json as { packageMismatch: string | null };
+      expect(payload.packageMismatch).toBeNull();
+      expect(status.text).toContain("Collectors:");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("is absent from porthole_status when PORTHOLE_APPLICATION_ID was never configured", async () => {
+    const rig = await buildRig(); // no applicationId — behaviour must be unchanged (AC3)
+    try {
+      expect(rig.device.packageMismatch).toBeNull();
+      const status = await rig.client.callTool("porthole_status", {});
+      const payload = status.json as { packageMismatch: string | null };
+      expect(payload.packageMismatch).toBeNull();
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // GRA-197 AC2: "present ... in the banner of an unrelated tool" — findings'
+  // empty-ring branch leads with it the same way porthole_status's summary
+  // does, proven here against a real tool call rather than device.ts alone.
+  it("findings — an unrelated tool — leads its empty-ring summary with the mismatch too", async () => {
+    const rig = await buildRig({ applicationId: "com.acme.app" });
+    try {
+      const findings = await rig.client.callTool("findings", {});
+      expect(findings.isError).toBeFalsy();
+      expect(findings.text).toContain("com.example.shop");
+      expect(findings.text).toContain("com.acme.app");
+      expect(findings.text).not.toContain("nothing buffered yet");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
 // -----------------------------------------------------------------------------
 // GRA-171: joinSummaryAndPayload() itself, direct — proving the structural
 // claim without going through a device fixture at all

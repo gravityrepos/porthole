@@ -398,6 +398,7 @@ export function App() {
           restartLabel={restartLabel}
           connection={store.connection}
           hello={store.hello}
+          packageMismatch={store.packageMismatch}
           eventsPerSecond={eventsPerSecond}
           following={following}
           showFramework={showFramework}

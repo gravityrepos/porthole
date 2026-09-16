@@ -176,6 +176,36 @@ export class DeviceClient extends EventEmitter {
   protocolMismatch: string | null = null;
 
   /**
+   * GRA-197: null unless `hello.packageName` disagrees with
+   * [applicationId] — set synchronously in `connect()`'s hello handler,
+   * right beside [protocolMismatch] and for the same reasons: computed the
+   * instant `hello` lands rather than deferred to whichever tool asks
+   * later, so a reader is never looking at a stale answer for a previous
+   * connection, and cleared wherever `protocolMismatch` is (the "close"
+   * handler below), since both are facts about the `hello` that produced
+   * them and neither survives it.
+   *
+   * Unlike `protocolMismatch`, this is a refusal to trust *identity*, not
+   * *wire format* — the app answering the port is a real, working Porthole
+   * app, just not the one this server was configured for (another Porthole
+   * app on the device holding the same port is the concrete incident this
+   * guards, GRA-197's own report). The founder's ruling is "warn loudly, do
+   * not refuse": this never blocks a request or a connection, it only
+   * surfaces the fact everywhere a caller might otherwise be misled by an
+   * unqualified "connected".
+   */
+  packageMismatch: string | null = null;
+
+  /**
+   * GRA-197: what this server was started for, from `PORTHOLE_APPLICATION_ID`
+   * — undefined when unset, which means "no expectation configured" and
+   * disables the check entirely (see the hello handler): a server pointed at
+   * an app on purpose, with no plugin-generated `.mcp.json` in the loop at
+   * all, must see no behaviour change from this ticket.
+   */
+  private readonly applicationId: string | undefined;
+
+  /**
    * GRA-53 `#session-writer`: null (persistence off) unless a sessions root
    * is given. `undefined`/omitted is the default on purpose — every existing
    * test in `device.test.ts` constructs a `DeviceClient` with two arguments
@@ -190,9 +220,11 @@ export class DeviceClient extends EventEmitter {
     private readonly host: string,
     readonly port: number,
     sessionsRoot?: string,
+    applicationId?: string,
   ) {
     super();
     this.sessions = sessionsRoot ? new SessionWriter(sessionsRoot) : null;
+    this.applicationId = applicationId;
   }
 
   start(): void {
@@ -271,6 +303,20 @@ export class DeviceClient extends EventEmitter {
                 `${PROTOCOL_VERSION}. Update the app's Porthole runtime dependency to a version that ` +
                 `speaks protocol ${PROTOCOL_VERSION}, or pin the npm package this MCP server runs from ` +
                 `(in .mcp.json) to the version that matches the app.`;
+          // GRA-197: same placement and the same reasoning as protocolMismatch
+          // just above — computed the instant hello lands, synchronously, so
+          // it sits between `this.hello = hello` and the emit below without
+          // reopening GRA-191's race. `this.applicationId` unset means no
+          // expectation was configured at all (an ordinary `porthole { }`
+          // with no applicationId, or a server started with no
+          // PORTHOLE_APPLICATION_ID), which must be indistinguishable from
+          // today's behaviour rather than read as "expected no package".
+          this.packageMismatch =
+            this.applicationId === undefined || hello.packageName === this.applicationId
+              ? null
+              : `Connected to \`${hello.packageName}\`, but this MCP server was configured for ` +
+                `\`${this.applicationId}\` (PORTHOLE_APPLICATION_ID). Another Porthole app on the ` +
+                `device is holding the port — stop it, or give this app its own port.`;
           // GRA-191: `this.hello = hello` above and this emit must stay
           // exactly this close together, with nothing between them that can
           // yield to the event loop. GRA-53 used to put
@@ -351,6 +397,8 @@ export class DeviceClient extends EventEmitter {
       // gone (a new connection will get its own, possibly no longer
       // mismatched) there is nothing left for this to still be true about.
       this.protocolMismatch = null;
+      // GRA-197: same reasoning, same place.
+      this.packageMismatch = null;
       this.failPending("device disconnected");
       this.setState("disconnected");
       this.scheduleReconnect();
@@ -555,6 +603,16 @@ export class DeviceClient extends EventEmitter {
       "  2. the adb bridge is up: 'adb forward tcp:PORT tcp:PORT', which",
       "     'porthole ui' and './gradlew portholeConnect' both do for you",
       `  3. nothing else on this machine is holding ${this.port}`,
+      // GRA-197: the two cases that incident's own report named — a wrong
+      // app answering is only reachable from here for a device that is not
+      // even accepting connections on the port; a device that is, but
+      // answers as the wrong app, is packageMismatch's territory above,
+      // reached while "connected", not from this message at all.
+      "  4. another Porthole app on the device isn't already holding this port — stop it, or " +
+        "give this app its own port with 'porthole { port.set(...) }'",
+      "  5. there's only one adb transport for this device — wireless plus wired both attached " +
+        "makes 'adb forward' ambiguous and it fails silently for this port; pin one with " +
+        "'porthole { deviceSerial.set(...) }'",
     ]
       .filter(Boolean)
       .join("\n");

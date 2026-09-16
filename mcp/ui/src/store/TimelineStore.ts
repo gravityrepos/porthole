@@ -19,6 +19,13 @@ export class TimelineStore {
   events: DeviceEvent[] = [];
   hello: Hello | null = null;
   connection: ConnectionState = "connecting";
+  /**
+   * GRA-197: mirrors `DeviceClient.packageMismatch` server-side — a fact
+   * about the `hello` currently held, updated everywhere `hello` is and
+   * cleared on disconnect for the same reason `hello` itself goes stale
+   * then (see the "state" case in `apply` and `setConnection` below).
+   */
+  packageMismatch: string | null = null;
 
   private version = 0;
   private listeners = new Set<() => void>();
@@ -41,6 +48,7 @@ export class TimelineStore {
         this.events = message.events ?? [];
         if (message.state) this.connection = message.state;
         if (message.hello !== undefined) this.hello = message.hello;
+        if (message.packageMismatch !== undefined) this.packageMismatch = message.packageMismatch;
         this.foldLogAppends();
         break;
       }
@@ -58,10 +66,16 @@ export class TimelineStore {
       }
       case "state": {
         this.connection = message.state;
+        // GRA-197: a fact about a hello that is itself going stale the
+        // instant this state is anything but "connected" — mirrors
+        // device.ts's own close handler, which clears packageMismatch in
+        // the same place (and for the same reason) it clears `hello`.
+        if (message.state !== "connected") this.packageMismatch = null;
         break;
       }
       case "hello": {
         this.hello = message.hello;
+        this.packageMismatch = message.packageMismatch;
         break;
       }
     }
@@ -75,6 +89,12 @@ export class TimelineStore {
 
   setConnection(state: ConnectionState): void {
     this.connection = state;
+    // GRA-197: the "state" case above and this method are the two places
+    // `connection` changes without a fresh `hello` — the WebSocket's own
+    // "close" handler in useDeviceStream.ts calls this one directly, and it
+    // needs the same clearing rule so a stale mismatch cannot survive past
+    // the connection it was a fact about.
+    if (state !== "connected") this.packageMismatch = null;
     this.touch();
   }
 

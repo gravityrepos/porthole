@@ -7,7 +7,7 @@ import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Header } from "./Header";
-import type { ConnectionState } from "../types";
+import type { ConnectionState, Hello } from "../types";
 
 /**
  * GRA-167: the layer beneath Header.test.tsx's `connectionDisplay` tests.
@@ -33,6 +33,7 @@ function headerProps(
   return {
     connection,
     hello: null,
+    packageMismatch: null,
     eventsPerSecond,
     following: false,
     showFramework: false,
@@ -102,6 +103,64 @@ describe("Header's connection pill (GRA-167 AC3, closing GRA-161)", () => {
     renderHeader("disconnected");
     const label = screen.getByText(/^disconnected$/i);
     expect(label.style.color).toBe("var(--danger)");
+  });
+
+  it("connected with a package mismatch gets the danger tone instead of the live-rate accent pill (GRA-197)", () => {
+    renderHeader("connected", 42, {
+      packageMismatch:
+        "Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`.",
+    });
+    const label = screen.getByText(/package mismatch/i);
+    expect(label.style.color).toBe("var(--danger)");
+    expect(screen.queryByText(/evt\/s/)).toBeNull();
+  });
+});
+
+const testHello: Hello = {
+  protocol: 1,
+  packageName: "com.example.shop",
+  processName: "com.example.shop",
+  versionName: "1.0.0-test",
+  device: "Pixel 10 Pro XL",
+  sdkInt: 37,
+  startedAt: 0,
+  collectors: ["frames", "http"],
+};
+
+/**
+ * GRA-198: the text beside the pill, across all four `ConnectionState`
+ * values — the render-level half of Header.test.tsx's `connectionDetailText`
+ * unit tests, same relationship GRA-167 already established between that
+ * file and this one (a pure function proves the decision; this proves
+ * Header's JSX actually renders it). The reported bug was two phrasings of
+ * one fact rendered together only for `handshaking`; these four tests are
+ * what "no state renders the same phrase twice" (GRA-198's AC) means for
+ * each state in turn, not only the one that was broken.
+ */
+describe("Header's neighbour text beside the pill (GRA-198)", () => {
+  it("handshaking: the pill says 'waiting on app' and the neighbour text says something else — what the wait is for", () => {
+    renderHeader("handshaking");
+    expect(screen.getByText(/waiting on app/i)).toBeTruthy();
+    // Not a second copy of the pill's own wording.
+    expect(screen.queryByText(/^waiting for the app$/i)).toBeNull();
+    expect(screen.getByText(/no hello yet/i)).toBeTruthy();
+  });
+
+  it("disconnected: keeps the existing 'waiting for the app' sentence", () => {
+    renderHeader("disconnected");
+    expect(screen.getByText(/^waiting for the app$/i)).toBeTruthy();
+  });
+
+  it("connecting: also 'waiting for the app' — its own pill says 'connecting', a different fact, so no duplication to fix", () => {
+    renderHeader("connecting");
+    expect(screen.getByText(/^waiting for the app$/i)).toBeTruthy();
+  });
+
+  it("connected: shows the package and device the hello named, not a generic sentence (GRA-197)", () => {
+    renderHeader("connected", 7, { hello: testHello });
+    expect(screen.getByText("com.example.shop")).toBeTruthy();
+    expect(screen.getByText("Pixel 10 Pro XL")).toBeTruthy();
+    expect(screen.queryByText(/waiting for the app/i)).toBeNull();
   });
 });
 

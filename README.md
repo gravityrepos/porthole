@@ -419,6 +419,7 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_SESSIONS` | on | set to `0` to turn off [sessions on disk](#sessions-on-disk) entirely |
 | `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
 | `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
+| `PORTHOLE_APPLICATION_ID` | none | the app this server expects — written by `portholeMcpConfig` from AGP's own `applicationId` on an application module, or from `porthole { applicationId.set(...) }` if you set one explicitly. A `hello` naming a different package warns loudly everywhere (`porthole_status`, every tool's banner, the timeline UI's pill) instead of silently answering for whichever app happens to be holding the port |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
 and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by

@@ -309,7 +309,11 @@ export class TimelineServer {
         this.startedAt = startedAt;
         this.events = [];
       }
-      this.broadcast({ type: "hello", hello });
+      // GRA-197: read synchronously, same call stack as the "hello" emit
+      // itself (see device.ts's own comment on packageMismatch) — this
+      // listener runs before anything else can observe a later hello, so
+      // there is no staleness window to worry about here either.
+      this.broadcast({ type: "hello", hello, packageMismatch: this.device.packageMismatch });
       void this.backfill();
     });
   }
@@ -936,6 +940,11 @@ export class TimelineServer {
           type: "init",
           state: this.device.state,
           hello: this.device.hello,
+          // GRA-197: so a tab opened after the mismatch was established
+          // (not only one open live through the hello that caused it) still
+          // sees it — the same reason `state`/`hello` themselves are sent
+          // here rather than left for the client to infer from silence.
+          packageMismatch: this.device.packageMismatch,
           events: this.events,
         }),
       );

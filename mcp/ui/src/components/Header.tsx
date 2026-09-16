@@ -7,6 +7,8 @@ import type { ConnectionState, Hello } from "../types";
 interface Props {
   connection: ConnectionState;
   hello: Hello | null;
+  /** GRA-197: null unless PORTHOLE_APPLICATION_ID disagrees with `hello.packageName` — TimelineStore's own mirror of `DeviceClient.packageMismatch`. */
+  packageMismatch: string | null;
   eventsPerSecond: number;
   following: boolean;
   showFramework: boolean;
@@ -68,10 +70,54 @@ interface ConnectionDisplay {
  * through `useSettledConnection` so a `connecting` produced by nothing more
  * than the reconnect backoff never reaches here fast enough to flash.
  */
+/**
+ * GRA-198: what the header prints beside the pill when there is no `hello`
+ * to show yet — pulled out for the same reason [connectionDisplay] is:
+ * testable without rendering (see Header.test.tsx).
+ *
+ * Before this ticket the pill and this text could both be true statements
+ * and still say the same thing twice: `handshaking`'s pill already reads
+ * "connected · waiting on app" (GRA-161), and this used to print "waiting
+ * for the app" beside it regardless of state — the *disconnected* sentence,
+ * reused. Two phrasings of one fact is not two facts.
+ *
+ * `handshaking` is the only state that changes here: it is the one case
+ * where the pill already says "waiting", so the neighbour has to say
+ * something the pill does not — what the wait is actually for, since a
+ * socket that is up but silent and a device that never got that far look
+ * identical otherwise. `disconnected` and `connecting` keep the original
+ * sentence: their pills say "disconnected"/"connecting", a different fact
+ * from "no hello yet", so there is nothing to deduplicate. `connected`
+ * never reaches this function in practice — `hello` is non-null by
+ * `DeviceClient`'s own invariant whenever `connection` is "connected" — but
+ * a null `hello` from an incomplete test fixture must not crash the header,
+ * so it falls back to the same sentence rather than asserting.
+ */
+export function connectionDetailText(connection: ConnectionState, hello: Hello | null): string | null {
+  if (hello) return null;
+  if (connection === "handshaking") {
+    return "socket open, no hello yet — is the debug build running?";
+  }
+  return "waiting for the app";
+}
+
 export function connectionDisplay(
   connection: ConnectionState,
   eventsPerSecond: number,
+  packageMismatch: string | null = null,
 ): ConnectionDisplay {
+  // GRA-197: checked ahead of the switch, not as a case inside it — a
+  // mismatch is a property of a connected session, not a fifth
+  // ConnectionState, and this way it applies regardless of anything the
+  // switch below might grow later. Danger tone, the same one App.tsx's
+  // protocolBanner already uses for its own mismatch, so a red pill and a
+  // red banner are never disagreeing about which colour "something is
+  // wrong" is. Still pulsing: a real app is genuinely answering, just not
+  // the one this server was configured for — this is not the "nothing is
+  // happening" fact "disconnected"'s still dot reports.
+  if (connection === "connected" && packageMismatch) {
+    return { tone: "var(--danger)", label: "package mismatch", pulse: true };
+  }
   switch (connection) {
     case "connected":
       return { tone: "var(--accent)", label: `live · ${eventsPerSecond} evt/s`, pulse: true };
@@ -100,6 +146,7 @@ export function connectionDisplay(
 export function Header({
   connection,
   hello,
+  packageMismatch,
   eventsPerSecond,
   following,
   showFramework,
@@ -123,7 +170,7 @@ export function Header({
   // reconnect backoff cadence whenever no app is running; this settles that
   // down to one steady pill before it ever reaches connectionDisplay().
   const settledConnection = useSettledConnection(connection);
-  const { tone, label, pulse } = connectionDisplay(settledConnection, eventsPerSecond);
+  const { tone, label, pulse } = connectionDisplay(settledConnection, eventsPerSecond, packageMismatch);
 
   return (
     <header className="flex min-h-[46px] flex-wrap items-center gap-x-4 gap-y-2.5 border-b border-[var(--color-line)] bg-gradient-to-b from-[#181e29] to-[#141924] px-3.5 py-[7px]">
@@ -165,7 +212,7 @@ export function Header({
             <span>{hello.collectors.length} channels</span>
           </>
         ) : (
-          <span>waiting for the app</span>
+          <span>{connectionDetailText(settledConnection, hello)}</span>
         )}
       </div>
 

@@ -61,10 +61,28 @@ export type ServerMessage =
       events?: DeviceEvent[];
       state?: ConnectionState;
       hello?: Hello | null;
+      /** GRA-197: only `init` actually sends this today (see timeline.ts's
+       *  connection handler) — optional here rather than on a narrower type
+       *  because `reset` shares this branch's shape and a future sender
+       *  filling it in for `reset` too should not need a type change. */
+      packageMismatch?: string | null;
     }
   | { type: "event"; event: DeviceEvent }
   | { type: "state"; state: ConnectionState }
-  | { type: "hello"; hello: Hello | null };
+  | {
+      type: "hello";
+      hello: Hello | null;
+      /**
+       * GRA-197: null unless `PORTHOLE_APPLICATION_ID` was configured and
+       * disagrees with `hello.packageName` — `device.ts`'s
+       * `DeviceClient.packageMismatch`, sent alongside `hello` itself since
+       * it is a fact about that same `hello`, computed server-side because
+       * the UI bundle has no way to know what this server was configured
+       * for (unlike `protocol`, which is a constant baked into this build —
+       * see App.tsx's `EXPECTED_PROTOCOL_VERSION`).
+       */
+      packageMismatch: string | null;
+    };
 
 /** A start/end pair, or a single event with a duration, drawn as a bar. */
 export interface Span {

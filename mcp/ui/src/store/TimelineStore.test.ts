@@ -120,8 +120,54 @@ describe("apply", () => {
     store.apply({ type: "state", state: "disconnected" });
     expect(store.connection).toBe("disconnected");
 
-    store.apply({ type: "hello", hello: null });
+    store.apply({ type: "hello", hello: null, packageMismatch: null });
     expect(store.hello).toBeNull();
+  });
+});
+
+describe("packageMismatch (GRA-197)", () => {
+  it("is taken from a 'hello' message, alongside hello itself", () => {
+    const store = new TimelineStore();
+    store.apply({ type: "hello", hello, packageMismatch: "Connected to `com.example.shop`, but ..." });
+    expect(store.packageMismatch).toBe("Connected to `com.example.shop`, but ...");
+  });
+
+  it("is taken from 'init' when the server sends one, and left alone when it does not (reset)", () => {
+    const store = new TimelineStore();
+    store.apply({ type: "init", hello, packageMismatch: "mismatched at boot" });
+    expect(store.packageMismatch).toBe("mismatched at boot");
+
+    // A reset (post-reconnect backfill) carries no packageMismatch field at
+    // all in production (timeline.ts's own broadcast) — undefined must not
+    // clobber whatever the most recent "hello" already established.
+    store.apply({ type: "reset", events: [] });
+    expect(store.packageMismatch).toBe("mismatched at boot");
+  });
+
+  it("clears when a 'state' message reports anything other than connected — a fact about a hello that is itself going stale", () => {
+    const store = new TimelineStore();
+    store.apply({ type: "hello", hello, packageMismatch: "mismatched" });
+    expect(store.packageMismatch).not.toBeNull();
+
+    store.apply({ type: "state", state: "disconnected" });
+    expect(store.packageMismatch).toBeNull();
+  });
+
+  it("clears via setConnection too — the path the WebSocket's own 'close' handler uses, not a server message", () => {
+    const store = new TimelineStore();
+    store.apply({ type: "hello", hello, packageMismatch: "mismatched" });
+
+    store.setConnection("disconnected");
+    expect(store.packageMismatch).toBeNull();
+  });
+
+  it("a fresh 'hello' with no mismatch clears a previous one", () => {
+    const store = new TimelineStore();
+    store.apply({ type: "hello", hello, packageMismatch: "mismatched" });
+    expect(store.packageMismatch).not.toBeNull();
+
+    store.apply({ type: "hello", hello, packageMismatch: null });
+    expect(store.packageMismatch).toBeNull();
   });
 });
 
