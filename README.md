@@ -242,6 +242,15 @@ Two things worth knowing before you run it:
   window — wants `-Pporthole.open=false`, which does everything except open
   the timeline. A person running it by hand gets the browser by default,
   since that is what `portholeUi` alone has always done.
+- **Two things land in your project root, and one of them belongs in
+  `.gitignore`.** `.porthole/` holds every recorded session and every saved
+  trace (see [Sessions on disk](#sessions-on-disk)); it is runtime output
+  from your own app, grows to 500 MB by default, and should never be
+  committed — add `.porthole/` to your `.gitignore` before the first run.
+  `.mcp.json` is the agent's config; its `env` block carries absolute paths
+  for this machine (`PORTHOLE_PROJECT_ROOT`, `PORTHOLE_SDK_DIR`), so commit
+  it only if everyone on the project regenerates it with
+  `./gradlew portholeMcpConfig` rather than sharing one copy.
 
 The runtime starts with the process through androidx.startup and finds the
 current Activity on its own, which gives it the view it needs for the
@@ -731,7 +740,9 @@ uses to know when to start a fresh in-memory buffer. It lives at
 per line, appended off the socket thread on an interval, never inline, so
 persistence cannot slow down what the socket is doing) plus `meta.json`
 (device profile, first/last recorded time, event counts by kind).
-`.porthole/` is already gitignored.
+Add `.porthole/` to your project's `.gitignore` (see step 2 of
+[Setup](#setup)): it is runtime output, it grows to the retention cap
+below, and it contains whatever your app sent, redacted but yours.
 
 Retention prunes by total size and by age, oldest session first, and never
 touches the session currently being written no matter how old or large it

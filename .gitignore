@@ -51,6 +51,12 @@ desktop.ini
 # porthole runtime output
 .porthole/
 
+# The agent config portholeMcpConfig writes at the root when the sample is
+# run from this checkout. Its env block carries this machine's absolute
+# paths, so it is regenerated per machine, never shared.
+.mcp.json
+.mcp.json.bak
+
 # kotlin compiler session files
 .kotlin/
 
