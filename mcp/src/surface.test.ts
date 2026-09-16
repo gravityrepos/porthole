@@ -403,7 +403,10 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
     ask_system_trace: { trace: "/nonexistent.pftrace" },
   };
 
-  it("every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern", async () => {
+  // This walk calls every registered tool, and several shell out to adb; on a runner with no adb the
+  // spawn failures alone took 7.7 s on windows-latest, past the 5 s default (GRA-186's CI run). The
+  // hermetic fix, injecting GRA-89's fake adb into this rig, is on GRA-182; until then the budget is honest.
+  it("every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern", { timeout: 30_000 }, async () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([
