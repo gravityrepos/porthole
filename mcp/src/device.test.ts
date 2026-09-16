@@ -742,6 +742,28 @@ describe("package mismatch", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GRA-197: notConnectedMessage() names the two new cases this incident produced
+// ---------------------------------------------------------------------------
+
+describe("notConnectedMessage's checklist", () => {
+  it("gains the two new numbered cases, beside the three it already had", () => {
+    // No socket needed: notConnectedMessage() is pure prose over `host`,
+    // `port` and `lastError`, reachable in the default "disconnected" state
+    // a fresh, unstarted client is already in.
+    const client = new DeviceClient("127.0.0.1", 8677);
+    const message = client.notConnectedMessage();
+
+    expect(message).toContain("another Porthole app");
+    expect(message).toMatch(/port\.set/);
+    expect(message).toContain("adb transport");
+    expect(message).toMatch(/deviceSerial\.set/);
+    // Still the original three, not replaced by the new ones.
+    expect(message).toContain("debug build is running");
+    expect(message).toContain("adb forward tcp:PORT tcp:PORT");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GRA-96 QA follow-up: the two copies of PROTOCOL_VERSION do not drift
 // ---------------------------------------------------------------------------
 
