@@ -6,6 +6,7 @@ import android.util.Log
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.PortholeJson
 import live.gravitylabs.porthole.protocol.Request
@@ -14,6 +15,7 @@ import live.gravitylabs.porthole.store.EventRing
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InterruptedIOException
+import java.net.BindException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -35,13 +37,65 @@ internal typealias MethodHandler = (JsonObject) -> JsonElement
 internal class PortholeSocketServer(
     private val port: Int,
     private val ring: EventRing,
+    /**
+     * Named in the bind-failure log so whoever reads logcat on a device with
+     * two Porthole apps installed knows which of them is complaining, not
+     * just which port. [Porthole.install] has this on hand already
+     * ([android.content.Context.getPackageName]); nothing here goes looking
+     * for it itself, so the class stays constructible from a plain unit test
+     * with no `Application`.
+     */
+    private val packageName: String,
     private val onFirstClient: () -> Unit = {},
+    /**
+     * Fired exactly once, off the io executor, the moment the bind either
+     * succeeds or exhausts its retries. [Porthole.install] uses this to log
+     * "installed on ..." only once the socket is genuinely listening,
+     * instead of the fixed ordering the bind-runs-on-a-background-thread
+     * shape used to force: that line used to print unconditionally, before
+     * the bind was even attempted, so it happily announced an install that
+     * had, moments later, failed to listen. Tests that construct this class
+     * directly have no reason to pass one.
+     */
+    private val onBindResult: (ok: Boolean) -> Unit = {},
 ) {
     private val handlers = LinkedHashMap<String, MethodHandler>()
     private val clients = CopyOnWriteArrayList<ClientConnection>()
     private val io = Executors.newCachedThreadPool { r ->
         Thread(r, "porthole-io").apply { isDaemon = true }
     }
+
+    /**
+     * Whether the socket is genuinely listening right now — the queryable
+     * half of this class's bind result. `false` from construction until a
+     * bind attempt succeeds; flips back to `false`, permanently, once every
+     * retry has failed. Nothing clears it back on [stop]: a stopped server
+     * was listening and then chose to stop, which is a different fact from
+     * one that was never able to.
+     */
+    @Volatile var listening: Boolean = false
+        private set
+
+    /**
+     * The remedy-bearing message from the most recent failed bind, or `null`
+     * if the current (or most recent) bind succeeded. Cleared on a
+     * successful bind so a caller that only checks this field after
+     * `listening` flips true never reads a stale complaint from an earlier
+     * attempt.
+     */
+    @Volatile var listeningFailure: String? = null
+        private set
+
+    /**
+     * How many `ServerSocket(...)` attempts [start] made before settling one
+     * way or the other. `1` is the ordinary case — bound on the first try.
+     * Greater than `1` means a retry was needed, which is worth surfacing in
+     * the setup report even on success: it is evidence a previous instance
+     * of this same app was still releasing the port, not proof nothing is
+     * wrong.
+     */
+    @Volatile var bindAttempts: Int = 0
+        private set
 
     /**
      * Bounded on purpose. When the far end cannot keep up, the choice is to
@@ -62,15 +116,14 @@ internal class PortholeSocketServer(
         if (running) return
         running = true
         io.execute {
-            val socket = try {
-                ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK))
-            } catch (e: Exception) {
-                Log.w(TAG, "could not bind $LOOPBACK:$port, is another process holding it?", e)
+            val socket = bindWithRetry()
+            if (socket == null) {
                 running = false
+                onBindResult(false)
                 return@execute
             }
             server = socket
-            Log.i(TAG, "listening on $LOOPBACK:$port")
+            onBindResult(true)
             var sawClient = false
             while (running) {
                 val client = try {
@@ -93,6 +146,78 @@ internal class PortholeSocketServer(
             pumpOutbound()
         }
         ring.addListener(::broadcast)
+    }
+
+    /**
+     * Tries to bind [BIND_RETRY_ATTEMPTS] times, [BIND_RETRY_DELAY_MS] apart,
+     * before giving up.
+     *
+     * The retry exists for exactly one case: a *previous* instance of this
+     * same app, mid-reinstall, still holding the port while Android tears its
+     * old process down. That teardown is normally well under the ~2 seconds
+     * this loop spends, so a genuine same-app reinstall races through here
+     * and nobody ever sees the intermediate attempts. It is not a fix for two
+     * different apps wanting the same port at once — that case runs out the
+     * clock the same as any other unrecoverable failure and reports exactly
+     * as loudly.
+     *
+     * Runs on the io executor, never the caller of [start] — a debug build
+     * still starts on the main thread by way of [live.gravitylabs.porthole.PortholeInitializer],
+     * and blocking that for up to ~2 seconds on every cold start (the common
+     * case: no retry ever needed) would be a worse regression than the bug
+     * this exists to log.
+     */
+    private fun bindWithRetry(): ServerSocket? {
+        var lastError: Exception? = null
+        for (attempt in 1..BIND_RETRY_ATTEMPTS) {
+            bindAttempts = attempt
+            try {
+                val socket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK))
+                listening = true
+                listeningFailure = null
+                Setup.recordSocketBind(listening = true, failure = null, attempts = attempt)
+                Log.i(
+                    TAG,
+                    if (attempt == 1) {
+                        "listening on $LOOPBACK:$port"
+                    } else {
+                        "listening on $LOOPBACK:$port after $attempt attempts"
+                    },
+                )
+                return socket
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt < BIND_RETRY_ATTEMPTS) {
+                    Log.d(
+                        TAG,
+                        "bind attempt $attempt/$BIND_RETRY_ATTEMPTS on $LOOPBACK:$port failed, retrying: ${e.message}",
+                    )
+                    try {
+                        Thread.sleep(BIND_RETRY_DELAY_MS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+            }
+        }
+
+        val e = lastError ?: error("bindWithRetry exited its loop without ever attempting a bind")
+        // BindException is the JVM's own signal for "the address is taken" —
+        // the same condition POSIX calls EADDRINUSE — independent of the
+        // exception's message text, which is not guaranteed stable across
+        // platforms. Anything else (a malformed port, a security manager
+        // refusal, ...) is named by its own class instead of being folded
+        // into a claim about address-in-use that would not be true.
+        val reason = if (e is BindException) "EADDRINUSE" else e.javaClass.simpleName
+        val message = "could not bind $LOOPBACK:$port for $packageName after $bindAttempts attempt(s) " +
+            "($reason: ${e.message}); another app on this device has a Porthole on $port; stop it, " +
+            "or give this app its own porthole { port.set(...) }"
+        listening = false
+        listeningFailure = message
+        Setup.recordSocketBind(listening = false, failure = message, attempts = bindAttempts)
+        Log.e(TAG, message, e)
+        return null
     }
 
     fun stop() {
@@ -232,5 +357,15 @@ internal class PortholeSocketServer(
 
         /** About two seconds of a badly behaved screen. */
         private const val OUTBOUND_CAPACITY = 2048
+
+        /**
+         * How many times [bindWithRetry] tries before giving up, and how long
+         * it waits between tries. Five attempts, 500 ms apart: enough slack
+         * for a normal same-app reinstall's old process to finish releasing
+         * the port (well under a second in practice) without making a
+         * genuinely-taken port take unreasonably long to report as an error.
+         */
+        private const val BIND_RETRY_ATTEMPTS = 5
+        private const val BIND_RETRY_DELAY_MS = 500L
     }
 }

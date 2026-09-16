@@ -19,6 +19,16 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+- A second Porthole app already holding the device's loopback port no longer
+  makes the first app look like it isn't running Porthole at all. The
+  runtime now retries a failed bind a few times (for a same-app reinstall
+  whose old process is still releasing the port), reports a genuine conflict
+  at error level in logcat — naming the port, this app's package, `EADDRINUSE`
+  when that's the cause, and the one-line fix — and keeps the state
+  queryable so a later successful connection's `setup` report can say a bind
+  needed a retry. The "installed on ..." log line no longer prints before the
+  bind (which runs on a background thread) has actually settled (GRA-196).
+
 ## [0.2.1] - 2026-09-15
 
 ### Fixed
