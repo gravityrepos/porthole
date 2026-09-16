@@ -7,6 +7,7 @@ import { drawLane, readCss, type LaneScene } from "../timeline/draw";
 import { hitFindings, hitLane, laneStat, navChips, spansForLane, type Hit } from "../lib/laneData";
 import { placeFindings } from "../lib/findings";
 import { missingIntegration, type SetupEntry } from "../lib/setup";
+import { interpretWheel } from "../lib/wheel";
 import { FindingsLaneStatus, type FindingsState } from "./FindingsLaneStatus";
 import type { TimelineStore } from "../store/TimelineStore";
 import type { Finding, Span, ViewWindow } from "../types";
@@ -80,11 +81,23 @@ export function TimelinePanel({
     }));
   }, [view, origin]);
 
+  // GRA-194: one wheel policy, decided by lib/wheel.ts. `scroll` is the lane
+  // list's and is left alone; `zoom` and `pan` are the timeline's and prevent
+  // the browser's default so the list does not also scroll under them.
   const onWheel = useCallback(
-    (event: React.WheelEvent, width: number, x: number) => {
-      onViewChange(zoomAt(view, toTime(x, view, width), event.deltaY > 0 ? 1.25 : 0.8));
+    (event: WheelEvent, width: number, x: number) => {
+      const intent = interpretWheel(event);
+      if (intent.kind === "scroll") return;
+      event.preventDefault();
+      if (intent.kind === "zoom") {
+        onViewChange(zoomAt(view, toTime(x, view, width), intent.factor));
+        return;
+      }
+      // A wheel pan is a statement of intent, exactly as a drag is.
+      onFollowingChange(false);
+      onViewChange(panBy(view, (intent.deltaPx / Math.max(width, 1)) * (view.end - view.start)));
     },
-    [onViewChange, view],
+    [onFollowingChange, onViewChange, view],
   );
 
   const onDragMove = useCallback(
@@ -215,7 +228,7 @@ interface RowProps {
   selectedSeq: number | null;
   onSelect: (hit: Hit) => void;
   onTooltip: (tip: { x: number; y: number; text: string } | null) => void;
-  onWheel: (event: React.WheelEvent, width: number, x: number) => void;
+  onWheel: (event: WheelEvent, width: number, x: number) => void;
   onDragStart: (x: number) => void;
   onDragMove: (x: number, width: number) => void;
   onDragEnd: () => void;
@@ -348,6 +361,24 @@ function LaneRow({
     return { x: event.clientX - rect.left, y: event.clientY - rect.top, width: rect.width };
   };
 
+  // GRA-194: the wheel listener is attached natively, not through React's
+  // `onWheel`. React registers wheel listeners as passive, so a
+  // `preventDefault` inside one is a no-op — which is how the lane list
+  // scrolled under every zoom. A ref carries the latest handler so the
+  // listener is added once per element rather than once per render.
+  const onWheelRef = useRef(onWheel);
+  onWheelRef.current = onWheel;
+  useEffect(() => {
+    const plot = plotRef.current;
+    if (!plot) return;
+    const listener = (event: WheelEvent) => {
+      const rect = plot.getBoundingClientRect();
+      onWheelRef.current(event, rect.width, event.clientX - rect.left);
+    };
+    plot.addEventListener("wheel", listener, { passive: false });
+    return () => plot.removeEventListener("wheel", listener);
+  }, []);
+
   /** The findings lane's own hit test — its data is not `store.events`, so
    *  it does not go through `hitLane`. Recomputed on interaction rather than
    *  cached: cheap (a handful of findings at most, per GRA-114's own
@@ -389,10 +420,6 @@ function LaneRow({
       <div
         ref={plotRef}
         className="relative min-w-0 cursor-crosshair overflow-hidden"
-        onWheel={(event) => {
-          const { x, width } = point(event);
-          onWheel(event, width, x);
-        }}
         onMouseDown={(event) => onDragStart(point(event).x)}
         onMouseUp={onDragEnd}
         onMouseMove={(event) => {

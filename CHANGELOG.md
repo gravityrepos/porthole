@@ -19,6 +19,15 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+- The timeline's wheel handling now knows which gesture it is looking at:
+  ctrl/⌘ + wheel or a trackpad pinch zooms at the cursor by an amount that
+  scales with the delta (clamped to 2× per event), shift + wheel or a
+  sideways swipe pans, and a plain vertical wheel scrolls the lane list and
+  nothing else. Before, every wheel event zoomed by a fixed step, a sideways
+  swipe with no vertical component zoomed *in*, and the lane list scrolled
+  under every zoom because the handler was passive, which on a trackpad made
+  the timeline impossible to navigate (GRA-194).
+
 ## [0.2.0] - 2026-09-15
 
 ### Changed

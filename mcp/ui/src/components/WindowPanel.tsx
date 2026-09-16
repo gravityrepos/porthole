@@ -130,7 +130,9 @@ export function WindowPanel({ summary, onAsk }: Props) {
         )}
 
         <div className="font-mono text-[10.5px] leading-[1.7] text-[var(--color-muted)]">
-          scroll to zoom · drag to pan
+          pinch or ctrl/⌘ + scroll to zoom
+          <br />
+          swipe sideways, shift + scroll, or drag to pan
           <br />
           follow pins the newest event
         </div>
