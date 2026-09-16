@@ -53,7 +53,7 @@ export type EventKind = (typeof EVENT_KINDS)[number];
  * `porthole_status` or that `device` is mostly raw but its startup profile
  * feeds two other tools' numbers.
  */
-interface KindGroup {
+export interface KindGroup {
   kinds: readonly EventKind[];
   /** One clause, no leading capital, no trailing period — joined below. */
   narrated: string;
@@ -104,28 +104,37 @@ const KIND_GROUPS: readonly KindGroup[] = [
 ];
 
 /**
- * Builds `timeline`'s `kinds` param description from [KIND_GROUPS], and
- * refuses to build one that silently drops or invents a kind — a clause
- * removed from [KIND_GROUPS] without removing its kind from [EVENT_KINDS]
- * (or the reverse) throws here rather than shipping a description that
- * quietly stopped matching the filter it documents.
+ * Refuses to describe a set of groups that silently drops or invents a
+ * kind — a clause removed from `groups` without removing its kind from
+ * `kinds` (or the reverse) throws here rather than shipping a description
+ * that quietly stopped matching the filter it documents. Exported (rather
+ * than inlined into [timelineKindsDescription]) so a test can hand it a
+ * synthetic, deliberately-broken group list without having to break the
+ * real [KIND_GROUPS]/[EVENT_KINDS] to prove the check works at all.
  */
-export function timelineKindsDescription(): string {
-  const covered = KIND_GROUPS.flatMap((g) => g.kinds);
+export function validateKindCoverage<K extends string>(
+  groups: readonly { kinds: readonly K[] }[],
+  kinds: readonly K[],
+): void {
+  const covered = groups.flatMap((g) => g.kinds);
   const coveredSet = new Set(covered);
-  const missing = EVENT_KINDS.filter((k) => !coveredSet.has(k));
+  const missing = kinds.filter((k) => !coveredSet.has(k));
   if (missing.length > 0) {
     throw new Error(`timelineKindsDescription() does not narrate: ${missing.join(", ")}`);
   }
   if (covered.length !== coveredSet.size) {
     throw new Error("timelineKindsDescription() lists the same kind in more than one group.");
   }
-  const known = new Set<string>(EVENT_KINDS);
+  const known = new Set(kinds);
   const unknown = covered.filter((k) => !known.has(k));
   if (unknown.length > 0) {
     throw new Error(`timelineKindsDescription() narrates a kind EVENT_KINDS does not have: ${unknown.join(", ")}`);
   }
+}
 
+/** Builds `timeline`'s `kinds` param description from [KIND_GROUPS] — see [validateKindCoverage]. */
+export function timelineKindsDescription(): string {
+  validateKindCoverage(KIND_GROUPS, EVENT_KINDS);
   const clauses = KIND_GROUPS.map(
     (g) => `${g.kinds.map((k) => `\`${k}\``).join("/")} — ${g.narrated}`,
   );

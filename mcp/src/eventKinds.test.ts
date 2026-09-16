@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { stripComments } from "./testing/stripComments.js";
-import { EVENT_KINDS } from "./eventKinds.js";
+import { EVENT_KINDS, timelineKindsDescription, validateKindCoverage } from "./eventKinds.js";
 
 /**
  * GRA-200: `EVENT_KINDS` is this side's copy of the runtime's own
@@ -96,5 +96,40 @@ describe("EVENT_KINDS agrees with Protocol.kt's EventKinds object", () => {
       "}",
     ].join("\n");
     expect(readEventKindsFromProtocolKt(source)).toEqual(["nav"]);
+  });
+});
+
+describe("validateKindCoverage: the description cannot silently drop or invent a kind", () => {
+  it("passes for a group list that covers the kinds exactly once each", () => {
+    expect(() => validateKindCoverage([{ kinds: ["a", "b"], narrated: "x" }], ["a", "b"])).not.toThrow();
+  });
+
+  it("(missing-input case) throws when a real kind is narrated by no group at all", () => {
+    expect(() => validateKindCoverage([{ kinds: ["a"], narrated: "x" }], ["a", "b"])).toThrow(
+      /does not narrate: b/,
+    );
+  });
+
+  it("throws when the same kind appears in two groups", () => {
+    expect(() =>
+      validateKindCoverage(
+        [
+          { kinds: ["a"], narrated: "x" },
+          { kinds: ["a"], narrated: "y" },
+        ],
+        ["a"],
+      ),
+    ).toThrow(/more than one group/);
+  });
+
+  it("(malformed-input case) throws when a group narrates a kind that does not exist", () => {
+    expect(() => validateKindCoverage([{ kinds: ["a", "ghost"], narrated: "x" }], ["a"])).toThrow(
+      /does not have: ghost/,
+    );
+  });
+
+  it("the real KIND_GROUPS/EVENT_KINDS pair currently passes — timelineKindsDescription() does not throw", () => {
+    expect(() => timelineKindsDescription()).not.toThrow();
+    expect(timelineKindsDescription()).toContain("`exit`");
   });
 });

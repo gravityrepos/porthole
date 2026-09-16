@@ -912,3 +912,15 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     ).toEqual([]);
   });
 });
+
+describe("timeline's kinds param (GRA-200)", () => {
+  it("is generated from eventKinds.ts, not a hand-written string that can silently fall out of sync", () => {
+    // The behavioural half — that the generated text actually narrates every
+    // kind — is eventKinds.test.ts's job. This is the textual half: that the
+    // registered tool actually calls the generator rather than a literal
+    // string someone pasted its output into once and never touched again.
+    const block = toolSource("timeline");
+    expect(block).toContain("timelineKindsDescription()");
+    expect(block).not.toMatch(/kinds: z\s*\.array\(z\.string\(\)\)\s*\.optional\(\)\s*\.describe\(\s*"/);
+  });
+});
