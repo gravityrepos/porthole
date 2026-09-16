@@ -4,8 +4,8 @@
 // why happy-dom over jsdom, and why it is opted into per-file rather than as
 // the package default.
 import type { ComponentProps } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Header } from "./Header";
 import type { ConnectionState } from "../types";
 
@@ -25,36 +25,42 @@ import type { ConnectionState } from "../types";
  * present and the thing at stake is its colour and wording. So this one
  * renders Header for real rather than inspecting a returned element.
  */
+function headerProps(
+  connection: ConnectionState,
+  eventsPerSecond = 0,
+  overrides: Partial<ComponentProps<typeof Header>> = {},
+): ComponentProps<typeof Header> {
+  return {
+    connection,
+    hello: null,
+    eventsPerSecond,
+    following: false,
+    showFramework: false,
+    onToggleFollowing: vi.fn(),
+    onToggleFramework: vi.fn(),
+    onFit: vi.fn(),
+    onClear: vi.fn(),
+    onAsk: vi.fn(),
+    onOpenDatabase: vi.fn(),
+    onRestart: vi.fn(),
+    restartLabel: "restart app",
+    askLabel: "ask agent",
+    lookbackSeconds: 30,
+    onLookbackSecondsChange: vi.fn(),
+    onSave: vi.fn(),
+    saveLabel: "keep",
+    savePath: null,
+    saveError: null,
+    ...overrides,
+  };
+}
+
 function renderHeader(
   connection: ConnectionState,
   eventsPerSecond = 0,
   overrides: Partial<ComponentProps<typeof Header>> = {},
 ) {
-  render(
-    <Header
-      connection={connection}
-      hello={null}
-      eventsPerSecond={eventsPerSecond}
-      following={false}
-      showFramework={false}
-      onToggleFollowing={vi.fn()}
-      onToggleFramework={vi.fn()}
-      onFit={vi.fn()}
-      onClear={vi.fn()}
-      onAsk={vi.fn()}
-      onOpenDatabase={vi.fn()}
-      onRestart={vi.fn()}
-      restartLabel="restart app"
-      askLabel="ask agent"
-      lookbackSeconds={30}
-      onLookbackSecondsChange={vi.fn()}
-      onSave={vi.fn()}
-      saveLabel="keep"
-      savePath={null}
-      saveError={null}
-      {...overrides}
-    />,
-  );
+  return render(<Header {...headerProps(connection, eventsPerSecond, overrides)} />);
 }
 
 afterEach(cleanup);
@@ -171,5 +177,125 @@ describe("Header's keep control (GRA-116)", () => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toBe("Nothing buffered yet to save.");
     expect(screen.queryByLabelText("saved trace path")).toBeNull();
+  });
+});
+
+/**
+ * GRA-192: `device.ts` retries the device socket on a backoff from
+ * `RECONNECT_MIN_MS` (500ms) to `RECONNECT_MAX_MS` (5s), and every attempt
+ * moves the broadcast connection state disconnected -> connecting ->
+ * disconnected. Before this ticket that made Header's pill flip between the
+ * red "disconnected" pill and the muted "connecting" one at the retry
+ * cadence, for as long as no app was running. `useSettledConnection`
+ * (lib/settledConnection.ts) is the fix; this file proves it through the
+ * real `Header`, with fake timers standing in for the passage of time
+ * `device.ts` would otherwise take, the way GRA-173's own render test
+ * proved its fix by counting states rather than eyeballing a description.
+ */
+describe("Header's connection pill across a reconnect retry loop (GRA-192)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  /** `device.ts`'s own backoff sequence (`RECONNECT_MIN_MS` doubling up to
+   *  `RECONNECT_MAX_MS`). Each entry is the gap before the *next* retry
+   *  fires -- not how long any one "connecting" attempt itself lasts, which
+   *  is what makes this loop never cross `CONNECTING_REVEAL_MS` on its own. */
+  const BACKOFF_CADENCE_MS = [500, 1000, 2000, 5000];
+
+  function pillPartsFor(text: RegExp) {
+    const label = screen.getByText(text);
+    const pill = label.parentElement!;
+    return { label, pill, dot: pill.firstElementChild as HTMLElement };
+  }
+
+  it("does not remount the pill or restart its animation across the loop (ruling 2)", () => {
+    const { rerender } = renderHeader("disconnected");
+    const before = pillPartsFor(/^disconnected$/i);
+    const dotClassBefore = before.dot.className;
+
+    for (const gap of BACKOFF_CADENCE_MS) {
+      act(() => {
+        vi.advanceTimersByTime(gap);
+      });
+      rerender(<Header {...headerProps("connecting")} />);
+      // Steady throughout -- if this ever reads "connecting" mid-loop, the
+      // settling failed and the flicker this ticket exists to remove is back.
+      expect(screen.getByText(/^disconnected$/i)).toBe(before.label);
+      rerender(<Header {...headerProps("disconnected")} />);
+    }
+
+    const after = pillPartsFor(/^disconnected$/i);
+    // Same DOM nodes, not new ones that merely look the same -- proves
+    // nothing above the dot was keyed or conditionally remounted.
+    expect(after.label).toBe(before.label);
+    expect(after.dot).toBe(before.dot);
+    expect(after.dot.className).toBe(dotClassBefore);
+    // Only "connected" pulses (Header.tsx's own ConnectionDisplay comment);
+    // this loop never reaches it.
+    expect(after.dot.className).not.toContain("ph-pulse");
+  });
+
+  it("collapses the whole retry loop into one settled rendering -- no DOM mutation while it stays within backoff (ruling 3 / AC1)", () => {
+    const { rerender } = renderHeader("disconnected");
+    const { pill } = pillPartsFor(/^disconnected$/i);
+
+    const observer = new MutationObserver(() => {});
+    observer.observe(pill, { attributes: true, childList: true, subtree: true, characterData: true });
+
+    for (const gap of BACKOFF_CADENCE_MS) {
+      act(() => {
+        vi.advanceTimersByTime(gap);
+      });
+      rerender(<Header {...headerProps("connecting")} />);
+      rerender(<Header {...headerProps("disconnected")} />);
+    }
+
+    // takeRecords() drains the queue synchronously -- it does not depend on
+    // the observer's own callback microtask having fired yet, which matters
+    // under fake timers.
+    const mutations = observer.takeRecords();
+    observer.disconnect();
+    expect(mutations).toHaveLength(0);
+  });
+
+  it("reveals -- and does mutate the DOM -- once a connecting excursion outlives the max backoff (AC3: 5.5s)", async () => {
+    const { rerender } = renderHeader("disconnected");
+    const { pill } = pillPartsFor(/^disconnected$/i);
+
+    const observer = new MutationObserver(() => {});
+    observer.observe(pill, { attributes: true, childList: true, subtree: true, characterData: true });
+
+    rerender(<Header {...headerProps("connecting")} />);
+    await act(async () => {
+      // Async, not the sync `advanceTimersByTime` the other tests in this
+      // file use: happy-dom's MutationObserver only populates its record
+      // queue when its own callback microtask actually runs, so
+      // `takeRecords()` right after a synchronous advance sees nothing yet
+      // to drain (measured: it failed with 0 records before this change).
+      // The `*Async` variant yields to the microtask queue between fired
+      // timers, same as App.findings.render.test.tsx already relies on.
+      await vi.advanceTimersByTimeAsync(5_500);
+    });
+
+    const mutations = observer.takeRecords();
+    observer.disconnect();
+    expect(mutations.length).toBeGreaterThan(0);
+    expect(screen.getByText(/^connecting$/i)).toBeTruthy();
+    expect(screen.queryByText(/^disconnected$/i)).toBeNull();
+  });
+
+  it("still replaces the pill immediately for handshaking and connected -- GRA-161 stays green through the settled layer (AC2)", () => {
+    const { rerender } = renderHeader("disconnected");
+    rerender(<Header {...headerProps("handshaking")} />);
+    expect(screen.getByText(/waiting on app/i)).toBeTruthy();
+
+    rerender(<Header {...headerProps("connected", 7)} />);
+    expect(screen.getByText(/live · 7 evt\/s/)).toBeTruthy();
   });
 });
