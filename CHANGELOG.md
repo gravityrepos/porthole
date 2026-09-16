@@ -225,6 +225,12 @@ PR that makes the change, not after the fact.
   writer also no longer drops (or, on a removed sessions root, throws an
   unhandled rejection over) an event that arrives before it has finished
   opening (GRA-191).
+- The header's connection pill no longer flickers between "disconnected"
+  and "connecting" at the device client's own reconnect cadence while no
+  app is running; a `connecting` attempt that follows a shown
+  "disconnected" now keeps the pill steady unless it runs past the
+  client's maximum backoff, at which point it is shown for what it is
+  (GRA-192).
 - `capture_system_trace` no longer freezes the rest of the MCP server for
   the length of a recording — its three `adb` calls run through an
   asynchronous, awaited spawn instead of a blocking one — and its label

@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { LEGEND } from "../timeline/lanes";
+import { useSettledConnection } from "../lib/settledConnection";
 import type { ConnectionState, Hello } from "../types";
 
 interface Props {
@@ -61,6 +62,11 @@ interface ConnectionDisplay {
  * fix: unknown gets the same neutral treatment as "connecting" (a transient,
  * unproven state, not an alarm), with the raw value kept in the label so it
  * is debuggable rather than silently swallowed.
+ *
+ * GRA-192: this function still decides wording for the *raw* wire state —
+ * it is `Header()` below, not this function, that first runs `connection`
+ * through `useSettledConnection` so a `connecting` produced by nothing more
+ * than the reconnect backoff never reaches here fast enough to flash.
  */
 export function connectionDisplay(
   connection: ConnectionState,
@@ -113,7 +119,11 @@ export function Header({
   savePath,
   saveError,
 }: Props) {
-  const { tone, label, pulse } = connectionDisplay(connection, eventsPerSecond);
+  // GRA-192: the raw wire state flickers disconnected/connecting at the
+  // reconnect backoff cadence whenever no app is running; this settles that
+  // down to one steady pill before it ever reaches connectionDisplay().
+  const settledConnection = useSettledConnection(connection);
+  const { tone, label, pulse } = connectionDisplay(settledConnection, eventsPerSecond);
 
   return (
     <header className="flex min-h-[46px] flex-wrap items-center gap-x-4 gap-y-2.5 border-b border-[var(--color-line)] bg-gradient-to-b from-[#181e29] to-[#141924] px-3.5 py-[7px]">

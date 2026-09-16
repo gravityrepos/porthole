@@ -1745,16 +1745,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1449 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1463 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 444 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 436
 passed, 0 failed, 8 skipped), 760 in the MCP server (`cd mcp && npm test` —
-757 passed, 0 failed, 3 skipped), and 245 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 245 passed, 0 failed, 0
+757 passed, 0 failed, 3 skipped), and 259 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 259 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1449 disagrees with the sum of the three suites' totals stated
+XML, and when 1463 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1781,7 +1781,7 @@ the same 444 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
 set) and the same 760 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
 sees 760/758/2, missing only that capture. The timeline UI is the one suite
-whose split does not move: 245/245/0 on every leg.
+whose split does not move: 259/259/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,
