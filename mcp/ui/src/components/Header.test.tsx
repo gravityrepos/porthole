@@ -1,8 +1,8 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { connectionDisplay } from "./Header";
-import type { ConnectionState } from "../types";
+import { connectionDetailText, connectionDisplay } from "./Header";
+import type { ConnectionState, Hello } from "../types";
 
 /**
  * `connectionDisplay` is the part of Header that decides what the pill says,
@@ -69,5 +69,81 @@ describe("connectionDisplay", () => {
     // debuggable rather than a generic "disconnected" that hides what
     // actually arrived.
     expect(display.label).toContain("reconnecting");
+  });
+});
+
+describe("connectionDisplay with a package mismatch (GRA-197)", () => {
+  it("connected + a package mismatch: the danger tone, not the accent tone or the live-rate label", () => {
+    const display = connectionDisplay("connected", 42, "Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`.");
+    expect(display.tone).toBe("var(--danger)");
+    expect(display.pulse).toBe(true);
+    expect(display.label).not.toContain("evt/s");
+  });
+
+  it("connected with no mismatch (null, the default): unchanged from before this ticket", () => {
+    const display = connectionDisplay("connected", 42);
+    expect(display).toEqual({ tone: "var(--accent)", label: "live · 42 evt/s", pulse: true });
+  });
+
+  it("a mismatch carried on a non-connected state is not shown — packageMismatch is only ever set while connected", () => {
+    // Defensive: device.ts clears packageMismatch in the same place it
+    // clears hello, so this combination should not arise in practice, but
+    // connectionDisplay must not invent a danger pill for a state whose own
+    // wording (e.g. "disconnected") already covers it.
+    const display = connectionDisplay("disconnected", 0, "stale mismatch text");
+    expect(display.tone).toBe("var(--danger)");
+    expect(display.label).toBe("disconnected");
+  });
+});
+
+const testHello: Hello = {
+  protocol: 1,
+  packageName: "com.example.shop",
+  processName: "com.example.shop",
+  versionName: "1.0.0-test",
+  device: "Test Device",
+  sdkInt: 34,
+  startedAt: 0,
+  collectors: ["frames", "http"],
+};
+
+/**
+ * GRA-198: the neighbour text beside the pill, pulled out the same way
+ * `connectionDisplay` is (see this file's own doc comment above) — the bug
+ * this ticket fixes was two phrasings of one fact rendered side by side
+ * (`handshaking`'s pill already says "waiting on app"; this text used to say
+ * "waiting for the app" regardless of state), so what matters here is that
+ * `handshaking` gets a sentence the pill does not already carry, while every
+ * other state keeps saying what it always has.
+ */
+describe("connectionDetailText", () => {
+  it("handshaking: says what the wait is for, not the disconnected sentence reused", () => {
+    const text = connectionDetailText("handshaking", null);
+    expect(text).not.toBeNull();
+    // Not the literal disconnected/generic phrase GRA-198 reported — the
+    // pill already says "waiting on app" for this state, so this text has
+    // to add something the pill does not.
+    expect(text).not.toBe("waiting for the app");
+    expect(text).toMatch(/no hello/i);
+  });
+
+  it("disconnected: keeps the existing sentence", () => {
+    expect(connectionDetailText("disconnected", null)).toBe("waiting for the app");
+  });
+
+  it("connecting: keeps the existing sentence too — its pill says 'connecting', a different fact", () => {
+    expect(connectionDetailText("connecting", null)).toBe("waiting for the app");
+  });
+
+  it("connected: null once hello has landed — Header renders the hello block instead, not this text", () => {
+    expect(connectionDetailText("connected", testHello)).toBeNull();
+  });
+
+  it("a hello present short-circuits every state to null, not just 'connected'", () => {
+    // Defensive: whichever state accompanies a real hello, this function's
+    // job is "what to say when there is no hello", so it must get out of
+    // the way the instant there is one rather than asserting on `connection`.
+    expect(connectionDetailText("handshaking", testHello)).toBeNull();
+    expect(connectionDetailText("disconnected", testHello)).toBeNull();
   });
 });

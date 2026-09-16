@@ -28,6 +28,23 @@ PR that makes the change, not after the fact.
   queryable so a later successful connection's `setup` report can say a bind
   needed a retry. The "installed on ..." log line no longer prints before the
   bind (which runs on a background thread) has actually settled (GRA-196).
+- The MCP server no longer reports "connected" to whatever app happens to
+  answer on its port. The plugin defaults `porthole.applicationId` from
+  AGP's own `applicationId` on an application module and writes it into
+  `.mcp.json` as `PORTHOLE_APPLICATION_ID`; a `hello` whose package
+  disagrees with it warns loudly — in `porthole_status`, in another tool's
+  own summary, and in the timeline UI's pill, in the danger tone — rather
+  than silently answering for another Porthole app holding the same port.
+  The not-connected checklist and README's troubleshooting text both name
+  the two cases this incident produced: another Porthole app holding the
+  port, and more than one adb transport for one device. Warns loudly; does
+  not refuse (GRA-197).
+- The timeline header no longer says "waiting on app" in the pill and
+  "waiting for the app" beside it during the handshake — two phrasings of
+  one fact. The neighbouring text is now state-specific: what the
+  handshake is waiting on, the existing sentence once genuinely
+  disconnected, and (once connected) the package and device the `hello`
+  actually named (GRA-198).
 
 ## [0.2.1] - 2026-09-15
 

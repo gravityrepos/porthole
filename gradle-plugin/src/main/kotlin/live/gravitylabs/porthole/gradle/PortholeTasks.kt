@@ -233,6 +233,13 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * itself and this task's config generation predates it (see GRA-119's
  * report). They were kept in step by hand across two blank-`sdk.dir` fixes;
  * now [PortholePlugin] calls this one function too.
+ *
+ * GRA-197: also writes `PORTHOLE_APPLICATION_ID` from [PortholeExtension.applicationId]
+ * when it resolves to something — explicitly set, or defaulted from AGP for
+ * an application module (see [AndroidWiring.application]). The MCP server
+ * uses it to tell its own app from another Porthole app answering on the
+ * same port; omitted, not written empty, when unset, for the same reason
+ * `PORTHOLE_SDK_DIR` is.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -241,6 +248,10 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
 
     @get:Input
     abstract val projectName: Property<String>
+
+    @get:Input
+    @get:Optional
+    abstract val applicationId: Property<String>
 
     /**
      * Deliberately not an `@OutputFile`. It lives in the source tree, not the
@@ -272,6 +283,11 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         if (sdkDir != null) {
             env["PORTHOLE_SDK_DIR"] = sdkDir.absolutePath
         }
+        // GRA-197: same rule as PORTHOLE_SDK_DIR above, and for the same
+        // reason — the server treats absence as "no expectation, don't
+        // check" rather than as an empty string to compare against, so an
+        // unset applicationId must omit the key, not write it blank.
+        applicationId.orNull?.let { env["PORTHOLE_APPLICATION_ID"] = it }
         // GRA-193: the package declares two bins, `porthole` (the CLI) and
         // `porthole-mcp`. npx runs the one named like the package, so without
         // a subcommand this launched the CLI's usage screen, which exited at

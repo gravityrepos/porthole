@@ -125,6 +125,7 @@ class PortholePlugin : Plugin<Project> {
             description = "Writes the MCP server entry into .mcp.json."
             port.set(extension.port)
             projectName.set(project.rootProject.name)
+            applicationId.set(extension.applicationId)
             // The root of the build, which is where an MCP client looks.
             configFile.set(project.rootProject.layout.projectDirectory.file(".mcp.json"))
             overwrite.set(

@@ -42,7 +42,7 @@ import java.util.Properties
  */
 class McpConfigTest : StubAdbFunctionalTest() {
 
-    private fun registerTask(port: Int = 8677): String =
+    private fun registerTask(port: Int = 8677, applicationId: String? = null): String =
         """
         import live.gravitylabs.porthole.gradle.PortholeMcpConfigTask
 
@@ -50,6 +50,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
             port.set($port)
             projectName.set("scratch")
             configFile.set(layout.projectDirectory.file(".mcp.json"))
+            ${if (applicationId != null) "applicationId.set(\"$applicationId\")" else ""}
         }
         """
 
@@ -667,6 +668,36 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
         val env = readEnvBlock()
         assertEquals(fromProperties.absolutePath, env["PORTHOLE_SDK_DIR"])
+    }
+
+    @Test
+    fun `writes PORTHOLE_APPLICATION_ID when applicationId is set`() {
+        // GRA-197 AC1 (unit half — the AGP-defaulting half is
+        // PortholeAgpCompatibilityTest, which needs a real Android module).
+        scratch(registerTask(applicationId = "com.example.shop"))
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertEquals("com.example.shop", env["PORTHOLE_APPLICATION_ID"])
+    }
+
+    @Test
+    fun `omits PORTHOLE_APPLICATION_ID when applicationId is unset`() {
+        // Same "absence is a signal" rule PORTHOLE_SDK_DIR follows: the
+        // server treats a missing key as "no expectation was configured",
+        // not as an empty string to compare hello.packageName against.
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val env = readEnvBlock()
+        assertFalse(
+            "expected no PORTHOLE_APPLICATION_ID without an applicationId set, got: $env",
+            env.containsKey("PORTHOLE_APPLICATION_ID"),
+        )
     }
 
     @Test

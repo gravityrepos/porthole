@@ -51,7 +51,17 @@ internal object AndroidWiring {
      */
     fun application(project: Project, extension: PortholeExtension): Provider<List<String>> {
         val components = project.extensions.getByType(ApplicationAndroidComponentsExtension::class.java)
-        components.finalizeDsl { dsl -> wire(project, extension, dsl.buildTypes, dsl.buildFeatures) }
+        components.finalizeDsl { dsl ->
+            // A convention, not a set: this only takes effect if the build
+            // script never called `porthole { applicationId.set(...) }`
+            // itself, which is exactly the "AGP knows it, but an explicit
+            // override still wins" rule GRA-197 asks for. finalizeDsl fires
+            // after the build script has already run, so by the time this
+            // executes any explicit .set() has already happened and
+            // .convention() here cannot clobber it.
+            dsl.defaultConfig.applicationId?.let { extension.applicationId.convention(it) }
+            wire(project, extension, dsl.buildTypes, dsl.buildFeatures)
+        }
 
         val debugVariantNames = mutableListOf<String>()
         components.onVariants { variant ->

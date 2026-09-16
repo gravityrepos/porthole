@@ -73,8 +73,15 @@ abstract class PortholeExtension {
     abstract val deviceSerial: Property<String>
 
     /**
-     * Application id to record in the connection file. Only cosmetic — it tells
-     * the MCP server which app it is talking to. Defaults to unset.
+     * Application id to record in the connection file and in `.mcp.json`'s
+     * `PORTHOLE_APPLICATION_ID`. No longer only cosmetic (GRA-197): the MCP
+     * server compares it against the connected app's own `hello.packageName`
+     * and warns loudly on a mismatch — the case where another Porthole app on
+     * the device is holding the configured port. For an application module
+     * this defaults from AGP's own `defaultConfig.applicationId` at
+     * `finalizeDsl` time (see `AndroidWiring.application`); setting it here
+     * explicitly always wins over that default. Library modules leave it
+     * unset.
      */
     abstract val applicationId: Property<String>
 }

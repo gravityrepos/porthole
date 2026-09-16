@@ -674,6 +674,96 @@ describe("protocol mismatch", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GRA-197: hello.packageName is now checked against PORTHOLE_APPLICATION_ID
+// ---------------------------------------------------------------------------
+
+describe("package mismatch", () => {
+  it("records a message naming both the connected package and the configured one, when they disagree", async () => {
+    const server = trackServer(await startRawServer({ autoHello: false }));
+    const client = track(new DeviceClient("127.0.0.1", server.port, undefined, "com.acme.app"));
+
+    client.start();
+    await server.whenAccepted(1);
+    // The default fixture's hello always answers as com.example.shop (see
+    // helloResult()/startRawServer's auto-hello above), which is exactly the
+    // mismatch this test wants against the configured com.acme.app.
+    server.write(JSON.stringify({ id: 1, ok: true, result: helloResult(PROTOCOL_VERSION) }) + "\n");
+
+    await waitForHello(client);
+    // A mismatch is a refusal to trust identity, not a failure to talk to
+    // the device — GRA-197's founder ruling is "warn loudly, do not
+    // refuse" — so the handshake still completes.
+    expect(client.state).toBe("connected");
+    expect(client.packageMismatch).not.toBeNull();
+    expect(client.packageMismatch).toContain("com.example.shop");
+    expect(client.packageMismatch).toContain("com.acme.app");
+    expect(client.packageMismatch).toContain("PORTHOLE_APPLICATION_ID");
+  });
+
+  it("is null when PORTHOLE_APPLICATION_ID is unset", async () => {
+    // Two-argument construction, same as every other test in this file that
+    // does not care about applicationId — AC3's "behaviour is unchanged"
+    // means this must be the default, not something a test has to opt into.
+    const server = trackServer(await startRawServer());
+    const client = track(new DeviceClient("127.0.0.1", server.port));
+
+    client.start();
+    await waitForState(client, "connected");
+    await waitForHello(client);
+
+    expect(client.packageMismatch).toBeNull();
+  });
+
+  it("is null when hello.packageName matches the configured applicationId", async () => {
+    const server = trackServer(await startRawServer()); // default fixture sends com.example.shop
+    const client = track(new DeviceClient("127.0.0.1", server.port, undefined, "com.example.shop"));
+
+    client.start();
+    await waitForState(client, "connected");
+    await waitForHello(client);
+
+    expect(client.packageMismatch).toBeNull();
+  });
+
+  it("clears once the device disconnects, since it is a fact about the hello that produced it", async () => {
+    const server = trackServer(await startRawServer({ autoHello: false }));
+    const client = track(new DeviceClient("127.0.0.1", server.port, undefined, "com.acme.app"));
+
+    client.start();
+    await server.whenAccepted(1);
+    server.write(JSON.stringify({ id: 1, ok: true, result: helloResult(PROTOCOL_VERSION) }) + "\n");
+    await waitForHello(client);
+    expect(client.packageMismatch).not.toBeNull();
+
+    server.destroyAll();
+    await waitForState(client, "disconnected");
+    expect(client.packageMismatch).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-197: notConnectedMessage() names the two new cases this incident produced
+// ---------------------------------------------------------------------------
+
+describe("notConnectedMessage's checklist", () => {
+  it("gains the two new numbered cases, beside the three it already had", () => {
+    // No socket needed: notConnectedMessage() is pure prose over `host`,
+    // `port` and `lastError`, reachable in the default "disconnected" state
+    // a fresh, unstarted client is already in.
+    const client = new DeviceClient("127.0.0.1", 8677);
+    const message = client.notConnectedMessage();
+
+    expect(message).toContain("another Porthole app");
+    expect(message).toMatch(/port\.set/);
+    expect(message).toContain("adb transport");
+    expect(message).toMatch(/deviceSerial\.set/);
+    // Still the original three, not replaced by the new ones.
+    expect(message).toContain("debug build is running");
+    expect(message).toContain("adb forward tcp:PORT tcp:PORT");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GRA-96 QA follow-up: the two copies of PROTOCOL_VERSION do not drift
 // ---------------------------------------------------------------------------
 

@@ -262,6 +262,19 @@ Two things worth knowing before you run it:
   `adb logcat -s Porthole:E` names it, with the port, this app's own
   package, and the fix: stop the other app, or give this one its own
   `porthole { port.set(...) }`.
+- **If it says "connected" but is answering for the wrong app**, the MCP
+  server has `PORTHOLE_APPLICATION_ID` (written into `.mcp.json` by
+  `portholeMcpConfig` from AGP's own `applicationId`) and compares it
+  against every `hello` — a mismatch warns loudly (`porthole_status`, every
+  tool's banner, the timeline UI's pill in the danger tone) rather than
+  silently answering for whichever app is holding the port. It never
+  refuses the connection, so the fix is the same as above: stop the other
+  app, or give this one its own port.
+- **A device with two adb transports at once** (wireless plus wired, most
+  commonly) makes `adb forward` ambiguous, and it fails silently for
+  exactly the port this all depends on. `adb devices` lists more than one
+  line for the same device when this is happening; pin one with
+  `porthole { deviceSerial.set("...") }`.
 
 The runtime starts with the process through androidx.startup and finds the
 current Activity on its own, which gives it the view it needs for the
@@ -430,6 +443,7 @@ it, and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_SESSIONS` | on | set to `0` to turn off [sessions on disk](#sessions-on-disk) entirely |
 | `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
 | `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
+| `PORTHOLE_APPLICATION_ID` | none | the app this server expects — written by `portholeMcpConfig` from AGP's own `applicationId` on an application module, or from `porthole { applicationId.set(...) }` if you set one explicitly. A `hello` naming a different package warns loudly everywhere (`porthole_status`, every tool's banner, the timeline UI's pill) instead of silently answering for whichever app happens to be holding the port |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
 and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by
@@ -1775,16 +1789,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1487 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1523 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 451 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 443
-passed, 0 failed, 8 skipped), 760 in the MCP server (`cd mcp && npm test` —
-757 passed, 0 failed, 3 skipped), and 276 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 276 passed, 0 failed, 0
+[Testing](#testing)): 455 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 447
+passed, 0 failed, 8 skipped), 774 in the MCP server (`cd mcp && npm test` —
+771 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 294 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1487 disagrees with the sum of the three suites' totals stated
+XML, and when 1523 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
@@ -1803,15 +1817,30 @@ resolution, UNC), the machine-local `local.properties` cross-check, and the
 three-test AGP compatibility set, which needs an SDK and the network and
 skips cleanly without a version to check — none of the eight is a gap in
 what the suite proves, each is a test that only makes sense on a platform
-this runner is not. The server's 3 skips on ubuntu are `perfetto-stdout` and GRA-113's real-coverage check
+this runner is not. GRA-197's two `applicationId`-defaulting tests (a real
+Android application module, proving AGP's own `defaultConfig.applicationId`
+reaches `PortholeExtension`) are not among the eight: unlike the AGP
+compatibility set, they need only an SDK, not `-Pporthole.agpVersion`, so
+`ubuntu-latest`'s preinstalled `ANDROID_HOME` runs them for real on every PR
+— a checkout with no SDK at all (no `ANDROID_HOME`, no `local.properties`
+next to the plugin) is the only place they skip. GRA-197 also adds 12 server
+tests (the `packageMismatch` rig, its "leads an unrelated tool's banner"
+proof, and the `TimelineServer` WebSocket tests proving it actually reaches
+a connecting client, since the UI cannot derive it locally the way it does
+`protocolMismatch`) and 18 UI tests (the header pill's danger tone, the
+header's per-state neighbour text, and `TimelineStore`'s new wire field) —
+none of them platform-gated, so they add to every leg's passed count and
+change no leg's skip count. The server's 3 skips on
+ubuntu are `perfetto-stdout` and GRA-113's real-coverage check
 (both gated on a cached `trace_processor` capture no CI runner has — gitignored
 and per-checkout) and the one Windows-only case GRA-160 added. **The total is the same
 everywhere; the split is not**: the primary Windows checkout runs
-the same 451 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
-set) and the same 760 server tests with 0 skipped, because it has the
+the same 455 JVM tests with only 4 skipped (the POSIX-path case plus the AGP
+set — the same SDK that keeps it at 4 also runs GRA-197's two tests for
+real) and the same 774 server tests with 0 skipped, because it has the
 cached `trace_processor` capture the ubuntu leg lacks; a worktree checkout
-sees 760/758/2, missing only that capture. The timeline UI is the one suite
-whose split does not move: 276/276/0 on every leg.
+sees 774/773/1, missing only that capture. The timeline UI is the one suite
+whose split does not move: 294/294/0 on every leg.
 
 **Verified on the emulator:** Room, SQLDelight, OkHttp, Ktor on CIO, WorkManager
 with retries, frames, main-thread stalls, memory and GC, device context,

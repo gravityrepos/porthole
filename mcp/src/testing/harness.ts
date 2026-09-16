@@ -438,6 +438,15 @@ export interface BuildRigOptions {
   adbEnv?: NodeJS.ProcessEnv;
   /** Forwarded to `createPortholeServer` — see `PortholeServerOptions.adbBinary` in index.ts (GRA-89). */
   adbBinary?: string;
+  /**
+   * GRA-197: what the fake `DeviceClient` was "configured for" —
+   * `PORTHOLE_APPLICATION_ID` in production, threaded straight to
+   * `DeviceClient`'s constructor here rather than through `process.env`, so
+   * a test asking for a mismatch cannot leak that env var into any other
+   * test running in the same process. Omitted means unset, the same as a
+   * real server started with no PORTHOLE_APPLICATION_ID.
+   */
+  applicationId?: string;
 }
 
 /**
@@ -448,7 +457,7 @@ export interface BuildRigOptions {
  */
 export async function buildRig(options: BuildRigOptions = {}): Promise<Rig> {
   const fakeDevice = await FakeDevice.start(options.handlers);
-  const device = new DeviceClient("127.0.0.1", fakeDevice.port);
+  const device = new DeviceClient("127.0.0.1", fakeDevice.port, undefined, options.applicationId);
   const timeline = new TimelineServer(device, 0);
   const { server } = createPortholeServer({
     device,
