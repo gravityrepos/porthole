@@ -875,7 +875,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     const firstEver = pendingFirstEverNote;
     pendingFirstEverNote = null;
     const narrated = firstEver ? `${firstEver}${summary}` : summary;
-    const withBanner = banner ? `${banner}\n${narrated}` : narrated;
+    // GRA-197: "warn loudly, do not refuse" means every successful result,
+    // from every tool, leads with the package mismatch while one stands —
+    // here, in the one place all of them pass through, so no tool can
+    // forget it (the same reason the GRA-55 banner lives here and not in
+    // each handler). A summary that already *is* the mismatch text —
+    // porthole_status's, and findings' empty-ring branch — is left alone
+    // rather than said twice.
+    const mismatch = device.packageMismatch;
+    const led = mismatch && !summary.startsWith(mismatch) ? `⚠ ${mismatch}\n${narrated}` : narrated;
+    const withBanner = banner ? `${banner}\n${led}` : led;
     const withSinceLast =
       payload !== null && typeof payload === "object" && !Array.isArray(payload)
         ? { ...(payload as Record<string, unknown>), sinceLast }

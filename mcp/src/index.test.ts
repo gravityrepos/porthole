@@ -1573,6 +1573,54 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
     }
   });
 
+  // GRA-197 AC2, the general case: every tool's result carries the mismatch,
+  // through the one place all successful results pass (ok() →
+  // attachSinceLastAndBanner), not through a per-tool branch — so a tool
+  // with a real answer to give (events buffered, a window to report) still
+  // leads with it, and a tool that never mentions packages at all does too.
+  // Coordinator review of PR 63 found the AC met only by findings' empty-ring
+  // branch below; this is the proof for the rest.
+  it("frames and findings, with events buffered, both lead with the mismatch and still answer", async () => {
+    const rig = await buildRig({ applicationId: "com.acme.app" });
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 5_000, data: {} },
+      ]);
+
+      const frames = await rig.client.callTool("frames", { from: 0, to: 6_000 });
+      expect(frames.isError).toBeFalsy();
+      expect(frames.text.startsWith("⚠ Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`")).toBe(
+        true,
+      );
+      // Still the tool's own answer underneath, not a replacement for it.
+      expect(frames.json).not.toBeNull();
+
+      const findings = await rig.client.callTool("findings", { from: 0, to: 6_000 });
+      expect(findings.isError).toBeFalsy();
+      expect(findings.text).toContain("com.acme.app");
+      expect(findings.text).toContain("examined");
+      // Said once, never twice: the lead is skipped for a summary that
+      // already is the mismatch text (porthole_status, the empty-ring branch).
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.text.split("PORTHOLE_APPLICATION_ID").length - 1).toBe(1);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("with a matching applicationId, no tool result carries a lead", async () => {
+    const rig = await buildRig({ applicationId: "com.example.shop" });
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: {} }]);
+      const frames = await rig.client.callTool("frames", { from: 0, to: 2_000 });
+      expect(frames.text.startsWith("⚠")).toBe(false);
+      expect(frames.text).not.toContain("PORTHOLE_APPLICATION_ID");
+    } finally {
+      await rig.close();
+    }
+  });
+
   // GRA-197 AC2: "present ... in the banner of an unrelated tool" — findings'
   // empty-ring branch leads with it the same way porthole_status's summary
   // does, proven here against a real tool call rather than device.ts alone.
