@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { copyFileSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -2096,24 +2096,69 @@ function sleepSync(ms) {
   Atomics.wait(view, 0, 0, ms);
 }
 
+// GRA-186: appends this invocation's tag to PORTHOLE_TEST_ORDER_LOG, when
+// set, so a test can read back the sequence adb calls actually ran in —
+// each invocation is its own OS process, so there is no shared in-memory
+// array to push onto, only a file both sides can see.
+function logOrder(tag) {
+  const logPath = process.env.PORTHOLE_TEST_ORDER_LOG;
+  if (logPath) fs.appendFileSync(logPath, tag + "\\n");
+}
+
 const raw = process.argv.slice(1);
 const resolved = raw.length > 0 ? [path.basename(raw[0]), ...raw.slice(1)] : raw;
 let a = resolved;
 if (a[0] === "-s") a = a.slice(2);
 
 if (a[0] === "pull") {
+  logOrder("pull");
   fs.writeFileSync(a[2], "porthole: fake-adb-pulled-trace\\n");
   process.stdout.write(a[1] + ": 1 file pulled.\\n");
   process.exit(0);
 }
 if (a[0] === "shell" && a[1] === "rm") {
+  logOrder("cleanup");
   process.exit(0);
 }
 if (a[0] === "shell" && a[1] === "perfetto") {
+  logOrder("perfetto-start");
+  // GRA-186: touches a marker file the instant this "session" starts, so a
+  // concurrent "shell test -e <devicePath>" call (see below) can tell a
+  // capture is under way without waiting for it to finish — the same signal
+  // waitForCaptureToStart polls for in index.ts, standing in for perfetto
+  // actually creating its output file on-device at session start.
+  const oIndex = a.indexOf("-o");
+  const devicePath = oIndex >= 0 ? a[oIndex + 1] : null;
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  if (devicePath && markerDir) {
+    fs.writeFileSync(path.join(markerDir, path.basename(devicePath) + ".started"), "1");
+  }
   const tIndex = a.indexOf("-t");
   const durationToken = tIndex >= 0 ? a[tIndex + 1] : "1s";
   const seconds = parseInt(durationToken, 10) || 1;
   sleepSync(seconds * 1000);
+  process.exit(0);
+}
+if (a[0] === "shell" && a[1] === "test" && a[2] === "-e") {
+  const devicePath = a[3];
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  const markerFile = markerDir ? path.join(markerDir, path.basename(devicePath) + ".started") : null;
+  process.exit(markerFile && fs.existsSync(markerFile) ? 0 : 1);
+}
+if (a[0] === "shell" && a[1] === "am" && a[2] === "force-stop") {
+  logOrder("force-stop");
+  process.exit(0);
+}
+if (a[0] === "shell" && a[1] === "monkey") {
+  logOrder("launch");
+  // GRA-186 self-check (a): PORTHOLE_TEST_MONKEY_FAIL simulates the
+  // "package is not installed" case — a real device's monkey exits non-zero
+  // with no "Events injected" line when there is no launcher activity to hit.
+  if (process.env.PORTHOLE_TEST_MONKEY_FAIL === "1") {
+    process.stderr.write("No activities found to run, monkey aborted.\\n");
+    process.exit(1);
+  }
+  process.stdout.write("Events injected: 1\\n");
   process.exit(0);
 }
 process.stderr.write("fake-adb: unhandled args " + JSON.stringify(a) + "\\n");
@@ -2125,6 +2170,8 @@ interface FakeAdb {
   binaryPath: string;
   /** Pass as `adbEnv` (spread over `process.env`) — this is what makes `binaryPath` run FAKE_ADB_PRELOAD_SOURCE instead of trying to load its own CLI args as modules. */
   env: NodeJS.ProcessEnv;
+  /** GRA-186: the order every "shell"/"pull" invocation ran in, one tag per line, oldest first — see `logOrder` in FAKE_ADB_PRELOAD_SOURCE. */
+  order(): string[];
   cleanup(): void;
 }
 
@@ -2143,8 +2190,13 @@ interface FakeAdb {
  * Building the env value here and handing it to one specific rig's server
  * removes the shared global instead of narrowing the window it is exposed
  * for.
+ *
+ * GRA-186: `extraEnv` lets one test override `PORTHOLE_TEST_MONKEY_FAIL`
+ * without every other caller of this function having to know that variable
+ * exists — the same "build the env value here, do not mutate the shared
+ * one" reasoning as `NODE_OPTIONS` above, just for a second variable.
  */
-function setupFakeAdb(): FakeAdb {
+function setupFakeAdb(extraEnv: NodeJS.ProcessEnv = {}): FakeAdb {
   const root = mkdtempSync(path.join(tmpdir(), "porthole-fakeadb-"));
   const binaryName = process.platform === "win32" ? "adb.exe" : "adb";
   const binaryPath = path.join(root, binaryName);
@@ -2169,9 +2221,28 @@ function setupFakeAdb(): FakeAdb {
   const preloadPath = path.join(root, "fake-adb-preload.cjs");
   writeFileSync(preloadPath, FAKE_ADB_PRELOAD_SOURCE);
 
+  // GRA-186: markerDir is where the fake "perfetto" process touches a file
+  // the instant it starts, and where a concurrent "shell test -e" call looks
+  // for it — see FAKE_ADB_PRELOAD_SOURCE. orderLog is a flat append-only
+  // file every invocation writes its own tag to, so the sequence of real OS
+  // processes that ran can be read back after the fact.
+  const markerDir = path.join(root, "markers");
+  mkdirSync(markerDir, { recursive: true });
+  const orderLogPath = path.join(root, "order.log");
+  writeFileSync(orderLogPath, "");
+
   return {
     binaryPath,
-    env: { ...process.env, NODE_OPTIONS: `--require=${preloadPath}` },
+    env: {
+      ...process.env,
+      ...extraEnv,
+      NODE_OPTIONS: `--require=${preloadPath}`,
+      PORTHOLE_TEST_MARKER_DIR: markerDir,
+      PORTHOLE_TEST_ORDER_LOG: orderLogPath,
+    },
+    order() {
+      return readFileSync(orderLogPath, "utf8").split("\n").filter(Boolean);
+    },
     cleanup() {
       // Windows can refuse to unlink a just-exited executable for a moment
       // (EPERM while the OS or an antivirus scanner still holds it); CI's
@@ -2224,6 +2295,110 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
       // Confirms the fake adb's sleep really ran for the requested duration
       // rather than the capture short-circuiting some other way.
       expect(totalElapsedMs).toBeGreaterThanOrEqual(seconds * 1000 - 250);
+    } finally {
+      await rig.close();
+      fakeAdb.cleanup();
+      rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }, 20_000);
+});
+
+describe("GRA-186: capture_system_trace can restart the app mid-capture", () => {
+  it("with restartApp: true, force-stops and relaunches the app right after the recording starts, in order, then pulls and cleans up", async () => {
+    const fakeAdb = setupFakeAdb();
+    const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const capture = await rig.client.callTool("capture_system_trace", {
+        seconds: 2,
+        outputDir,
+        packages: ["com.example.shop"],
+        restartApp: true,
+      });
+      expect(capture.isError).toBeFalsy();
+      expect(capture.json).toMatchObject({ restarted: true, apps: ["com.example.shop"] });
+      // The whole point of GRA-186: the restart happens WHILE the recording
+      // is under way, not before it (there would be nothing to enable the
+      // tag for yet) and not after (the window would already be over) — so
+      // "perfetto-start" must lead "force-stop"/"launch", which in turn must
+      // lead the pull/cleanup that only run once the recording resolves.
+      expect(fakeAdb.order()).toEqual(["perfetto-start", "force-stop", "launch", "pull", "cleanup"]);
+    } finally {
+      await rig.close();
+      fakeAdb.cleanup();
+      rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }, 20_000);
+
+  it("with restartApp omitted (the default), nothing is force-stopped or relaunched", async () => {
+    const fakeAdb = setupFakeAdb();
+    const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const capture = await rig.client.callTool("capture_system_trace", {
+        seconds: 1,
+        outputDir,
+        packages: ["com.example.shop"],
+      });
+      expect(capture.isError).toBeFalsy();
+      expect(capture.json).toMatchObject({ restarted: false });
+      const order = fakeAdb.order();
+      expect(order).not.toContain("force-stop");
+      expect(order).not.toContain("launch");
+      expect(order).toEqual(["perfetto-start", "pull", "cleanup"]);
+    } finally {
+      await rig.close();
+      fakeAdb.cleanup();
+      rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }, 20_000);
+
+  it("self-check (a): restartApp true with no package attached and none named skips the restart with a stated reason, rather than failing the whole capture", async () => {
+    const fakeAdb = setupFakeAdb();
+    const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
+    // connectDevice: false leaves device.hello null and state "disconnected"
+    // (not "handshaking"), so the existing GRA-157 early-return does not
+    // fire and this reaches the GRA-186 code with apps === [].
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env, connectDevice: false });
+    try {
+      const capture = await rig.client.callTool("capture_system_trace", {
+        seconds: 1,
+        outputDir,
+        restartApp: true,
+      });
+      expect(capture.isError).toBeFalsy();
+      expect(capture.json).toMatchObject({ restarted: false, apps: [] });
+      const notes = (capture.json as { notes: string[] }).notes.join(" ");
+      expect(notes).toContain(
+        "Could not restart the app for this capture: no package is attached or named, so there is nothing to restart.",
+      );
+      // Confirms this is genuinely a skip, not a restart that silently failed.
+      expect(fakeAdb.order()).not.toContain("force-stop");
+    } finally {
+      await rig.close();
+      fakeAdb.cleanup();
+      rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
+  }, 20_000);
+
+  it("self-check (a): restartApp true with a package that is not installed reports the launch failure and still returns the capture", async () => {
+    const fakeAdb = setupFakeAdb({ PORTHOLE_TEST_MONKEY_FAIL: "1" });
+    const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-capture-out-"));
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const capture = await rig.client.callTool("capture_system_trace", {
+        seconds: 1,
+        outputDir,
+        packages: ["com.example.shop"],
+        restartApp: true,
+      });
+      expect(capture.isError).toBeFalsy();
+      expect(capture.json).toMatchObject({ restarted: false });
+      const notes = (capture.json as { notes: string[] }).notes.join(" ");
+      expect(notes).toContain("Could not restart com.example.shop for this capture:");
+      expect(notes).toContain("No activities found to run, monkey aborted.");
+      // The force-stop half still ran — only the launch failed.
+      expect(fakeAdb.order()).toEqual(["perfetto-start", "force-stop", "launch", "pull", "cleanup"]);
     } finally {
       await rig.close();
       fakeAdb.cleanup();

@@ -203,7 +203,23 @@ export interface CaptureResult {
   bytes: number;
   seconds: number;
   categories: string[];
+  /**
+   * The packages `--app` was actually run with. GRA-186: `describeCapture`
+   * needs this to tell "no package was named" (the app tag was never
+   * enabled — nothing to investigate) apart from "a package was named and
+   * the trace still came back unannotated" (the two are different problems
+   * with different remedies, and conflating them is what GRA-186 was filed
+   * against).
+   */
+  apps: string[];
   portholeLabels: number;
+  /**
+   * Whether the tool force-stopped and relaunched the target app for this
+   * capture (`restartApp: true` in `index.ts`'s `capture_system_trace`).
+   * `describeCapture` uses it only to warn that the trace contains a cold
+   * start — it says nothing about whether the restart made labels appear.
+   */
+  restarted: boolean;
   notes: string[];
 }
 
@@ -216,10 +232,26 @@ export function describeCapture(result: CaptureResult): string {
     result.portholeLabels > 0
       ? `${result.portholeLabels} Porthole track(s) in it, so the app's own navigations, ` +
           "calls and queries are on the timeline."
-      : "No Porthole labels found — either no package was named, so the app tag was never " +
+      : result.apps.length === 0
+        ? "No Porthole labels found — either no package was named, so the app tag was never " +
           "enabled, or the app was not running with the runtime attached. The trace is still " +
-          "valid, it is just not annotated.",
+          "valid, it is just not annotated."
+        : // GRA-186: on the Pixel 9 Pro Fold (Android 17) a process already
+          // running when the session starts never picks up the newly-enabled
+          // app tag — it is consulted once, at process attach, not re-read
+          // live. Naming that here, rather than the old generic "package or
+          // runtime is wrong" wording, is what turns a false "something is
+          // misconfigured" reading into the actual, actionable remedy.
+          `No Porthole labels found even though ${result.apps.join(", ")} was targeted — this ` +
+          "device/build only reads the app trace tag when its process starts, so a process " +
+          "already running before the capture began is never marked (seen on a Pixel 9 Pro " +
+          "Fold, Android 17). Pass `restartApp: true`, or launch the app after the capture " +
+          "starts, to catch it.",
   );
+
+  if (result.restarted) {
+    parts.push("The app was restarted for this capture, so it contains a cold start.");
+  }
 
   parts.push("Open it at ui.perfetto.dev; nothing here reads it for you.");
   return [...parts, ...result.notes].join(" ");
