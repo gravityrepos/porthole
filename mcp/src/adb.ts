@@ -521,6 +521,26 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
 }
 
 /**
+ * The `am force-stop` / launcher-intent pair both `restartApp` and
+ * `restartAppAsync` send, and the one honest way to tell whether the second
+ * half actually launched anything.
+ *
+ * monkey reports success on stdout even when it launched nothing, so the
+ * absence of its "Events injected" line — not its exit code — is the signal
+ * that there was no launcher activity to hit.
+ */
+function finishRestart(packageName: string, started: AdbResult): AdbResult {
+  if (!started.ok) return started;
+  if (!started.output.includes("Events injected")) {
+    return {
+      ok: false,
+      output: started.output || `No launcher activity found for ${packageName}.`,
+    };
+  }
+  return { ok: true, output: `restarted ${packageName}` };
+}
+
+/**
  * Stop the app and start it again.
  *
  * Driven from this side rather than from inside the app: a process cannot
@@ -535,15 +555,29 @@ export function restartApp(packageName: string, serial?: string): AdbResult {
     ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
     serial,
   );
-  if (!started.ok) return started;
+  return finishRestart(packageName, started);
+}
 
-  // monkey reports success on stdout even when it launched nothing, so the
-  // absence of its "Events injected" line is the honest failure signal.
-  if (!started.output.includes("Events injected")) {
-    return {
-      ok: false,
-      output: started.output || `No launcher activity found for ${packageName}.`,
-    };
-  }
-  return { ok: true, output: `restarted ${packageName}` };
+/**
+ * `restartApp`'s async twin, spawned with `runAdbAsync` instead of
+ * `runAdb`'s blocking `spawnSync`.
+ *
+ * GRA-186: `capture_system_trace` restarts the app it is tracing partway
+ * through an already-running recording (see `index.ts`), so it cannot use
+ * the sync version without freezing the event loop for as long as the
+ * force-stop/relaunch pair takes — exactly the problem GRA-89 already fixed
+ * for the recording, pull and cleanup calls in the same tool. This shares
+ * `finishRestart`'s arg-building result and "Events injected" check with the
+ * sync version rather than re-deriving them, so the two can only drift by a
+ * change that touches both call sites.
+ */
+export async function restartAppAsync(packageName: string, options: RunAdbAsyncOptions = {}): Promise<AdbResult> {
+  const stopped = await runAdbAsync(["shell", "am", "force-stop", packageName], options);
+  if (!stopped.ok) return stopped;
+
+  const started = await runAdbAsync(
+    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
+    options,
+  );
+  return finishRestart(packageName, started);
 }

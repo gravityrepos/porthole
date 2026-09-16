@@ -830,6 +830,20 @@ capture of a screen sitting idle, with no navigation, HTTP, DB or stall
 activity inside it, comes back with zero labels correctly, because there was
 nothing for the runtime to annotate.
 
+**Some builds only read the app trace tag when a process starts, not while
+one is already running.** Confirmed on a Pixel 9 Pro Fold, Android 17: a
+process already running when the capture session starts never has its
+`ATRACE_TAG_APP` sections recorded, even though the session's own `--app`
+enablement reaches the property table correctly — classic `atrace -a` shows
+the identical restriction, so it is a platform behaviour, not a Porthole or
+`perfetto --app` defect. (The Pixel 10 Pro XL, also Android 17, does not have
+this restriction: it live-reloads the tag for an already-running process.)
+`capture_system_trace`'s `restartApp: true` option works around it by
+force-stopping and relaunching the target app right after the capture starts,
+at the cost of the trace containing a cold start; Porthole reconnects to the
+relaunched process on its own. Launching the app after starting the capture
+by hand has the same effect.
+
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of five questions — jank, thread states,
 binder, render, slices — scoped to one window and one process, using

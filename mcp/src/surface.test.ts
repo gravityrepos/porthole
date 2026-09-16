@@ -288,6 +288,57 @@ describe("porthole_status's exitTrace parameter", () => {
   });
 });
 
+// GRA-186: the schema-level half of capture_system_trace's new
+// `restartApp` parameter — index.test.ts's fake-adb rig exercises the
+// handler itself (the force-stop/relaunch sequence, both self-check (a)
+// cases); this file only pins the shape an agent actually sees when it
+// lists tools, and the wording of the platform caveat.
+describe("capture_system_trace's restartApp parameter", () => {
+  it("declares restartApp as an optional boolean, not required and not the tool's only optional field turned required by a typo", async () => {
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const tool = tools.find((t) => t.name === "capture_system_trace");
+      expect(tool, "capture_system_trace is not registered").toBeDefined();
+      const schema = tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+      const props = schema.properties ?? {};
+      const required = schema.required ?? [];
+      expect(props.restartApp, "capture_system_trace has no restartApp parameter").toBeDefined();
+      expect(required, "restartApp must be optional").not.toContain("restartApp");
+
+      const restartApp = props.restartApp as { type?: string; default?: unknown };
+      expect(restartApp.type, `restartApp schema: ${JSON.stringify(restartApp)}`).toBe("boolean");
+      // GRA-186 AC1: "default false" is a stated contract, not just this
+      // test's assumption — pin the compiled schema's own default so a
+      // change to the zod declaration that silently drops `.default(false)`
+      // fails here instead of only showing up as an agent-visible surprise.
+      expect(restartApp.default).toBe(false);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("documents the parameter and the platform caveat naming the device, build and cold-start trade-off", () => {
+    const tool = toolSource("capture_system_trace");
+    expect(tool).toContain("restartApp");
+    expect(tool).toMatch(/Pixel 9 Pro Fold/);
+    expect(tool).toMatch(/Android 17/);
+    expect(tool).toMatch(/cold start/);
+
+    // Named in the tool's own top-level description, not only buried in the
+    // parameter's own `.describe()` — an agent deciding whether to call the
+    // tool at all reads the former first. Sliced to just the `description:`
+    // field's own text (up to `inputSchema:`) so this fails if `restartApp`
+    // is only ever mentioned inside the schema below it.
+    const descriptionStart = tool.indexOf("description:");
+    const inputSchemaStart = tool.indexOf("inputSchema:");
+    expect(descriptionStart, "capture_system_trace has no description: field").toBeGreaterThan(-1);
+    expect(inputSchemaStart, "capture_system_trace has no inputSchema: field").toBeGreaterThan(descriptionStart);
+    const description = tool.slice(descriptionStart, inputSchemaStart);
+    expect(description).toContain("restartApp");
+  });
+});
+
 describe("the server version", () => {
   it("is read from the package rather than retyped", () => {
     // The same drift that put a stale npm package name in the Gradle plugin.
