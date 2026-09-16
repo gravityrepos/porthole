@@ -78,12 +78,14 @@ class McpConfigTest : StubAdbFunctionalTest() {
             .build()
 
     @Suppress("UNCHECKED_CAST")
-    private fun readEnvBlock(): Map<String, Any?> {
+    private fun readPortholeEntry(): Map<String, Any?> {
         val root = JsonSlurper().parseText(mcpJson.readText()) as Map<String, Any?>
         val servers = root["mcpServers"] as Map<String, Any?>
-        val porthole = servers["porthole"] as Map<String, Any?>
-        return porthole["env"] as Map<String, Any?>
+        return servers["porthole"] as Map<String, Any?>
     }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readEnvBlock(): Map<String, Any?> = readPortholeEntry()["env"] as Map<String, Any?>
 
     // No ANDROID_HOME/ANDROID_SDK_ROOT: isolates the local.properties path
     // from whatever the host machine happens to have set, which matters
@@ -116,6 +118,27 @@ class McpConfigTest : StubAdbFunctionalTest() {
 
         val env = readEnvBlock()
         assertEquals(projectDir.root.absolutePath, env["PORTHOLE_PROJECT_ROOT"])
+    }
+
+    /**
+     * GRA-193. The npm package declares two bins, `porthole` (the CLI) and
+     * `porthole-mcp`; npx runs the one named like the package, so an entry
+     * without a subcommand launched the CLI's usage screen, which exited at
+     * once, and the MCP client saw a server that started and immediately
+     * ended. `porthole mcp` is the CLI branch that boots the same server
+     * `dist/index.js` does. Pinned in order, as the literal package name a
+     * consumer's client will actually run, not the constant the task reads.
+     */
+    @Test
+    fun `launches the CLI's mcp subcommand, not its usage screen`() {
+        scratch(registerTask())
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val porthole = readPortholeEntry()
+        assertEquals("npx", porthole["command"])
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole", "mcp"), porthole["args"])
     }
 
     @Test
