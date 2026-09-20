@@ -129,10 +129,11 @@ export function renderReport(trace: Trace, options: RenderReportOptions = {}): s
     if (finding.detail) lines.push(`           ${finding.detail}`);
     // GRA-201: printed only once resolved — an unresolved `where` is a fact
     // for an agent's structured payload to act on, not a line worth adding
-    // to a report a person reads top to bottom for what is wrong.
+    // to a report a person reads top to bottom for what is wrong. GRA-205:
+    // `line` is never optional on a resolved `where` any more, so this is
+    // always a breakpoint address, never a bare path.
     if (finding.where?.resolved) {
-      const at = finding.where.line ? `${finding.where.path}:${finding.where.line}` : finding.where.path;
-      lines.push(`           at ${at}`);
+      lines.push(`           at ${finding.where.path}:${finding.where.line}`);
     }
   }
 

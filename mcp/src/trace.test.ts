@@ -1159,6 +1159,7 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
       resolved: true,
       path: "app/src/main/kotlin/CartViewModel.kt",
       line: 1,
+      kind: "frame",
     });
   });
 
@@ -1174,11 +1175,18 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
       }),
     ];
     const finding = find(events).find((f) => f.id === "main-thread-stall");
-    expect(finding?.where).toEqual({ resolved: false, reason: "ambiguous" });
+    expect(finding?.where).toEqual({
+      resolved: false,
+      reason: "ambiguous",
+      candidates: ["app/src/main/kotlin/CartViewModel.kt", "legacy/src/main/kotlin/CartViewModel.kt"],
+    });
   });
 
   it("says not found when the top frame's file exists nowhere under the root (AC1)", () => {
-    const events = [event("blocked", 500, { durationMs: 400, top: "x.Ghost.method(Ghost.kt:1)" })];
+    // Bare, unqualified frame -- see sources.test.ts's GRA-205 describe
+    // block for the package-aware "not in project" case this deliberately
+    // does not exercise.
+    const events = [event("blocked", 500, { durationMs: 400, top: "Ghost.method(Ghost.kt:1)" })];
     const finding = find(events).find((f) => f.id === "main-thread-stall");
     expect(finding?.where).toEqual({ resolved: false, reason: "not found" });
   });
@@ -1195,6 +1203,7 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
       resolved: true,
       path: "app/src/main/kotlin/CartViewModel.kt",
       line: 1,
+      kind: "frame",
     });
   });
 
@@ -1211,6 +1220,7 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
       resolved: true,
       path: "app/src/main/kotlin/Screens.kt",
       line: 2,
+      kind: "declaration",
     });
   });
 

@@ -2646,6 +2646,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();
@@ -2676,6 +2677,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
         line: 14,
+        kind: "declaration",
       });
     } finally {
       await rig.close();
@@ -2901,6 +2903,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();

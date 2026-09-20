@@ -325,10 +325,10 @@ function formatLine(finding: Finding, fallbackT: number): string {
   // already the raw stack frame text; `where` is the resolved project-
   // relative path an agent can actually open, when PORTHOLE_PROJECT_ROOT is
   // set and resolution succeeded. Absent (not `resolved: false`) otherwise,
-  // same as everywhere else `where` is optional.
+  // same as everywhere else `where` is optional. GRA-205: `line` is never
+  // optional on a resolved `where`, so this is always a breakpoint address.
   if (finding.where?.resolved) {
-    const line = finding.where.line ? `:${finding.where.line}` : "";
-    parts.push(`where=${finding.where.path}${line}`);
+    parts.push(`where=${finding.where.path}:${finding.where.line}`);
   }
   return parts.join("  ");
 }

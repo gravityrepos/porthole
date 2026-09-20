@@ -89,7 +89,12 @@ describe("SelectionPanel renders a finding's where (GRA-201)", () => {
     render(
       <SelectionPanel
         hit={findingHit({
-          where: { resolved: true, path: "app/src/main/kotlin/CartViewModel.kt", line: 148 },
+          where: {
+            resolved: true,
+            path: "app/src/main/kotlin/CartViewModel.kt",
+            line: 148,
+            kind: "frame",
+          },
         })}
       />,
     );
@@ -97,19 +102,27 @@ describe("SelectionPanel renders a finding's where (GRA-201)", () => {
     expect(screen.getByText("app/src/main/kotlin/CartViewModel.kt:148")).toBeTruthy();
   });
 
-  it("shows a resolved location with no line as the bare path", () => {
-    render(
-      <SelectionPanel
-        hit={findingHit({ where: { resolved: true, path: "core/network/src/ApiClient.kt" } })}
-      />,
-    );
-    expect(screen.getByText("core/network/src/ApiClient.kt")).toBeTruthy();
-  });
+  // GRA-205: `line` is required on a resolved `where` now -- a breakpoint
+  // address, never a bare path -- so the "no line" case this used to cover
+  // no longer exists on the wire.
 
   it("shows the reason, not a fabricated path, when resolution failed", () => {
-    render(<SelectionPanel hit={findingHit({ where: { resolved: false, reason: "ambiguous" } })} />);
+    render(
+      <SelectionPanel
+        hit={findingHit({
+          where: {
+            resolved: false,
+            reason: "ambiguous",
+            candidates: ["app/src/main/kotlin/A.kt", "legacy/src/main/kotlin/A.kt"],
+          },
+        })}
+      />,
+    );
     expect(screen.getByText("where")).toBeTruthy();
-    expect(screen.getByText("ambiguous")).toBeTruthy();
+    // GRA-205: an ambiguous reason names every candidate it found, not just the word.
+    expect(
+      screen.getByText("ambiguous: app/src/main/kotlin/A.kt, legacy/src/main/kotlin/A.kt"),
+    ).toBeTruthy();
   });
 
   it("copies the resolved path to the clipboard on click", async () => {
@@ -121,7 +134,12 @@ describe("SelectionPanel renders a finding's where (GRA-201)", () => {
     render(
       <SelectionPanel
         hit={findingHit({
-          where: { resolved: true, path: "app/src/main/kotlin/CartViewModel.kt", line: 148 },
+          where: {
+            resolved: true,
+            path: "app/src/main/kotlin/CartViewModel.kt",
+            line: 148,
+            kind: "frame",
+          },
         })}
       />,
     );

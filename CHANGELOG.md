@@ -268,6 +268,24 @@ PR that makes the change, not after the fact.
 
 ### Changed
 
+- `where` is now a breakpoint address, not merely a file: `resolved: true`
+  always carries a real, numeric `line` — never optional any more — plus a
+  new `kind`, `"frame"` when the line came from the evidence itself (a stack
+  frame's own rendered `File.kt:NN`) or `"declaration"` when it did not (a
+  composable/`state` name is never a line, so this is the line of the
+  declaration the lookup found in source instead). A frame whose file
+  resolves but whose own line does not — a stripped release build can carry
+  a real file name next to no line table — no longer reports `resolved:
+  true` with the line silently missing; it reads `"synthetic"`, the same as
+  any other frame with nothing to point at. An ambiguous `where` now also
+  carries `candidates`, every path it actually found, rather than leaving an
+  agent to guess which two (or more) files "ambiguous" meant. A lookup that
+  matched nothing gains a fourth reason, `"not in project"`, for evidence
+  that named a package no directory under the root is authored in at all —
+  a library frame (`okhttp3.internal.connection.RealCall`, an androidx
+  class) reads this way instead of the less specific `"not found"`, decided
+  from the walk's own file paths already in memory, never an extra read
+  (GRA-205).
 - Every Porthole app on a device now binds its own on-device endpoint instead
   of contending for one shared loopback TCP port: the runtime listens by
   default on an Android abstract-namespace Unix socket named
