@@ -1083,4 +1083,52 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
     expect(offWhere).toBeUndefined();
     expect(onRest).toEqual(offRest);
   });
+
+  /**
+   * 201-C: the AC3 proof above covers only main-thread-stall. Every other
+   * finding `findingsOf` attaches `where` to goes through the exact same
+   * `...(where ? { where } : {})` spread (trace.ts), but that is an
+   * implementation detail this suite should not have to trust by
+   * resemblance — each finding kind gets its own byte-identical-minus-where
+   * proof, the same way AC3 itself demands one.
+   */
+  it("recompose-hotspot: on vs off is byte-identical except where", () => {
+    const screens = path.join(root, "app/src/main/kotlin/Screens.kt");
+    writeFileSync(screens, '@Composable\nfun X() { Modifier.portholeNode("Cart.ItemRow") }\n');
+    const events = Array.from({ length: 150 }, (_, i) => event("recompose", i, { name: "Cart.ItemRow" }));
+
+    const on = find(events).find((f) => f.id === "recompose-hotspot")!;
+
+    delete process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    const off = find(events).find((f) => f.id === "recompose-hotspot")!;
+
+    const { where: onWhere, ...onRest } = on;
+    const { where: offWhere, ...offRest } = off;
+    expect(onWhere).toBeDefined();
+    expect(offWhere).toBeUndefined();
+    expect(onRest).toEqual(offRest);
+  });
+
+  it("the exit finding: on vs off is byte-identical except where", () => {
+    const events = [
+      event("exit", 100, {
+        reason: "REASON_ANR",
+        timestamp: 12345,
+        mainStack: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+
+    const on = find(events).find((f) => f.id.startsWith("exit-"))!;
+
+    delete process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    const off = find(events).find((f) => f.id.startsWith("exit-"))!;
+
+    const { where: onWhere, ...onRest } = on;
+    const { where: offWhere, ...offRest } = off;
+    expect(onWhere).toBeDefined();
+    expect(offWhere).toBeUndefined();
+    expect(onRest).toEqual(offRest);
+  });
 });
