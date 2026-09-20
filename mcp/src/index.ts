@@ -988,10 +988,29 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       tool: "recompositions",
       why: "the per-node counts and the state keys written just before",
     },
+    // GRA-64: a stall attributed to a LeakCanary heap dump — `blocking`
+    // confirms the pause's own window really does sit inside the dump's
+    // reconstructed one, rather than being a second, separate stall that
+    // happened to land nearby.
+    "main-thread-stall-heap-dump": {
+      tool: "blocking",
+      why: "confirms the pause sat inside the heap dump's own reconstructed window",
+    },
   };
 
+  /**
+   * GRA-64: the one finding id `FOLLOW_UP` cannot key on directly — `leak-
+   * <kind>-<leakingClass>` carries the leaking class in the id itself (see
+   * trace.ts), so every leak has its own, distinct id rather than one this
+   * map could list literally. `timeline` (`kinds: ["leak"]`) is where the
+   * rest of that leak's own fields — signature, leak count, the full trace
+   * text — actually live; `findings`' own `evidence` only ever carries a
+   * six-line head of it.
+   */
+  const LEAK_FOLLOW_UP = { tool: "timeline", why: 'the full trace text and leak count (kinds: ["leak"])' };
+
   function withFollowUp(finding: Finding) {
-    const next = FOLLOW_UP[finding.id];
+    const next = FOLLOW_UP[finding.id] ?? (finding.id.startsWith("leak-") ? LEAK_FOLLOW_UP : undefined);
     return next
       ? { ...finding, next: { tool: next.tool, window: "quote `window` above", shows: next.why } }
       : finding;

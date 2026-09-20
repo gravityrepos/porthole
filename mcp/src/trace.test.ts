@@ -704,6 +704,117 @@ describe("findingsOf", () => {
   });
 });
 
+describe("findingsOf: GRA-64 LeakCanary", () => {
+  const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
+
+  function leakEvent(
+    t: number,
+    over: Partial<{
+      kind: string;
+      signature: string;
+      leakingClass: string;
+      retainedHeapByteSize: number;
+      leakCount: number;
+      traceText: string;
+      heapDumpStartMs: number;
+      heapDumpEndMs: number;
+    }> = {},
+  ) {
+    return event("leak", t, {
+      kind: "application",
+      signature: "sig-1",
+      leakingClass: "com.example.shop.LeakyActivity",
+      retainedHeapByteSize: 256_000,
+      leakCount: 1,
+      traceText: "com.example.shop.LeakyActivity instance\nRetaining 256.0 kB in 1 object",
+      heapDumpStartMs: t - 2_500,
+      heapDumpEndMs: t,
+      ...over,
+    });
+  }
+
+  it("promotes an application leak to warning, with the retained size and the trace head", () => {
+    const findings = find([leakEvent(1_000)]);
+    const finding = findings.find((f) => f.id.startsWith("leak-application-"));
+    expect(finding).toMatchObject({
+      severity: "warning",
+      confidence: "observed",
+      title: "com.example.shop.LeakyActivity leaked — 250 kB retained",
+    });
+    expect(finding?.detail).toContain("LeakyActivity");
+  });
+
+  it("leaves a library leak at note, distinct from an application leak", () => {
+    const findings = find([
+      leakEvent(1_000, {
+        kind: "library",
+        signature: "sig-imm",
+        leakingClass: "android.view.inputmethod.InputMethodManager",
+      }),
+    ]);
+    const finding = findings.find((f) => f.id.startsWith("leak-library-"));
+    expect(finding?.severity).toBe("note");
+  });
+
+  it("two distinct leaks in one session become two separate findings", () => {
+    const findings = find([
+      leakEvent(1_000, { signature: "sig-a", leakingClass: "com.example.shop.LeakyActivity" }),
+      leakEvent(2_000, { signature: "sig-b", leakingClass: "com.example.shop.LeakyPresenter" }),
+    ]);
+    const leaks = findings.filter((f) => f.id.startsWith("leak-"));
+    expect(leaks).toHaveLength(2);
+  });
+
+  it("the same leak signature across two heap dumps is one finding, the worse retained size winning", () => {
+    const findings = find([
+      leakEvent(1_000, { signature: "sig-a", retainedHeapByteSize: 100_000 }),
+      leakEvent(5_000, { signature: "sig-a", retainedHeapByteSize: 400_000 }),
+    ]);
+    const leaks = findings.filter((f) => f.id.startsWith("leak-"));
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].evidence?.retainedHeapByteSize).toBe(400_000);
+  });
+
+  // -- open question 2: a heap-dump pause is not the app's own stall --------
+
+  it("a stall inside a heap dump's window is reported as the heap dump, at note, not as main-thread-stall", () => {
+    const events = [
+      // Dump runs [7_600, 10_000]; the watchdog's ping was overdue for the
+      // whole pause and reports a stall ending exactly when the dump does.
+      leakEvent(10_000, { heapDumpStartMs: 7_600, heapDumpEndMs: 10_000 }),
+      event("blocked", 10_000, { durationMs: 2_400, top: "a.B.c(B.kt:1)", stack: "a.B.c(B.kt:1)" }),
+    ];
+    const findings = find(events);
+    expect(findings.some((f) => f.id === "main-thread-stall")).toBe(false);
+    const attributed = findings.find((f) => f.id === "main-thread-stall-heap-dump");
+    expect(attributed).toMatchObject({
+      severity: "note",
+      confidence: "observed",
+      detail: "heap dump by LeakCanary",
+      count: 1,
+    });
+  });
+
+  it("a stall outside any heap dump's window is still reported as the app's own defect", () => {
+    const events = [
+      leakEvent(3_000, { heapDumpStartMs: 500, heapDumpEndMs: 3_000 }),
+      // Ten seconds later, well clear of the dump above.
+      event("blocked", 13_000, { durationMs: 400, top: "a.B.c(B.kt:1)", stack: "a.B.c(B.kt:1)" }),
+    ];
+    const findings = find(events);
+    expect(findings.some((f) => f.id === "main-thread-stall-heap-dump")).toBe(false);
+    const appStall = findings.find((f) => f.id === "main-thread-stall");
+    expect(appStall).toMatchObject({ severity: "error", count: 1 });
+  });
+
+  it("with no leak events at all, every stall is still reported as the app's own — unchanged behaviour", () => {
+    const events = [event("blocked", 500, { durationMs: 400, top: "a.B.c(B.kt:1)" })];
+    const findings = find(events);
+    expect(findings.some((f) => f.id === "main-thread-stall-heap-dump")).toBe(false);
+    expect(findings.find((f) => f.id === "main-thread-stall")?.count).toBe(1);
+  });
+});
+
 describe("findingsOf: http-call-slow (GRA-66)", () => {
   const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
 

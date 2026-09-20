@@ -27,6 +27,10 @@ sqlite = "2.4.0"
 sqldelight = "2.0.2"
 ktor = "3.0.3"
 dokka = "2.2.0"
+# GRA-64: the floor this module compiles LeakCanaryPorthole against — see
+# that file's own FLOOR_VERSION constant, which the setup hint quotes when a
+# present LeakCanary's API does not match it. Bump both together.
+leakcanaryAndroid = "2.14"
 
 [libraries]
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
@@ -76,6 +80,13 @@ work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work"
 sqldelight-android = { module = "app.cash.sqldelight:android-driver", version.ref = "sqldelight" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+# The umbrella artifact: its own Gradle module metadata publishes
+# leakcanary-android-core, shark-android and shark as `api`-scoped
+# dependencies, so this one line is enough to put leakcanary.LeakCanary,
+# leakcanary.OnHeapAnalyzedListener and shark.HeapAnalysis/Leak all on the
+# compile classpath — unlike the okio/okhttp pair above, nothing here needs
+# a second, explicit entry.
+leakcanary-android = { module = "com.squareup.leakcanary:leakcanary-android", version.ref = "leakcanaryAndroid" }
 
 # for the gradle-plugin build
 agp-api = { module = "com.android.tools.build:gradle-api", version.ref = "agp" }

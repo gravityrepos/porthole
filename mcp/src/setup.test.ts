@@ -151,8 +151,10 @@ describe("SNIPPETS stay in sync with README.md (GRA-65 EM: 'keep in sync by test
   // loop, so removing an entry (or emptying its snippet) fails here even
   // when the generated per-entry test it would have produced is simply
   // gone rather than failing.
-  it("covers all five integrations, each with a real, non-empty snippet", () => {
-    expect(Object.keys(SNIPPETS)).toHaveLength(5);
+  it("covers all six integrations, each with a real, non-empty snippet", () => {
+    // GRA-64 added `leakcanary` — see setup.ts's own UNLOCKS comment for why
+    // its snippet is a dependency coordinate rather than a builder line.
+    expect(Object.keys(SNIPPETS)).toHaveLength(6);
     for (const [name, snippet] of Object.entries(SNIPPETS)) {
       expect(snippet.trim().length, `${name}'s snippet must not be empty`).toBeGreaterThan(0);
     }

@@ -581,6 +581,28 @@ function networkAt(
   };
 }
 
+/**
+ * GRA-64: the distinct heap-dump pause windows a session's `leak` events
+ * describe — every leak LeakCanary found in one analysis carries the same
+ * `heapDumpStartMs`/`heapDumpEndMs` pair (see `LeakCanaryPorthole.kt`'s own
+ * `onHeapAnalyzed`), so this dedupes rather than returning one window per
+ * leak. Exported for `stallAttribution.test.ts`-shaped unit coverage
+ * without a full `findingsOf` call. Empty when there are no `leak` events —
+ * an analysis with zero leaks reconstructs no window at all, which is a
+ * known, documented gap: nothing here can attribute a stall to a heap dump
+ * that found nothing worth reporting.
+ */
+export function heapDumpWindowsOf(events: DeviceEvent[]): Array<{ from: number; to: number }> {
+  const seen = new Map<string, { from: number; to: number }>();
+  for (const event of events) {
+    if (event.event !== "leak") continue;
+    const from = num(event.data.heapDumpStartMs);
+    const to = num(event.data.heapDumpEndMs);
+    seen.set(`${from}:${to}`, { from, to });
+  }
+  return [...seen.values()];
+}
+
 export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
@@ -617,33 +639,71 @@ export function findingsOf(
 
   const stalls = events.filter((e) => e.event === "blocked");
   if (stalls.length > 0) {
-    const worst = stalls.reduce((a, b) =>
-      num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
-    );
-    // GRA-201: the same top-frame text `detail` already carries, resolved to
-    // where it lives under the project root — `where` is a fact about that
-    // frame, so it is derived from `detail`'s own source rather than
-    // reparsing `detail` after the `|| undefined` above has thrown the
-    // empty-string case away.
-    const topFrame = str(worst.data.top).split("\n")[0] || undefined;
-    const where = whereForFrame(topFrame);
-    findings.push({
-      id: "main-thread-stall",
-      severity: "error",
-      confidence: "observed",
-      title: `main thread blocked for ${num(worst.data.durationMs)}ms`,
-      detail: topFrame,
-      count: stalls.length,
-      during: markAt(marks, worst.t),
-      evidence: {
-        at: worst.t,
-        stack: str(worst.data.stack).split("\n").slice(0, 6),
-      },
-      // `blocked` is reported when the stall ends, so `worst.t` is its end and
-      // the start is however long before that its own duration says.
-      window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
-      ...(where ? { where } : {}),
-    });
+    // -----------------------------------------------------------------
+    // GRA-64 open question 2: LeakCanary pauses the whole VM for a heap
+    // dump, sometimes for seconds — long enough that the main-thread
+    // watchdog cannot tell that pause apart from a real hang once the
+    // process resumes. A stall whose own window falls inside a heap
+    // dump's reconstructed window (see `leak` events' `heapDumpStartMs`/
+    // `heapDumpEndMs`, carried by every leak LeakCanaryPorthole reported
+    // from that same dump) is LeakCanary's own diagnostic, not the app's
+    // defect, and is reported as that instead. Delimited so branches
+    // editing trace.ts in parallel do not collide with this section.
+    // -----------------------------------------------------------------
+    const heapDumpWindows = heapDumpWindowsOf(events);
+    const stallWindow = (s: DeviceEvent) => ({ from: s.t - num(s.data.durationMs), to: s.t });
+    const isHeapDumpStall = (s: DeviceEvent) => {
+      const w = stallWindow(s);
+      return heapDumpWindows.some((dump) => w.from <= dump.to && w.to >= dump.from);
+    };
+    const appStalls = stalls.filter((s) => !isHeapDumpStall(s));
+    const heapDumpStalls = stalls.filter(isHeapDumpStall);
+
+    if (appStalls.length > 0) {
+      const worst = appStalls.reduce((a, b) =>
+        num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
+      );
+      // GRA-201: the same top-frame text `detail` already carries, resolved to
+      // where it lives under the project root — `where` is a fact about that
+      // frame, so it is derived from `detail`'s own source rather than
+      // reparsing `detail` after the `|| undefined` above has thrown the
+      // empty-string case away.
+      const topFrame = str(worst.data.top).split("\n")[0] || undefined;
+      const where = whereForFrame(topFrame);
+      findings.push({
+        id: "main-thread-stall",
+        severity: "error",
+        confidence: "observed",
+        title: `main thread blocked for ${num(worst.data.durationMs)}ms`,
+        detail: topFrame,
+        count: appStalls.length,
+        during: markAt(marks, worst.t),
+        evidence: {
+          at: worst.t,
+          stack: str(worst.data.stack).split("\n").slice(0, 6),
+        },
+        // `blocked` is reported when the stall ends, so `worst.t` is its end and
+        // the start is however long before that its own duration says.
+        window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
+        ...(where ? { where } : {}),
+      });
+    }
+
+    if (heapDumpStalls.length > 0) {
+      const worst = heapDumpStalls.reduce((a, b) =>
+        num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
+      );
+      findings.push({
+        id: "main-thread-stall-heap-dump",
+        severity: "note",
+        confidence: "observed",
+        title: `main thread paused ${num(worst.data.durationMs)}ms for a LeakCanary heap dump`,
+        detail: "heap dump by LeakCanary",
+        count: heapDumpStalls.length,
+        during: markAt(marks, worst.t),
+        window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
+      });
+    }
   }
 
   // Completed only — see the same reasoning as `onMain` above: a status or an
@@ -817,6 +877,52 @@ export function findingsOf(
       window: eventWindow(trims),
     });
   }
+
+  // -------------------------------------------------------------------
+  // GRA-64: LeakCanary — one finding per distinct leak signature, the
+  // worst (highest-retained) occurrence winning when the same leak
+  // showed up in more than one heap dump this session, the same
+  // per-call-site dedup `strict_violation` below already does. An
+  // application leak — an app-code reference holding a dead Activity,
+  // Fragment or View — promotes to `warning`; a library leak LeakCanary
+  // already classifies as a known, framework-side defect stays a `note`.
+  // Delimited so branches editing trace.ts in parallel do not collide
+  // with this section.
+  // -------------------------------------------------------------------
+  const leakBySignature = new Map<string, DeviceEvent>();
+  for (const leak of events.filter((e) => e.event === "leak")) {
+    const signature = str(leak.data.signature) || str(leak.data.leakingClass);
+    const prior = leakBySignature.get(signature);
+    if (!prior || num(leak.data.retainedHeapByteSize) >= num(prior.data.retainedHeapByteSize)) {
+      leakBySignature.set(signature, leak);
+    }
+  }
+  for (const leak of leakBySignature.values()) {
+    const kind = str(leak.data.kind);
+    const isApplicationLeak = kind === "application";
+    const leakingClass = str(leak.data.leakingClass) || "unidentified object";
+    const retainedKb = Math.round(num(leak.data.retainedHeapByteSize) / 1024);
+    const traceHead = str(leak.data.traceText).split("\n").slice(0, 6).join("\n") || undefined;
+    findings.push({
+      id: `leak-${kind || "unknown"}-${leakingClass}`,
+      severity: isApplicationLeak ? "warning" : "note",
+      confidence: "observed",
+      title: isApplicationLeak
+        ? `${leakingClass} leaked${retainedKb > 0 ? ` — ${retainedKb} kB retained` : ""}`
+        : `${leakingClass} — a leak LeakCanary already classifies as known (library)`,
+      detail: traceHead,
+      count: num(leak.data.leakCount, 1),
+      during: markAt(marks, leak.t),
+      evidence: {
+        signature: str(leak.data.signature),
+        leakingClass,
+        retainedHeapByteSize: num(leak.data.retainedHeapByteSize),
+        leakCount: num(leak.data.leakCount, 1),
+      },
+      window: { from: leak.t, to: leak.t },
+    });
+  }
+  // -- end GRA-64 -------------------------------------------------------
 
   const retried = work.filter((w) => w.data.retrying === "true");
   if (retried.length > 0) {

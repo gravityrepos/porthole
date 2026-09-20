@@ -31,6 +31,7 @@ import androidx.work.WorkManager
 import com.example.shop.data.SyncCartWorker
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.shop.LeakFixture
 import com.example.shop.data.CartItem
 import live.gravitylabs.porthole.compose.PortholeScreen
 import live.gravitylabs.porthole.compose.collectAsNamedState
@@ -151,6 +152,9 @@ private fun Controls(viewModel: CartViewModel) {
             Button(onClick = { viewModel.fetchThumbnail() }) { Text("Thumbnail") }
             Button(onClick = { viewModel.blockTheMainThread() }) { Text("Block main") }
             Button(onClick = { viewModel.triggerStrictModeViolation(context) }) { Text("StrictMode") }
+            // GRA-64: a deliberate, obvious fixture — see LeakFixture's own
+            // doc comment for what to do after pressing it.
+            Button(onClick = { LeakFixture.leak(context) }) { Text("Leak activity") }
             Button(onClick = { viewModel.fetchWithKtor() }) { Text("Ktor") }
             Button(onClick = {
                 WorkManager.getInstance(context)

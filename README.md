@@ -1930,6 +1930,10 @@ look.
 The timeline puts the main thread lane next to dropped frames, because a block
 and the frames it cost are the same event seen twice.
 
+A stall that lines up with a [LeakCanary](#leakcanary) heap dump is reported
+as that, at `note`, rather than as a `main-thread-stall` finding pointed at
+the app.
+
 ## StrictMode
 
 `db-on-main-thread` above only ever sees Room and SQLDelight going through the
@@ -1994,6 +1998,49 @@ violation and never a number that stopped moving early.
 Needs API 28 (`penaltyListener`, which hands the violation over as an object
 instead of a log line). Below that, `strictMode.set(true)` installs nothing
 at all — no log-scraping fallback — and the `setup` tool says why.
+
+## LeakCanary
+
+LeakCanary already finds the leak and already writes the trace. What it does
+not do is put either one where an agent already looks — its own notification
+and on-device UI, not the timeline. If your app already ships it:
+
+```kotlin
+debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
+```
+
+No app code beyond the dependency. LeakCanary installs its own
+`ContentProvider` and starts watching automatically, the same
+zero-configuration shape `ComponentActivity`'s own `fullyDrawnReporter` gets
+for [startup](#startup); Porthole hooks the one seam it offers for "a heap
+was analyzed" — `LeakCanary.config.onHeapAnalyzedListener` — chaining onto
+whatever listener was already there, the same way every other integration
+here chains rather than replaces.
+
+Each leak LeakCanary classifies becomes its own event: the leaking object's
+class, the retained heap size, how many separate occurrences this one heap
+dump found, and LeakCanary's own rendered trace text. `findings` promotes an
+application leak — an app-code reference holding a dead Activity, Fragment or
+View — to `warning`, with the retained size and the head of the reference
+path; a library leak LeakCanary already recognizes and classifies as a known,
+framework-side defect stays a `note`.
+
+**Absent means silence, not a recommendation.** `setup` never suggests adding
+LeakCanary — it is a debug-only, opt-in dependency, and this project's `setup`
+tool otherwise only ever names a gap in something you already shipped. If it
+is present but its own API does not match what Porthole compiled against
+(floor: leakcanary-android 2.14), `setup` says exactly that — present but
+signature mismatch — rather than the generic "not hooked" every other
+integration falls back to.
+
+**A heap dump is not a stall, and `blocking` says so.** LeakCanary pauses the
+whole VM for the dump itself, sometimes for seconds — long enough that the
+main-thread watchdog cannot tell that pause apart from a real hang once the
+process resumes. Reconstructed from LeakCanary's own `createdAtTimeMillis`
+and `dumpDurationMillis`, that window is matched against any stall reported
+inside it: a stall LeakCanary's own dump caused is reported as exactly
+that — "heap dump by LeakCanary", `note`, not the app's defect — instead of
+becoming a `main-thread-stall` finding pointed at the wrong culprit.
 
 ## Startup
 

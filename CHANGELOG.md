@@ -265,6 +265,30 @@ PR that makes the change, not after the fact.
   the system's own launch work, and Android vitals' warm/hot thresholds are
   measured from the launch request itself — a materially different span, not
   a smaller number for the same one (GRA-60).
+- LeakCanary's own leaks, delivered where the agent is already looking. If a
+  debug build already ships `com.squareup.leakcanary:leakcanary-android`
+  (compileOnly on the runtime side, floor 2.14 — no app code beyond the
+  dependency, since LeakCanary installs itself automatically), Porthole
+  hooks `LeakCanary.config.onHeapAnalyzedListener`, chaining onto whatever
+  listener was already there. Each leak becomes its own `leak` event — the
+  leaking object's class, retained heap size, how many occurrences this
+  heap dump found, and LeakCanary's own rendered trace text (redacted,
+  bounded, the same path as everything else) — and `findings` promotes an
+  application leak to `warning` with the retained size and the head of the
+  reference path, leaving a library leak LeakCanary already classifies as
+  known at `note`. `setup` gains a `leakcanary` row with three states:
+  absent (silent — never recommended, since it is a debug-only opt-in
+  dependency this project otherwise never suggests adding), present and
+  hooked, and present but the API this module compiled against did not
+  match (named explicitly, not the generic "not hooked" every other
+  integration falls back to). A heap dump pauses the whole VM for seconds,
+  long enough that the main-thread watchdog cannot tell it apart from a
+  real hang — that window is reconstructed from LeakCanary's own
+  `createdAtTimeMillis`/`dumpDurationMillis`, and a stall inside it is
+  reported as "heap dump by LeakCanary" at `note` rather than as a
+  `main-thread-stall` pointed at the app. The sample gets a
+  `debugImplementation` LeakCanary dependency and a deliberate,
+  clearly-marked Activity leak behind a "Leak activity" button (GRA-64).
 
 ### Changed
 

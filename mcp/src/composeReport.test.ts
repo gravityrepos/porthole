@@ -156,21 +156,22 @@ describe("currentSourceFingerprint", () => {
    * runs — verified by comparing this function's output, run against this
    * repo's own real `sample/` module, against the fingerprint a real Gradle
    * build actually wrote into `sample/build/porthole/compose-report.json`
-   * (re-captured for GRA-69's QA pass, `git rev-parse HEAD` `943f68a` plus
-   * this pass's own `HighlightBadge` addition — AC3's isolated fixture for
-   * the live emulator loop, see `Screens.kt`'s own KDoc on it — and the
-   * `stability`/`Property` shape change; see `composeReportFixtures/
-   * PROVENANCE.md` on the Gradle-plugin side for the matching half of this
-   * proof). If this ever goes red on an unrelated PR, the two
-   * implementations have drifted — a real bug, not a fixture that needs a
-   * bump — unless `sample/`'s own `.kt` sources genuinely changed, which is
-   * exactly the case this pin exists to force a human to notice and
-   * re-verify against a fresh `./gradlew :sample:portholeComposeReport` run.
+   * (re-captured for GRA-64's own `LeakFixture.kt` addition and the "Leak
+   * activity" button in `Screens.kt` — `./gradlew :sample:portholeComposeReport
+   * -Pporthole.variant=roomDebug`, verified to match this module's own
+   * `currentSourceFingerprint` independently before the pin below was
+   * updated; see `composeReportFixtures/PROVENANCE.md` on the Gradle-plugin
+   * side for the matching half of this proof). If this ever goes red on an
+   * unrelated PR, the two implementations have drifted — a real bug, not a
+   * fixture that needs a bump — unless `sample/`'s own `.kt` sources
+   * genuinely changed, which is exactly the case this pin exists to force a
+   * human to notice and re-verify against a fresh
+   * `./gradlew :sample:portholeComposeReport` run.
    */
   it("matches the real Gradle-computed fingerprint for this repo's own sample module", () => {
     const sampleRoot = path.join(WORKTREE_ROOT, "sample");
     expect(currentSourceFingerprint(sampleRoot)).toBe(
-      "86a55d9abadb21be06ac2465b49ffbefd3b6ad9f35fa58880280f426ebb2e374",
+      "371fe827d8d4cb61b474c2e5a194452b5b73e27087e4789592ee457ace42162c",
     );
   });
 });

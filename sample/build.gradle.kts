@@ -93,4 +93,10 @@ dependencies {
     // The sample serves its own API from inside the app so the demo is
     // self-contained and deterministic. Swapping in a real base URL is one line.
     implementation(libs.mockwebserver)
+
+    // GRA-64: debugImplementation, the same as every real app would use it —
+    // never shipped in release, and never assumed by the runtime (Porthole's
+    // own runtime/build.gradle.kts has it compileOnly; see LeakCanaryPorthole
+    // for the classpath probe that makes an app without this line a no-op).
+    debugImplementation(libs.leakcanary.android)
 }

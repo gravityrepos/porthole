@@ -259,6 +259,9 @@ internal object EventKinds {
     const val STRICT_VIOLATION = "strict_violation"
     /** One completed app launch, phases from process fork to first frame. StartupCollector. */
     const val STARTUP = "startup"
+
+    /** One LeakCanary-classified leak (application or library) from a heap analysis. LeakCanaryPorthole (GRA-64). */
+    const val LEAK = "leak"
 }
 
 /**
