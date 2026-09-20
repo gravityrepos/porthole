@@ -352,17 +352,28 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
      * task across a plugin version bump and nothing else. Returns the (old,
      * new) version pair when that holds, or null the moment anything else
      * differs — including an [existing] entry written by [mcpCommand] (no
-     * `@version` arg to compare) or one whose `args` is a different shape
-     * entirely, both of which are exactly the deliberate-divergence case the
-     * ordinary refusal exists to protect.
+     * package arg to compare at all) or one whose `args` is a different
+     * shape entirely, both of which are exactly the deliberate-divergence
+     * case the ordinary refusal exists to protect.
+     *
+     * GRA-195 QA: every `.mcp.json` written before this ticket — every
+     * consumer on 0.2.2 or earlier — has the *unpinned* form,
+     * `"@gravitylabsllc/porthole"` with no `@version` at all. [PACKAGE_ARG_PATTERN]'s
+     * `@version` suffix is optional for exactly this reason: without it, the
+     * bare name never matches, `existing` is unpinned → pinned is
+     * indistinguishable from any other "different entry", and the very first
+     * run after upgrading the plugin — the case this whole ticket is for —
+     * is refused rather than rewritten. The old half of the returned pair is
+     * `null` for that case (nothing was pinned before), which [write] reads
+     * as "added", not "moved from".
      */
-    private fun versionOnlyDrift(existing: Map<String, Any?>, wanted: Map<String, Any?>): Pair<String, String>? {
+    private fun versionOnlyDrift(existing: Map<String, Any?>, wanted: Map<String, Any?>): Pair<String?, String>? {
         if (existing["command"] != wanted["command"] || existing["env"] != wanted["env"]) return null
         val existingArgs = existing["args"] as? List<*> ?: return null
         val wantedArgs = wanted["args"] as? List<*> ?: return null
         if (existingArgs.size != wantedArgs.size) return null
 
-        var drift: Pair<String, String>? = null
+        var drift: Pair<String?, String>? = null
         for (i in existingArgs.indices) {
             val e = existingArgs[i]
             val w = wantedArgs[i]
@@ -372,7 +383,10 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
             if (drift != null) return null
             val eMatch = (e as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
             val wMatch = (w as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
-            drift = eMatch.groupValues[1] to wMatch.groupValues[1]
+            // groupValues[1] is "" when the optional `@version` group did not
+            // participate — the unpinned shape — and that is the one place an
+            // empty string means "absent" rather than "pinned to nothing".
+            drift = eMatch.groupValues[1].ifEmpty { null } to wMatch.groupValues[1]
         }
         return drift
     }
@@ -445,8 +459,13 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         val what = if (existing != null) "replaced the entry in" else "added porthole to"
         logger.lifecycle("[porthole] $what ${file.path}")
         if (versionDrift != null) {
+            val (oldVersion, newVersion) = versionDrift
             logger.lifecycle(
-                "[porthole] npm package pin moved from ${versionDrift.first} to ${versionDrift.second}",
+                if (oldVersion == null) {
+                    "[porthole] npm package pin added: $newVersion"
+                } else {
+                    "[porthole] npm package pin moved from $oldVersion to $newVersion"
+                },
             )
         }
         if (file.resolveSibling("${file.name}.bak").isFile) {
@@ -748,5 +767,15 @@ internal fun adbArgs(adb: String, serial: String?, vararg rest: String): List<St
     addAll(rest)
 }
 
-/** Matches a pinned `args` element (`@gravitylabsllc/porthole@1.2.3`), capturing the version. */
-private val PACKAGE_ARG_PATTERN = Regex("^" + Regex.escape(PORTHOLE_UI_PACKAGE) + "@(.+)$")
+/**
+ * Matches an `args` element naming [PORTHOLE_UI_PACKAGE], pinned
+ * (`@gravitylabsllc/porthole@1.2.3`, capturing `1.2.3`) or bare
+ * (`@gravitylabsllc/porthole`, the unpinned shape every `.mcp.json` written
+ * before GRA-195 has — capturing group 1 does not participate, so
+ * `groupValues[1]` comes back `""`). The `@version` suffix is optional for
+ * exactly that reason: [PortholeMcpConfigTask.versionOnlyDrift] needs to
+ * recognise "was never pinned" as a version-only drift too, or upgrading the
+ * plugin past 0.2.2 would refuse its own fix on every existing consumer's
+ * first run.
+ */
+private val PACKAGE_ARG_PATTERN = Regex("^" + Regex.escape(PORTHOLE_UI_PACKAGE) + "(?:@(.+))?$")

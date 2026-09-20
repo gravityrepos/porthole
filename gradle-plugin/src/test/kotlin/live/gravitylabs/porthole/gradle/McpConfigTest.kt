@@ -220,6 +220,64 @@ class McpConfigTest : StubAdbFunctionalTest() {
     }
 
     /**
+     * GRA-195 QA: every `.mcp.json` written before this ticket — every
+     * consumer on 0.2.2 or earlier — has exactly this shape: `npx`, no
+     * `@version` on the package name at all. Without treating that bare name
+     * as "unpinned" (see `PortholeMcpConfigTask.PACKAGE_ARG_PATTERN`'s
+     * optional `@version` group), unpinned → pinned would not be
+     * recognised as a version-only drift, so the very first run after
+     * upgrading past 0.2.2 — the case this whole ticket exists for — would
+     * be refused rather than rewritten.
+     *
+     * The pre-GRA-195 fixture is built from a real run's own `env`, not typed
+     * by hand: `PORTHOLE_PROJECT_ROOT` canonicalizes differently depending on
+     * the host (GRA-223's `/private/var` on macOS), and this test's own
+     * assertions must not reconstruct that resolution to compare against
+     * it — the same lesson the class doc opens with, applied to a fixture
+     * this test writes itself rather than one the task writes.
+     *
+     * Mutation: in `PACKAGE_ARG_PATTERN`, drop the `(?:@(.+))?` alternation
+     * back to the required `@(.+)` and this fails — the second run falls
+     * through to the ordinary refusal instead of auto-rewriting, and the old
+     * bare entry survives untouched.
+     */
+    @Test
+    fun `an existing unpinned entry from before GRA-195 is a version-only drift too`() {
+        scratch(registerTask(packageVersion = "0.2.3"))
+        val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
+
+        // Roll the entry this run just wrote back to the pre-GRA-195 shape —
+        // same command, same env, only the pin removed from args.
+        val env = readPortholeEntry()["env"]
+        write(
+            ".mcp.json",
+            JsonOutput.prettyPrint(
+                JsonOutput.toJson(
+                    mapOf(
+                        "mcpServers" to mapOf(
+                            "porthole" to mapOf(
+                                "command" to "npx",
+                                "args" to listOf("-y", "@gravitylabsllc/porthole", "mcp"),
+                                "env" to env,
+                            ),
+                        ),
+                    ),
+                ),
+            ) + "\n",
+        )
+
+        val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
+
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@0.2.3", "mcp"), readPortholeEntry()["args"])
+        assertTrue(
+            "expected the pin-added notice (not \"moved from\"), got:\n${second.output}",
+            second.output.contains("npm package pin added: 0.2.3"),
+        )
+    }
+
+    /**
      * The narrow half of the follow-up: pairing the version bump with an
      * unrelated change — here, a different port, which lands in `env` — must
      * NOT be auto-rewritten. Only a difference confined to the pinned
