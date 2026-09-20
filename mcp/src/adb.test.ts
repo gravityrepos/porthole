@@ -960,6 +960,32 @@ describe("GRA-233: restartAppAsync/launchAppAsync judge success by the process c
     expect(adb.calls().filter((c) => c.includes("pidof")).length).toBeGreaterThanOrEqual(2);
   });
 
+  it("GRA-233 QA F15: a digit in adb's own stderr chatter (the daemon-starting notice) is never read as a pid — only stdout counts", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: { stdout: "Events injected: 1\n" },
+      // pidof genuinely found nothing (empty stdout), but the process still
+      // exits 0 — and adb's own one-time daemon-starting notice, which
+      // contains a digit, landed on stderr. A bare /\d/ over the merged
+      // output would misread "tcp:5037" as a pid.
+      [fakeAdbArgsKey(pidofArgs)]: {
+        stdout: "",
+        stderr: "* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+        exitCode: 0,
+      },
+    });
+
+    const result = await launchAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollTimeoutMs: 50,
+      pidPollIntervalMs: 10,
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
   it("resolves the launcher activity and reads Status/LaunchState/TotalTime from am start -W, never touching monkey at all", async () => {
     const adb = fakeAdb({
       [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "priority=0\ncom.example.shop/.MainActivity\n" },
@@ -1007,7 +1033,11 @@ describe("GRA-233: restartAppAsync/launchAppAsync judge success by the process c
       [fakeAdbArgsKey(forceStopArgs)]: {},
       [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
       [fakeAdbArgsKey(monkeyArgs)]: { stdout: "some noise, no confirmation line at all\n" },
-      [fakeAdbArgsKey(pidofArgs)]: { stdout: "9321\n" },
+      // GRA-233 QA F14: sequenced — the pid-before-force-stop read, then a
+      // genuinely DIFFERENT pid once the relaunch has landed. A single
+      // fixed pid here would read as the old process surviving force-stop,
+      // not as a successful restart.
+      [fakeAdbArgsKey(pidofArgs)]: [{ stdout: "9321\n" }, { stdout: "9455\n" }],
     });
 
     const result = await restartAppAsync(PKG, { serial: SERIAL, binary: adb.binaryPath, env: adb.env });
@@ -1018,6 +1048,33 @@ describe("GRA-233: restartAppAsync/launchAppAsync judge success by the process c
     const monkeyIndex = tags.findIndex((c) => c.includes("monkey"));
     expect(stopIndex).toBeGreaterThanOrEqual(0);
     expect(monkeyIndex).toBeGreaterThan(stopIndex);
+  });
+
+  it("GRA-233 QA F14: a force-stop that silently no-ops, followed by a launch that never actually lands, fails naming the surviving pid — not ok:true off the old process still answering pidof", async () => {
+    const adb = fakeAdb({
+      // Force-stop itself reports success (exit 0, no output) even though
+      // nothing was actually torn down — the exact silent-no-op this
+      // finding is about.
+      [fakeAdbArgsKey(forceStopArgs)]: {},
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: { exitCode: 1, stderr: "No activities found to run, monkey aborted.\n" },
+      // The SAME pid, every single call — the old process never left.
+      [fakeAdbArgsKey(pidofArgs)]: { stdout: "9321\n" },
+    });
+
+    const result = await restartAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollTimeoutMs: 50,
+      pidPollIntervalMs: 10,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("force-stop did not end pid 9321");
+    // Not the launcher's own output this time — the pid-survival reason is
+    // the more specific and more actionable of the two.
+    expect(result.output).not.toContain("No activities found to run");
   });
 
   it("a force-stop that itself fails short-circuits before ever trying resolve-activity or monkey", async () => {
