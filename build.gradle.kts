@@ -48,17 +48,62 @@ subprojects {
 // but no plugin is applied at the root so the root project itself has no `test`
 // or `check` to configure. Registering them adds the root's own entry to that
 // match; the subprojects keep contributing theirs independently.
+//
+// GRA-121: that name-matching is exactly why unqualified `./gradlew test` and
+// `check` already reached the subprojects before this change — Gradle
+// selects every task named `test` (or `check`) anywhere in the build,
+// including each subproject's own lifecycle task, regardless of what this
+// root task depends on. A *qualified* `:test` or `:check`, by contrast, only
+// ever runs tasks the root project itself declares as dependencies, and the
+// two registrations below used to name only the plugin's. `:test` therefore
+// ran nothing but the plugin's tests while unqualified `test` ran
+// everything, two commands that looked interchangeable and were not.
+//
+// Each now also names the three subprojects' own `test`/`check` lifecycle
+// tasks explicitly — not `:runtime`/`:runtime-noop`'s `testDebugUnitTest`
+// alone, which would leave out `testReleaseUnitTest`: unqualified `test`
+// already runs both, via the same name-matching described above, so
+// dependency parity has to mean the same two, not just the one porthole
+// itself instruments. `:test`/`:check` (qualified) now depend on the
+// identical task set unqualified `test`/`check` reaches, so both forms mean
+// the same thing — verified below by diffing `--dry-run` output.
 val pluginBuild = gradle.includedBuild("gradle-plugin")
 
 tasks.register("test") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
-    description = "Runs the Gradle plugin's tests, which live in an included build."
+    description = "Runs every module's tests: the three Android subprojects and the Gradle plugin, which lives in an included build."
     dependsOn(pluginBuild.task(":test"))
+    dependsOn(":runtime:test", ":runtime-noop:test", ":sample:test")
 }
 
 tasks.register("check") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
-    description = "Runs the Gradle plugin's checks, which live in an included build."
+    description = "Runs every module's checks: the three Android subprojects and the Gradle plugin, which lives in an included build."
+    dependsOn(pluginBuild.task(":check"))
+    dependsOn(":runtime:check", ":runtime-noop:check", ":sample:check")
+}
+
+// GRA-121: `build` used to compile the plugin — a side effect of putting it
+// on this build's classpath via `pluginManagement { includeBuild(...) } ` in
+// settings.gradle.kts, not of any task depending on it — and verify none of
+// it: no root `build` task existed at all (`:build` failed outright,
+// "task 'build' is ambiguous"), and unqualified `./gradlew build` reached
+// the three Android subprojects' own `build` tasks purely by the same
+// name-matching described above, never the plugin's `check`.
+//
+// Depends on the included build's `check`, not its `build`: `build` in
+// gradle-plugin/build.gradle.kts is `java-gradle-plugin`'s/
+// `com.gradle.plugin-publish`'s own assemble path — the plugin jar, sources
+// jar and the Portal publish bundle — none of which an ordinary local
+// `./gradlew build` has ever produced or needs to; that is what
+// `releaseDryRun` above exists to exercise deliberately, with
+// `publishToMavenLocal`, not `build`. Depending on `:build` here would make
+// every local build assemble publish artifacts nobody asked for, just to
+// prove the plugin still passes its own tests — `check` proves exactly
+// that and nothing more.
+tasks.register("build") {
+    group = LifecycleBasePlugin.BUILD_GROUP
+    description = "Assembles and checks the three Android subprojects (via name-matching, same as before), and now also verifies — but does not assemble or publish — the Gradle plugin."
     dependsOn(pluginBuild.task(":check"))
 }
 

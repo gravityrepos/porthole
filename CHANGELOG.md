@@ -331,6 +331,25 @@ PR that makes the change, not after the fact.
   negative, or past the same 5000ms line `startup-slow` already draws for
   "this cold startup is excessive." Neither side changes when the other is
   absent (GRA-231).
+- The root lifecycle tasks now mean what their names say. `./gradlew :test`
+  (qualified) used to run only the Gradle plugin's tests — the root `test`
+  task named just the plugin's as a dependency — while unqualified
+  `./gradlew test` also ran the three Android subprojects', reached only by
+  Gradle's own cross-project name-matching; the two commands looked
+  interchangeable and were not (`:check` had the same gap). `test`/`check`
+  now also depend explicitly on `:runtime:test`/`:runtime-noop:test`/
+  `:sample:test` and the equivalent `check`s, so `:test`/`:check` and their
+  unqualified forms depend on the identical task set — confirmed by diffing
+  `./gradlew :test --dry-run` against `./gradlew test --dry-run` (and the
+  `check` pair) task-for-task. `./gradlew build` used to compile the plugin,
+  as a side effect of putting it on this build's classpath, and verify none
+  of it: no root `build` task existed at all (`:build` failed outright,
+  "task 'build' is ambiguous"). `build` is now registered at the root and
+  depends on the plugin's `check` — not its `build`, which is
+  `java-gradle-plugin`'s/`com.gradle.plugin-publish`'s own
+  assemble-and-publish-bundle path that `releaseDryRun` already exercises
+  deliberately elsewhere, and that an ordinary local build has no reason to
+  produce (GRA-121).
 
 ### Fixed
 
