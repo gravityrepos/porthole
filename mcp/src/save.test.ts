@@ -95,7 +95,13 @@ describe("coverageNote", () => {
 
 describe("buildSavedTrace", () => {
   const events = [
-    ev(1_000, "db", { phase: "end", sql: "SELECT 1", thread: "main", durationMs: 12, onMainThread: "true" }),
+    ev(1_000, "db", {
+      phase: "end",
+      sql: "SELECT 1",
+      thread: "main",
+      durationMs: 12,
+      onMainThread: "true",
+    }),
     ev(1_100, "blocked", { durationMs: 420, stack: "com.app.Thing.work(Thing.kt:10)" }),
   ];
 
@@ -202,15 +208,31 @@ describe("a saved trace works with report/compare unmodified", () => {
   }
 
   const events = [
-    ev(1_000, "db", { phase: "end", sql: "SELECT 1", thread: "main", durationMs: 12, onMainThread: "true" }),
+    ev(1_000, "db", {
+      phase: "end",
+      sql: "SELECT 1",
+      thread: "main",
+      durationMs: 12,
+      onMainThread: "true",
+    }),
     ev(1_100, "blocked", { durationMs: 420, stack: "com.app.Thing.work(Thing.kt:10)" }),
     ev(1_200, "frame", { totalMs: 30, missedFrames: 1, worstPhase: "layoutMeasure" }),
   ];
-  const hello = { packageName: "com.example.shop", versionName: "1.0.0", device: "Pixel", sdkInt: 34 };
+  const hello = {
+    packageName: "com.example.shop",
+    versionName: "1.0.0",
+    device: "Pixel",
+    sdkInt: 34,
+  };
   // None of `events` above carries a device/profile event, so this is the
   // same 60Hz-fallback-from-`hello` shape `buildTrace` always produced here
   // — resolved explicitly now rather than derived inside `buildTrace` itself.
-  const profile = resolveProfile({ liveEvents: events, windowTo: 2_000, sessionProfile: null, hello });
+  const profile = resolveProfile({
+    liveEvents: events,
+    windowTo: 2_000,
+    sessionProfile: null,
+    hello,
+  });
 
   it("AC2: porthole report renders identically to a report from an equivalent capture run", () => {
     const saved = buildSavedTrace({
@@ -396,7 +418,12 @@ describe("saveFromSessions (porthole save)", () => {
     writer.append({ event: "recompose", t: 110_000, seq: 1, data: {} });
     await writer.flush();
 
-    const result = await saveFromSessions({ root, projectRoot: root, sinceMs: 5_000, scenario: "recent" });
+    const result = await saveFromSessions({
+      root,
+      projectRoot: root,
+      sinceMs: 5_000,
+      scenario: "recent",
+    });
     expect(result.code).toBe(0);
 
     const outFile = defaultOutPath(root, "recent");
@@ -415,7 +442,13 @@ describe("saveFromSessions (porthole save)", () => {
     writer.append({ event: "recompose", t: 20_000, seq: 1, data: {} });
     await writer.flush();
 
-    const result = await saveFromSessions({ root, projectRoot: root, from: 0, to: 20_000, scenario: "early" });
+    const result = await saveFromSessions({
+      root,
+      projectRoot: root,
+      from: 0,
+      to: 20_000,
+      scenario: "early",
+    });
     expect(result.code).toBe(0);
     const outFile = defaultOutPath(root, "early");
     const content = JSON.parse(await readFile(outFile, "utf8"));
@@ -436,7 +469,13 @@ describe("saveFromSessions (porthole save)", () => {
     writer.append({ event: "recompose", t: 90_000, seq: 1, data: {} }); // session's own lastT — far past the window asked for
     await writer.flush();
 
-    const result = await saveFromSessions({ root, projectRoot: root, from: 10_000, to: 20_000, scenario: "mid" });
+    const result = await saveFromSessions({
+      root,
+      projectRoot: root,
+      from: 10_000,
+      to: 20_000,
+      scenario: "mid",
+    });
     expect(result.code).toBe(0);
     const outFile = defaultOutPath(root, "mid");
     const content = JSON.parse(await readFile(outFile, "utf8"));
@@ -468,7 +507,13 @@ describe("saveFromSessions (porthole save)", () => {
     await writer.flush();
 
     const customOut = path.join(root, "custom.json");
-    const result = await saveFromSessions({ root, projectRoot: root, from: 0, to: 1_000, out: customOut });
+    const result = await saveFromSessions({
+      root,
+      projectRoot: root,
+      from: 0,
+      to: 1_000,
+      out: customOut,
+    });
     expect(result.code).toBe(0);
     await expect(readFile(customOut, "utf8")).resolves.toBeTruthy();
   });
@@ -671,16 +716,30 @@ describe("save_moment (MCP tool)", () => {
     const { timeline, client } = await buildToolRig(500_000, "device-ac1");
 
     const target = timeline.buffer().length + 2;
-    fakeDevice!.emit("db", 1_000, { phase: "end", sql: "SELECT 1", thread: "main", durationMs: 12, onMainThread: "true" });
-    fakeDevice!.emit("blocked", 1_100, { durationMs: 420, stack: "com.app.Thing.work(Thing.kt:10)" });
+    fakeDevice!.emit("db", 1_000, {
+      phase: "end",
+      sql: "SELECT 1",
+      thread: "main",
+      durationMs: 12,
+      onMainThread: "true",
+    });
+    fakeDevice!.emit("blocked", 1_100, {
+      durationMs: 420,
+      stack: "com.app.Thing.work(Thing.kt:10)",
+    });
     await waitUntil(() => timeline.buffer().length >= target, 10_000);
 
-    const findingsResult = await client.callTool("findings", { from: 0, to: 2_000 });
+    const findingsResult = await client.callTool("findings", {
+      detail: "normal",
+      from: 0,
+      to: 2_000,
+    });
     expect(findingsResult.isError).toBeFalsy();
     const findingsPayload = findingsResult.json as FindingsPayload;
     expect(findingsPayload.findings.length).toBeGreaterThan(0);
 
     const saveResult = await client.callTool("save_moment", {
+      detail: "normal",
       from: findingsPayload.window.from,
       to: findingsPayload.window.to,
       scenario: "ac1-test",
@@ -717,7 +776,12 @@ describe("save_moment (MCP tool)", () => {
     fakeDevice!.emit("recompose", 10_000, { name: "Cart" });
     await waitUntil(() => timeline.buffer().length >= target, 10_000);
 
-    const result = await client.callTool("save_moment", { from: 0, to: 10_000, scenario: "ac4-test" });
+    const result = await client.callTool("save_moment", {
+      detail: "normal",
+      from: 0,
+      to: 10_000,
+      scenario: "ac4-test",
+    });
     expect(result.isError).toBeFalsy();
     const payload = result.json as SaveMomentPayload;
     expect(payload.window).toEqual({ from: 0, to: 10_000, ms: 10_000 });
@@ -735,7 +799,12 @@ describe("save_moment (MCP tool)", () => {
     fakeDevice!.emit("recompose", 500, { name: "Cart" });
     await waitUntil(() => timeline.buffer().length >= target, 10_000);
 
-    const result = await client.callTool("save_moment", { from: 0, to: 1_000, scenario: "../../../../tmp/evil" });
+    const result = await client.callTool("save_moment", {
+      detail: "normal",
+      from: 0,
+      to: 1_000,
+      scenario: "../../../../tmp/evil",
+    });
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/scenario/);
   });
@@ -746,7 +815,7 @@ describe("save_moment (MCP tool)", () => {
     fakeDevice!.emit("recompose", 500, { name: "Cart" });
     await waitUntil(() => timeline.buffer().length >= target, 10_000);
 
-    const result = await client.callTool("save_moment", { from: 0, to: 1_000 });
+    const result = await client.callTool("save_moment", { detail: "normal", from: 0, to: 1_000 });
     expect(result.isError).toBeFalsy();
     const payload = result.json as SaveMomentPayload;
     expect(payload.scenario).toBe("moment-0-1000");
@@ -755,7 +824,7 @@ describe("save_moment (MCP tool)", () => {
 
   it("fails cleanly when there is no window to save at all (missing-input case, self-check a)", async () => {
     const { client } = await buildToolRig(2_000, "device-empty");
-    const result = await client.callTool("save_moment", {});
+    const result = await client.callTool("save_moment", { detail: "normal" });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("No window to save");
   });
@@ -765,7 +834,7 @@ describe("save_moment (MCP tool)", () => {
     // Zod's own input validation on the shared `windowShape` (index.ts)
     // rejects this before the handler ever runs — surfaced as an MCP error
     // result, not a thrown/rejected client call.
-    const result = await client.callTool("save_moment", { sinceMs: -5 });
+    const result = await client.callTool("save_moment", { detail: "normal", sinceMs: -5 });
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/greater than 0|sinceMs/);
   });

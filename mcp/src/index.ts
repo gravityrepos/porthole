@@ -7,7 +7,14 @@ import { z } from "zod";
 import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { launchAppAsync, resolveProjectRoot, resolveSdkDir, restartAppAsync, runAdb, runAdbAsync } from "./adb.js";
+import {
+  launchAppAsync,
+  resolveProjectRoot,
+  resolveSdkDir,
+  restartAppAsync,
+  runAdb,
+  runAdbAsync,
+} from "./adb.js";
 import {
   checkInstalledApp,
   describeDevices,
@@ -66,7 +73,15 @@ import {
   sessionsRoot as sessionsRootPath,
   type SessionEvent,
 } from "./sessions.js";
-import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
+import {
+  InvalidScenarioError,
+  buildSavedTrace,
+  coverageNote,
+  defaultOutPath,
+  defaultScenarioName,
+  validateScenario,
+  writeSavedTrace,
+} from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
 import {
@@ -79,6 +94,20 @@ import {
 } from "./composeReport.js";
 import { captureScreenshot } from "./screenshot.js";
 import { buildSetupReport, type SetupEntry } from "./setup.js";
+import {
+  byteLength,
+  compactJson,
+  describeSemanticsTreeStats,
+  describeTimelineHighlights,
+  describeUnattributableFields,
+  detailShape,
+  renderDetail,
+  resolveDetail,
+  semanticsTreeStats,
+  timelineHighlights,
+  unattributableStateFields,
+  type DetailLevel,
+} from "./render.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -141,7 +170,10 @@ interface AdbCallOptions {
 async function waitForCaptureToStart(devicePath: string, options: AdbCallOptions): Promise<void> {
   const deadline = Date.now() + RESTART_POLL_TIMEOUT_MS;
   for (;;) {
-    const probe = await runAdbAsync(["shell", "test", "-e", devicePath], { ...options, timeoutMs: 2_000 });
+    const probe = await runAdbAsync(["shell", "test", "-e", devicePath], {
+      ...options,
+      timeoutMs: 2_000,
+    });
     if (probe.ok) return;
     if (Date.now() >= deadline) return;
     await new Promise((resolveWait) => setTimeout(resolveWait, RESTART_POLL_INTERVAL_MS));
@@ -258,14 +290,23 @@ type ToolContentBlock = { type: "text"; text: string };
  * no module-local binding to intercept: the function under test *is* the
  * chokepoint, not a wrapper around one.
  */
-export function joinSummaryAndPayload(summary: string, ...payload: [unknown] | []): ToolContentBlock[] {
+export function joinSummaryAndPayload(
+  summary: string,
+  ...payload: [unknown] | []
+): ToolContentBlock[] {
   const blocks: ToolContentBlock[] = [{ type: "text", text: summary }];
   if (payload.length > 0) {
     // JSON.stringify(undefined) is the JS value `undefined`, not a string —
     // the `?? "null"` keeps this block's `text` a real string always (the
     // MCP content schema requires one), and keeps the payload something
     // `JSON.parse` can read back rather than a block with no usable text.
-    blocks.push({ type: "text", text: JSON.stringify(payload[0], null, 2) ?? "null" });
+    //
+    // GRA-68: compact, not pretty-printed (no third `, null, 2` argument) —
+    // an agent reading this back with `JSON.parse` never sees the
+    // indentation, and every byte of it used to be paid for anyway. See
+    // render.ts's own doc comment for why bytes matter enough to change
+    // this.
+    blocks.push({ type: "text", text: JSON.stringify(payload[0]) ?? "null" });
   }
   return blocks;
 }
@@ -342,9 +383,63 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
    * is flattened by the caller's own `await`/`return` exactly as returning
    * the value directly would be.
    */
-  async function ok(summary: string, payload: unknown): Promise<ToolResult> {
-    const { summary: withBanner, payload: withSinceLast } = await attachSinceLastAndBanner(summary, payload);
-    return { content: joinSummaryAndPayload(withBanner, withSinceLast) };
+  /**
+   * GRA-68: `detail` is threaded through every call site as a per-handler
+   * option rather than a positional argument, so the ~50 existing
+   * `ok(summary, payload)` call sites across this file (several per
+   * multi-branch handler — `porthole_connect` alone has nine) needed to
+   * change in exactly one place each: the handler's own `detail` picked up
+   * off its destructured params and passed once, not threaded by hand
+   * through every branch. `full`, when given, is a distinct, bigger payload
+   * a tool built for `detail: "full"` (today's old, uncapped default —
+   * `timeline`'s 500 events, `semantics_tree`'s 1500 nodes); omitted, the
+   * tool has nothing bigger to offer than `payload` itself, and `"full"`
+   * falls back to it. Whichever payload is actually used still gets the
+   * same `sinceLast` field `payload` does — GRA-55's guarantee must hold at
+   * `"full"` too, not just at the level every tool used to always return.
+   *
+   * Renamed from `ok` to `okShared`: every handler below now declares its
+   * own `const ok = (summary, payload, full?) => okShared(summary, payload,
+   * { detail, full })` as its first statement, shadowing this one for the
+   * rest of that handler's body. That is what lets the dozens of existing
+   * `ok(summary, payload)` call sites keep reading exactly as they did
+   * before this ticket — a shadowing `const ok = (...) => ok(...)` inside
+   * its own initializer would recurse into itself, not this function, which
+   * is the one reason the rename is needed at all.
+   */
+  async function okShared(
+    summary: string,
+    payload: unknown,
+    options?: { detail?: DetailLevel; full?: unknown; fullBytesHint?: number },
+  ): Promise<ToolResult> {
+    const { summary: withBanner, payload: withSinceLast } = await attachSinceLastAndBanner(
+      summary,
+      payload,
+    );
+    const sinceLast =
+      withSinceLast !== null && typeof withSinceLast === "object" && !Array.isArray(withSinceLast)
+        ? (withSinceLast as Record<string, unknown>).sinceLast
+        : undefined;
+    const fullWithSinceLast =
+      options?.full !== undefined &&
+      options.full !== null &&
+      typeof options.full === "object" &&
+      !Array.isArray(options.full)
+        ? { ...(options.full as Record<string, unknown>), sinceLast }
+        : options?.full;
+    const decision = renderDetail({
+      summary: withBanner,
+      normalPayload: withSinceLast,
+      fullPayload: fullWithSinceLast,
+      fullBytesHint: options?.fullBytesHint,
+      detail: resolveDetail(options?.detail),
+    });
+    return {
+      content:
+        decision.payload !== undefined
+          ? joinSummaryAndPayload(decision.summaryText, decision.payload)
+          : joinSummaryAndPayload(decision.summaryText),
+    };
   }
 
   /**
@@ -370,11 +465,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     // own reply before it is summarised and returned, without every call
     // site re-implementing the try/catch above just to touch the payload.
     augment?: (value: T) => T,
+    // GRA-68: threaded through to `ok()` — see that function's own comment.
+    detail?: DetailLevel,
+    // GRA-68: `semantics_tree`'s own need — see `okShared`'s `fullBytesHint`
+    // doc comment. Every other `call<T>` site leaves this undefined.
+    fullBytesHint?: number,
   ) {
     try {
       const raw = await device.request<T>(method, params);
       const result = augment ? augment(raw) : raw;
-      return ok(summarise(result), result);
+      return okShared(summarise(result), result, { detail, fullBytesHint });
     } catch (error) {
       return fail(error);
     }
@@ -552,7 +652,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       : "an unknown build";
     const frame = latest.topAppFrame ? ` Top app frame: ${latest.topAppFrame}.` : "";
     return (
-      `Not connected because the app died: ${latest.reason} (${build}) at ${latest.at}.` + frame + " "
+      `Not connected because the app died: ${latest.reason} (${build}) at ${latest.at}.` +
+      frame +
+      " "
     );
   }
 
@@ -614,10 +716,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .describe(
         '"last" (the default when sinceMs/from/to are all omitted) starts where the previous ' +
           "window-taking tool call on this session left off, so nothing since is missed and " +
-          'nothing already examined is re-read. On the very first call this session has ever made, ' +
+          "nothing already examined is re-read. On the very first call this session has ever made, " +
           '"last" behaves exactly like today\'s default (the whole buffer). "all" is the reset: the ' +
           "whole buffer plus disk, same as every call before this existed, and it clears the " +
-          "watermark that \"last\" tracks.",
+          'watermark that "last" tracks.',
       ),
   };
 
@@ -838,7 +940,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
     if (state.digest) {
       const { from, to } = state.digest.window;
-      return { from, to, ms: Math.max(0, to - from), sinceLast: true, firstEver: false, nothingNew: false };
+      return {
+        from,
+        to,
+        ms: Math.max(0, to - from),
+        sinceLast: true,
+        firstEver: false,
+        nothingNew: false,
+      };
     }
 
     // GRA-189: nothing new, and nothing to fall back to (a window-taking
@@ -1078,10 +1187,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "PORTHOLE_SERIAL is not set. `adb devices` lists them; this tool does too, in its " +
               "payload, when it cannot pick one on its own.",
           ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ exitTrace, serial }): Promise<ToolResult> => {
+    async ({ exitTrace, serial, detail }): Promise<ToolResult> => {
+      // GRA-68: shadows the outer `ok` for the rest of this handler, so
+      // every existing `ok(summary, payload)` call site below keeps
+      // compiling unchanged and still picks up this call's own `detail` —
+      // see `okShared`'s own doc comment for why the outer function had to
+      // be renamed to make that possible.
+      //
+      // `effectiveDetail` (not `detail` directly): `exitTrace` is content an
+      // agent explicitly asked to see, not a headline number — returning
+      // "summary" (no payload at all, since that is now the default) the
+      // moment `exitTrace` is passed would silently drop the one thing the
+      // call was for. When `detail` was not given at all and `exitTrace`
+      // was, this call behaves as `detail: "normal"` instead — set below,
+      // once `exitTraceMs` is known, and read here through closure since
+      // `ok` is only ever actually called after that point.
+      let effectiveDetail = detail;
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail: effectiveDetail, full });
       // GRA-62: idempotent and invisible to the app under test — the one
       // exception the EM's ruling on this ticket carves out of
       // `readOnlyHint: true`. Gated on `ownsDeviceConnection` (see its own
@@ -1195,6 +1322,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       let exitTraceResult: unknown = null;
       if (exitTraceMs !== null) {
+        // GRA-68: see the `effectiveDetail` comment above `ok`'s own
+        // declaration — an explicit `exitTrace` request bumps the default
+        // up to "normal" so the trace text this call exists to fetch is
+        // not the one thing "summary" quietly withholds. An explicit
+        // `detail` from the caller still wins either way.
+        if (effectiveDetail === undefined) effectiveDetail = "normal";
         try {
           exitTraceResult = await device.request("exit_trace", { timestamp: exitTraceMs });
         } catch (error) {
@@ -1225,7 +1358,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // must run no adb command against one — `cachedStatus()` is the
       // in-memory-only view `status()` itself falls back on.
       const ringStatus = ownsDeviceConnection
-        ? await ring.status({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary })
+        ? await ring.status({
+            serial: serial ?? process.env.PORTHOLE_SERIAL,
+            env: adbEnv,
+            binary: adbBinary,
+          })
         : ring.cachedStatus();
 
       const payload = {
@@ -1332,7 +1469,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .boolean()
           .optional()
           .default(false)
-          .describe("Launch the app if it is installed but not currently running. Ignored when `restart` is true."),
+          .describe(
+            "Launch the app if it is installed but not currently running. Ignored when `restart` is true.",
+          ),
         restart: z
           .boolean()
           .optional()
@@ -1341,10 +1480,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             "Force-stop and relaunch the app even if it is already running, for a fresh session and " +
               "an empty buffer. Takes priority over `launch`.",
           ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ serial, packageName, launch, restart }): Promise<ToolResult> => {
+    async ({ serial, packageName, launch, restart, detail }): Promise<ToolResult> => {
+      // GRA-68: see porthole_status's identical shadow for why this is a
+      // local redeclaration of the same name, not a differently-named
+      // wrapper.
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const adbOptions: AdbCallOptions = { env: adbEnv, binary: adbBinary };
 
       const listed = await listDevices(adbOptions);
@@ -1377,7 +1522,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // below uses for everything after the forward — since a caller naming
       // a package is asking about that one, not whatever this server was
       // configured for.
-      const forward = await ensureForward(PORT, chosenSerial, packageName || APPLICATION_ID, LEGACY_TCP_PORT, adbOptions);
+      const forward = await ensureForward(
+        PORT,
+        chosenSerial,
+        packageName || APPLICATION_ID,
+        LEGACY_TCP_PORT,
+        adbOptions,
+      );
       if (!forward.ok) {
         return ok(`Found ${chosenSerial}, but could not forward the port: ${forward.output}`, {
           serial: chosenSerial,
@@ -1391,7 +1542,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // seen before it exited — since that is almost always still the app
       // someone is asking about.
       const targetPackage =
-        packageName || APPLICATION_ID || device.hello?.packageName || device.lastExited?.hello.packageName;
+        packageName ||
+        APPLICATION_ID ||
+        device.hello?.packageName ||
+        device.lastExited?.hello.packageName;
       if (!targetPackage) {
         return ok(
           `Forwarded port ${PORT} to ${chosenSerial}. No package name is known to check — pass ` +
@@ -1464,7 +1618,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       if (!info.running) {
         if (launch) {
-          const result = await launchAppAsync(targetPackage, { ...adbOptions, serial: chosenSerial });
+          const result = await launchAppAsync(targetPackage, {
+            ...adbOptions,
+            serial: chosenSerial,
+          });
           return result.ok
             ? ok(`Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ${chosenSerial}.`, {
                 serial: chosenSerial,
@@ -1525,10 +1682,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "several. This names which library is unwired, never where in the project to change it.\n\n" +
         "Call this once, early: `porthole_status` already names it whenever an integration looks " +
         "present but unwired, so you rarely have to remember to reach for it yourself.",
-      inputSchema: {},
+      inputSchema: { ...detailShape },
       annotations: { readOnlyHint: true },
     },
-    async (): Promise<ToolResult> => {
+    async ({ detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       try {
         const entries = await device.request<SetupEntry[]>("setup", {});
         const report = buildSetupReport(entries);
@@ -1580,7 +1739,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "find which phase was slow, not to quote as what a user's release build would see. Every " +
         "launch in the window is judged on its own — reopening the app does not erase an earlier " +
         "slow launch's own finding — but `startup-slow` and the fully-drawn note only ever judge " +
-        "the cold launch (`originKind: \"fork\"`): a warm/hot relaunch's `totalMs` starts from the " +
+        'the cold launch (`originKind: "fork"`): a warm/hot relaunch\'s `totalMs` starts from the ' +
         "relaunched Activity's own onCreate/onStart, already inside the system's own launch work, " +
         "not the launch request `am start -W` (and Android vitals) measure from — which is also why " +
         "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.\n\n" +
@@ -1604,10 +1763,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "still waiting on one already in flight. `porthole_status`'s `ring.lastSnapshot` carries the " +
         "same result independently, for when the next `findings` call is not the first place you " +
         "look.",
-      inputSchema: windowShape,
+      inputSchema: { ...windowShape, ...detailShape },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, since }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, since, detail }): Promise<ToolResult> => {
+      // GRA-68: see porthole_status's identical shadow for why.
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const span = await resolveWindowSince({ sinceMs, from, to, since });
       if (!span) {
         // resolveWindow returns null whenever the ring is empty, which is not
@@ -1651,7 +1813,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // saying here too, not only from porthole_status, since this is
         // often the first tool an agent calls.
         if (device.packageMismatch) {
-          return ok(notice + device.packageMismatch, { window: null, findings: [], connected, exitedProcess });
+          return ok(notice + device.packageMismatch, {
+            window: null,
+            findings: [],
+            connected,
+            exitedProcess,
+          });
         }
         const summary = `Connected to ${device.hello!.packageName}, nothing buffered yet. Ask again in a moment.`;
         return ok(notice + summary, { window: null, findings: [], connected, exitedProcess });
@@ -1807,10 +1974,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // fail with "more than one device/emulator" — silently, by design
       // (this never fails `findings` itself), which was caught on this
       // ticket's own dev host, not assumed.
-      const { attached: autoSnapshot, inProgress: autoSnapshotInProgress } = ring.triggerAutoSnapshotOnError(
-        hasErrorFinding,
-        { serial: process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary },
-      );
+      const { attached: autoSnapshot, inProgress: autoSnapshotInProgress } =
+        ring.triggerAutoSnapshotOnError(hasErrorFinding, {
+          serial: process.env.PORTHOLE_SERIAL,
+          env: adbEnv,
+          binary: adbBinary,
+        });
       const findingsWithRing =
         autoSnapshot || autoSnapshotInProgress
           ? findings.map((f) =>
@@ -1879,6 +2048,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             "anything buffered, so it was not examined at all."
           : "";
 
+      // GRA-68: quoted here, in the summary text itself, so `detail:
+      // "summary"` — which returns no JSON payload at all — still leaves a
+      // follow-up call answerable. Every finding's own `next.window` (see
+      // `withFollowUp` above) says "quote `window` above": this is the
+      // "above" it means, whether or not the payload carrying the same
+      // value ever reaches this response.
+      const windowSuffix = ` window {"from":${span.from},"to":${span.to}}.`;
+
       if (findings.length === 0) {
         return ok(
           notice +
@@ -1888,7 +2065,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               : `Nothing crossed a threshold in the ${Math.round(span.ms / 1000)}s examined ` +
                 `(${events.length} events). That is not the same as the app being fast.${missing}`) +
             classificationNote +
-            (alsoSentence ? ` ${alsoSentence}` : ""),
+            (alsoSentence ? ` ${alsoSentence}` : "") +
+            windowSuffix,
           payload,
         );
       }
@@ -1906,7 +2084,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         notice +
           `${findings.length} finding(s) over ${Math.round(span.ms / 1000)}s (${tally}). ` +
           `Worst: ${worst.title} [${worst.confidence}].${missing}${classificationNote}` +
-          (alsoSentence ? ` ${alsoSentence}` : ""),
+          (alsoSentence ? ` ${alsoSentence}` : "") +
+          windowSuffix,
         payload,
       );
     },
@@ -1935,10 +2114,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .string()
           .optional()
           .describe("Device serial, when more than one is attached. `adb devices` lists them."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ serial }): Promise<ToolResult> => {
+    async ({ serial, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const unavailable: SystemContext["unavailable"] = [];
 
       const read = (source: string, args: string[]): string | null => {
@@ -2020,10 +2202,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "An id that is not one of these is reported back in `unanswered` rather than rejected " +
               "outright, the same as a question that failed to compile.",
           ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ trace, from, to, packageName, traceProcessor, ask }): Promise<ToolResult> => {
+    async ({ trace, from, to, packageName, traceProcessor, ask, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       // GRA-157: connection state checked before the trace_processor lookup,
       // not after. A device still mid-handshake is not the caller's fault and
       // not fixed by anything on this machine, so naming that first means a
@@ -2038,10 +2223,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // `packageName`) still applies either way.
         // GRA-162: isHandshaking() instead of `=== "handshaking"` — same
         // exhaustiveness argument as isAttached() above.
-        const because =
-          isHandshaking(device.state)
-            ? "the app is still waiting on its first check-in — try again in a moment, "
-            : "connect to the app, ";
+        const because = isHandshaking(device.state)
+          ? "the app is still waiting on its first check-in — try again in a moment, "
+          : "connect to the app, ";
         return fail(
           `No package to scope to: ${because}or pass \`packageName\` — without it the questions ` +
             "answer for the whole device, which is a different question.",
@@ -2236,10 +2420,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "trade-off is a cold start inside the trace. The package is the first entry of " +
               "`packages`, or the attached app when `packages` is omitted. Default false.",
           ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ seconds, categories, outputDir, packages, serial, restartApp }): Promise<ToolResult> => {
+    async ({
+      seconds,
+      categories,
+      outputDir,
+      packages,
+      serial,
+      restartApp,
+      detail,
+    }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       // GRA-157: `device.hello ? [...] : []` used to fall through to an
       // unscoped capture — silently, with nothing in the result saying so —
       // whenever this landed in the handshake window, since state was
@@ -2308,7 +2503,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           const restartResult = await restartAppAsync(target, adbCallOptions);
           restarted = restartResult.ok;
           if (!restartResult.ok) {
-            restartNotes.push(`Could not restart ${target} for this capture: ${restartResult.output}`);
+            restartNotes.push(
+              `Could not restart ${target} for this capture: ${restartResult.output}`,
+            );
           }
         }
       }
@@ -2406,10 +2603,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "promise — see `system_trace_snapshot`'s own result.",
           ),
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ app, categories, bufferKb, serial }): Promise<ToolResult> => {
+    async ({ app, categories, bufferKb, serial, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const target = app ?? device.hello?.packageName ?? "";
       const started = await ring.start({
         app: target,
@@ -2463,12 +2663,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "carries the same data sources that capture uses (frame timeline, process/thread names) so " +
         "`ask_system_trace` gets real findings from a ring snapshot, not just from a one-shot capture.",
       inputSchema: {
-        outputDir: z.string().optional().describe("Where to write it. Defaults to .porthole/traces."),
+        outputDir: z
+          .string()
+          .optional()
+          .describe("Where to write it. Defaults to .porthole/traces."),
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ outputDir, serial }): Promise<ToolResult> => {
+    async ({ outputDir, serial, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/stop.
       const snapshot = await ring.snapshot({
         outputDir,
@@ -2490,7 +2696,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             "this window, or the app tag was not being read (see capture_system_trace's own notes " +
             "on this).";
       const result = { ...snapshot, portholeLabels };
-      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${labelsSentence} ${snapshot.note}`, result);
+      return ok(
+        `Snapshot pulled to ${snapshot.path} (${mb}MB). ${labelsSentence} ${snapshot.note}`,
+        result,
+      );
     },
   );
 
@@ -2509,12 +2718,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "started by a process this one has no memory of is still found and killed.",
       inputSchema: {
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ serial }): Promise<ToolResult> => {
+    async ({ serial, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/snapshot.
-      const stopped = await ring.stop({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary });
+      const stopped = await ring.stop({
+        serial: serial ?? process.env.PORTHOLE_SERIAL,
+        env: adbEnv,
+        binary: adbBinary,
+      });
       return ok(stopped.message, stopped);
     },
   );
@@ -2547,10 +2763,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .string()
           .optional()
           .describe("Where to write the trace. Defaults to .porthole/traces/<scenario>.json."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ sinceMs, from, to, since, scenario, out }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, since, scenario, out, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const span = await resolveWindowSince({ sinceMs, from, to, since });
       if (!span) {
         // Same shape as ask_system_trace's empty-ring refusal: there is
@@ -2573,7 +2792,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       let resolvedScenario: string;
       let outPath: string;
       try {
-        resolvedScenario = scenario === undefined ? defaultScenarioName(span.from, span.to) : validateScenario(scenario);
+        resolvedScenario =
+          scenario === undefined
+            ? defaultScenarioName(span.from, span.to)
+            : validateScenario(scenario);
         outPath = out ?? defaultOutPath(resolveProjectRoot().directory, resolvedScenario);
       } catch (error) {
         if (error instanceof InvalidScenarioError) return fail(`save_moment: ${error.message}`);
@@ -2657,10 +2879,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .max(60_000)
           .optional()
           .describe("How far either side to look for context. Default 2000."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ at, bootMs, spreadMs }): Promise<ToolResult> => {
+    async ({ at, bootMs, spreadMs, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       const events = timeline.buffer();
       if (events.length === 0) {
         // GRA-154, absorbed into GRA-157 as AC7: an empty ring is not the
@@ -2696,8 +2921,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // or "nothing buffered yet", since a real answer beats both.
         if (at !== undefined) {
           const merged = await mergeWithDisk(0, at + (spreadMs ?? 2_000));
-          if (merged.coveredFrom !== null && merged.coveredTo !== null && at >= merged.coveredFrom && at <= merged.coveredTo) {
-            const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], at, spreadMs ?? 2_000), clock: null };
+          if (
+            merged.coveredFrom !== null &&
+            merged.coveredTo !== null &&
+            at >= merged.coveredFrom &&
+            at <= merged.coveredTo
+          ) {
+            const moment = {
+              ...momentOf(merged.events as unknown as DeviceEvent[], at, spreadMs ?? 2_000),
+              clock: null,
+            };
             return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
           }
         }
@@ -2771,7 +3004,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           moment_at >= merged.coveredFrom &&
           moment_at <= merged.coveredTo
         ) {
-          const moment = { ...momentOf(merged.events as unknown as DeviceEvent[], moment_at, spreadMs ?? 2_000), clock };
+          const moment = {
+            ...momentOf(merged.events as unknown as DeviceEvent[], moment_at, spreadMs ?? 2_000),
+            clock,
+          };
           return ok(notice + describeMoment(moment), { ...moment, connected, exitedProcess });
         }
         return ok(
@@ -2879,12 +3115,17 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         ...(skippableButUnstableReason ? { skippableButUnstableReason } : {}),
       };
     }
-    if (join.reason === "no report entry matched" || join.reason === "matched more than one report entry") {
+    if (
+      join.reason === "no report entry matched" ||
+      join.reason === "matched more than one report entry"
+    ) {
       return {
         joined: false,
         reason: join.reason,
         ...(join.candidates ? { candidates: join.candidates } : {}),
-        ...(join.declarationPackage !== undefined ? { declarationPackage: join.declarationPackage } : {}),
+        ...(join.declarationPackage !== undefined
+          ? { declarationPackage: join.declarationPackage }
+          : {}),
       };
     }
     return undefined;
@@ -2917,7 +3158,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "enclosing composable function, whether the compiler itself calls it skippable, and, when " +
         "it is not, 'notSkippableReason' quotes the compiler's own reason — an unstable parameter, " +
         "and, for a class parameter, why that class is unstable. 'joined: false' with 'reason: " +
-        "\"no report entry matched\"' or '\"matched more than one report entry\"' (candidates " +
+        '"no report entry matched"\' or \'"matched more than one report entry"\' (candidates ' +
         "listed) means the label could not be tied to one function with confidence — never a " +
         "guess. A stale report ('stale: true' — its own source state has moved on) is still named " +
         "but never used for a reason. 'strongSkippingInBuild' says whether your own build (not " +
@@ -2939,17 +3180,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .optional()
           .describe("Busiest N nodes. Default 50; the tail is rarely what you are looking for."),
         ...windowShape,
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ screen, sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+    async ({ screen, sinceMs, from, to, limit, since, detail }): Promise<ToolResult> => {
       // GRA-55: resolved here, on the MCP side, rather than forwarding
       // sinceMs/since to the device — `since: "last"` needs the watermark,
       // which only this process holds. Falls back to the caller's own raw
       // sinceMs/from/to, unchanged, when nothing can be resolved (an empty
       // buffer, no watermark yet) — exactly today's behaviour for that case.
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
-      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      const windowArgs = resolved
+        ? { from: resolved.from, to: resolved.to }
+        : { sinceMs, from, to };
       return call<{
         nodes: Array<{
           name: string;
@@ -2997,9 +3241,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             // omits the key entirely for the common "no report yet" case;
             // see that function's own comment for exactly when it speaks up.
             const composeReport = composeReportNodeInfo(node.name);
-            return { ...node, ...(where ? { where } : {}), ...(composeReport ? { composeReport } : {}) };
+            return {
+              ...node,
+              ...(where ? { where } : {}),
+              ...(composeReport ? { composeReport } : {}),
+            };
           }),
         }),
+        detail,
       );
     },
   );
@@ -3023,22 +3272,45 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .optional()
           .describe("Merged tree (what accessibility services see). Default true."),
         maxDepth: z.number().int().positive().optional().describe("Depth cap. Default 40."),
-        maxNodes: z.number().int().positive().optional().describe("Node budget. Default 1500."),
+        maxNodes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            'Node budget. Default 300 at detail: "summary"/"normal" (GRA-68: a context-sized ' +
+              "cap — the old, uncapped default was chosen for completeness, not for fitting in an " +
+              'agent\'s context), 1500 at detail: "full", the old default, unchanged.',
+          ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ merged, maxDepth, maxNodes }): Promise<ToolResult> =>
-      call<{ root: unknown; error?: string; capturedAt: number }>(
-        "semantics_tree",
-        { merged, maxDepth, maxNodes },
-        (tree) =>
-          tree.error ? tree.error : tree.root ? "Captured the semantics tree." : "Empty tree.",
+    async ({ merged, maxDepth, maxNodes, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown, fullBytesHint?: number) =>
+        okShared(summary, payload, { detail, full, fullBytesHint });
+      const resolvedDetail = resolveDetail(detail);
+      // GRA-68: the device enforces `maxNodes` itself — there is no local
+      // truncation to widen after the fact the way `timeline`'s own
+      // in-memory `limit` can be, so the *requested* budget depends on
+      // `detail` before the RPC is ever made, not after. An explicit
+      // `maxNodes` from the caller still wins outright, same as every other
+      // tool's explicit argument beats its own detail-aware default.
+      const NORMAL_MAX_NODES = 300;
+      const FULL_MAX_NODES = 1500;
+      const resolvedMaxNodes =
+        maxNodes ?? (resolvedDetail === "full" ? FULL_MAX_NODES : NORMAL_MAX_NODES);
+      try {
+        const tree = await device.request<{ root: unknown; error?: string; capturedAt: number }>(
+          "semantics_tree",
+          { merged, maxDepth, maxNodes: resolvedMaxNodes },
+        );
         // GRA-72: recorded here too, not only by the dedicated `accessibility`
         // tool below — both are legitimately "a semantics capture", and
         // `findings`' fold-in should not require an agent to have called the
-        // newer tool specifically. A side effect, not a payload change: the
-        // returned value is handed back exactly as the device sent it.
-        (tree) => {
+        // newer tool specifically. A side effect, not a payload change — the
+        // handled value returned below is exactly what the device sent.
+        if (!tree.error && tree.root) {
           const { density, fontScale } = currentDensityAndFontScale();
           recordSemanticsCapture({
             capturedAt: tree.capturedAt,
@@ -3046,9 +3318,30 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             density,
             fontScale,
           });
-          return tree;
-        },
-      ),
+        }
+        if (tree.error) return ok(tree.error, tree);
+        if (!tree.root) return ok("Empty tree.", tree);
+        // GRA-91, folded into GRA-68: "node count, unlabelled count and
+        // instrumented-node coverage" — computed off the same tree this
+        // call already fetched, no second capture.
+        const stats = semanticsTreeStats(tree.root);
+        const summary = `Captured the semantics tree. ${describeSemanticsTreeStats(stats)}`.trim();
+        // GRA-68: no second RPC just to measure "full" — estimated from
+        // whether this capture actually hit its own budget (`anyTruncated`,
+        // or the node count landing exactly on the cap it was given). A
+        // tree smaller than what was asked for is the whole tree already;
+        // asking again at the bigger default would return the same bytes,
+        // not more, so no hint is offered in that case.
+        const budgetHit = stats.anyTruncated || stats.nodeCount >= resolvedMaxNodes;
+        const fullBytesHint =
+          resolvedDetail !== "full" && maxNodes === undefined && budgetHit
+            ? Math.round(byteLength(compactJson(tree)) * (FULL_MAX_NODES / resolvedMaxNodes))
+            : undefined;
+        return ok(summary, tree, undefined, fullBytesHint);
+      } catch (error) {
+        return fail(error);
+      }
+    },
   );
 
   server.registerTool(
@@ -3086,10 +3379,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .describe("Merged tree (what accessibility services see). Default true, and the one this pass is meant to run against — TalkBack never sees the unmerged tree either."),
         maxDepth: z.number().int().positive().optional().describe("Depth cap on the capture. Default 40."),
         maxNodes: z.number().int().positive().optional().describe("Node budget on the capture. Default 1500."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ merged, maxDepth, maxNodes }): Promise<ToolResult> =>
+    async ({ merged, maxDepth, maxNodes, detail }): Promise<ToolResult> =>
       call<{
         root: unknown;
         error?: string;
@@ -3117,6 +3411,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           const lint = lintSemanticsTree(root, { density, fontScale, capturedAt: tree.capturedAt });
           return { ...tree, findings: lint.findings, nodesChecked: lint.nodesChecked, coverage: lint.coverage };
         },
+        // GRA-68: threaded through the same way every other call<T>-based
+        // tool is — see okShared's own doc comment.
+        detail,
       ),
   );
 
@@ -3129,16 +3426,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "deep link that opened the app if there was one. Answers 'how did I get to this screen' " +
         "and 'what arguments is it actually holding', which is usually where the bug is.\n\n" +
         'Present tense only. This is the stack as it is now, not how it got that way — for the order things happened in, ask `timeline` with kinds: ["nav"].',
-      inputSchema: {},
+      inputSchema: { ...detailShape },
       annotations: { readOnlyHint: true },
     },
-    async (): Promise<ToolResult> =>
+    async ({ detail }): Promise<ToolResult> =>
       call<{ current?: { route?: string } | null; backStack: unknown[]; error?: string }>(
         "nav_state",
         {},
         (nav) =>
           nav.error ??
           `At ${nav.current?.route ?? "an unnamed destination"} with ${nav.backStack.length} entries on the stack.`,
+        undefined,
+        detail,
       ),
   );
 
@@ -3157,10 +3456,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .string()
           .optional()
           .describe("Registered name or class name. Omit for every registered owner."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ viewModel }): Promise<ToolResult> =>
+    async ({ viewModel, detail }): Promise<ToolResult> =>
       call<{ owners: Array<{ name: string; fields: unknown[]; where?: Where }> }>(
         "state",
         { viewModel },
@@ -3168,9 +3468,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           if (dump.owners.length === 0) {
             return 'No ViewModels registered. Call Porthole.registerViewModel("CartViewModel", vm) where you obtain it.';
           }
-          return dump.owners
+          const owners = dump.owners
             .map((owner) => `${owner.name} (${owner.fields.length} fields)`)
             .join(", ");
+          // GRA-91, folded into GRA-68: "names each unattributable field and
+          // the API that would fix it" — `state`'s own contribution to
+          // detail: "summary".
+          const unattributable = unattributableStateFields(dump.owners);
+          const fixNote = describeUnattributableFields(unattributable);
+          return fixNote ? `${owners}. ${fixNote}` : owners;
         },
         // GRA-201: an owner's `name` is whatever registerViewModel(name, vm)
         // was called with — usually, but not always, the class's own name —
@@ -3181,6 +3487,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             return where ? { ...owner, where } : owner;
           }),
         }),
+        detail,
       ),
   );
 
@@ -3223,12 +3530,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .max(200)
           .optional()
           .describe("Most recent N finished calls inside the window. Default 25."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, since, limit }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, since, limit, detail }): Promise<ToolResult> => {
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
-      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      const windowArgs = resolved
+        ? { from: resolved.from, to: resolved.to }
+        : { sinceMs, from, to };
       return call<{
         http: Array<{ method: string; url: string; phase: string; elapsedMs: number }>;
         queries: Array<{ sql: string; kind: string; elapsedMs: number; thread: string }>;
@@ -3239,34 +3549,40 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           status: number | null;
           elapsedMs: number;
         }>;
-      }>("inflight", { ...windowArgs, limit }, (flight) => {
-        const parts: string[] = [];
-        if (flight.http.length) {
-          const worst = flight.http[0];
-          parts.push(
-            `${flight.http.length} HTTP call(s), oldest ${worst.method} ${worst.url} ` +
-              `in '${worst.phase}' for ${worst.elapsedMs}ms`,
-          );
-        }
-        if (flight.queries.length) {
-          const writes = flight.queries.filter((q) => q.kind === "write").length;
-          parts.push(
-            `${flight.queries.length} query(ies) running on ${flight.queries[0].thread}` +
-              (writes ? ` (${writes} write)` : ""),
-          );
-        }
-        if (flight.work.length) parts.push(`${flight.work.length} work job(s)`);
+      }>(
+        "inflight",
+        { ...windowArgs, limit },
+        (flight) => {
+          const parts: string[] = [];
+          if (flight.http.length) {
+            const worst = flight.http[0];
+            parts.push(
+              `${flight.http.length} HTTP call(s), oldest ${worst.method} ${worst.url} ` +
+                `in '${worst.phase}' for ${worst.elapsedMs}ms`,
+            );
+          }
+          if (flight.queries.length) {
+            const writes = flight.queries.filter((q) => q.kind === "write").length;
+            parts.push(
+              `${flight.queries.length} query(ies) running on ${flight.queries[0].thread}` +
+                (writes ? ` (${writes} write)` : ""),
+            );
+          }
+          if (flight.work.length) parts.push(`${flight.work.length} work job(s)`);
 
-        const recent = flight.recentHttp ?? [];
-        const failed = recent.filter((c) => c.status !== null && c.status >= 400);
-        if (recent.length) {
-          parts.push(
-            `${recent.length} recent call(s)` +
-              (failed.length ? `, ${failed.length} with a ${failed[0].status}` : ""),
-          );
-        }
-        return parts.length ? parts.join("; ") : "Nothing in flight.";
-      });
+          const recent = flight.recentHttp ?? [];
+          const failed = recent.filter((c) => c.status !== null && c.status >= 400);
+          if (recent.length) {
+            parts.push(
+              `${recent.length} recent call(s)` +
+                (failed.length ? `, ${failed.length} with a ${failed[0].status}` : ""),
+            );
+          }
+          return parts.length ? parts.join("; ") : "Nothing in flight.";
+        },
+        undefined,
+        detail,
+      );
     },
   );
 
@@ -3294,12 +3610,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .max(200)
           .optional()
           .describe("Worst N frames. Default 20."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, limit, since, detail }): Promise<ToolResult> => {
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
-      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      const windowArgs = resolved
+        ? { from: resolved.from, to: resolved.to }
+        : { sinceMs, from, to };
       // GRA-185's "second, smaller thing": `frames` used to print its own
       // truncated `frameIntervalMs` with no Hz named at all ("budget 8ms"),
       // while `findings` — resolving the same profile through
@@ -3325,27 +3644,33 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           worstPhase: string;
           firstDraw: boolean;
         }>;
-      }>("frames", { ...windowArgs, limit }, (report) => {
-        if (report.totalFrames === 0) return "No frames observed yet.";
-        const rate = ((report.jankyFrames / report.totalFrames) * 100).toFixed(1);
-        const worst = report.worst[0];
-        const byPhase: Record<string, number> = {};
-        for (const frame of report.worst) {
-          byPhase[frame.worstPhase] = (byPhase[frame.worstPhase] ?? 0) + 1;
-        }
-        const phases = Object.entries(byPhase)
-          .sort((a, b) => b[1] - a[1])
-          .map(([phase, n]) => `${phase} ${n}`)
-          .join(", ");
-        return (
-          `${report.jankyFrames} of ${report.totalFrames} frames janky (${rate}%), ` +
-          `budget ${describeBudget(profile)}.` +
-          (worst
-            ? ` Worst ${worst.totalMs}ms, ${worst.missedFrames} refresh(es) missed, mostly ` +
-              `${worst.worstPhase}. Across the worst frames: ${phases}.`
-            : "")
-        );
-      });
+      }>(
+        "frames",
+        { ...windowArgs, limit },
+        (report) => {
+          if (report.totalFrames === 0) return "No frames observed yet.";
+          const rate = ((report.jankyFrames / report.totalFrames) * 100).toFixed(1);
+          const worst = report.worst[0];
+          const byPhase: Record<string, number> = {};
+          for (const frame of report.worst) {
+            byPhase[frame.worstPhase] = (byPhase[frame.worstPhase] ?? 0) + 1;
+          }
+          const phases = Object.entries(byPhase)
+            .sort((a, b) => b[1] - a[1])
+            .map(([phase, n]) => `${phase} ${n}`)
+            .join(", ");
+          return (
+            `${report.jankyFrames} of ${report.totalFrames} frames janky (${rate}%), ` +
+            `budget ${describeBudget(profile)}.` +
+            (worst
+              ? ` Worst ${worst.totalMs}ms, ${worst.missedFrames} refresh(es) missed, mostly ` +
+                `${worst.worstPhase}. Across the worst frames: ${phases}.`
+              : "")
+          );
+        },
+        undefined,
+        detail,
+      );
     },
   );
 
@@ -3372,12 +3697,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .max(100)
           .optional()
           .describe("Worst N of each. Default 20."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, limit, since, detail }): Promise<ToolResult> => {
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
-      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      const windowArgs = resolved
+        ? { from: resolved.from, to: resolved.to }
+        : { sinceMs, from, to };
       return call<{
         stalls: Array<{ durationMs: number; stack: string; where?: Where }>;
         mainThreadQueries: Array<{ sql: string; elapsedMs: number; kind: string }>;
@@ -3401,7 +3729,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
                 `on the main thread, worst ${worst.elapsedMs}ms: ${worst.sql.slice(0, 80)}`,
             );
           }
-          return parts.length ? parts.join(". ") : "Nothing blocked the main thread in this window.";
+          return parts.length
+            ? parts.join(". ")
+            : "Nothing blocked the main thread in this window.";
         },
         // GRA-201: each stall's own top frame (the stack's first line), the
         // same text `main-thread-stall` resolves in trace.ts — resolved
@@ -3414,6 +3744,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             return where ? { ...stall, where } : stall;
           }),
         }),
+        detail,
       );
     },
   );
@@ -3444,40 +3775,59 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .max(2000)
           .optional()
           .describe("Newest N entries. Default 200."),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ level, tag, contains, sinceMs, from, to, limit, since }): Promise<ToolResult> => {
+    async ({
+      level,
+      tag,
+      contains,
+      sinceMs,
+      from,
+      to,
+      limit,
+      since,
+      detail,
+    }): Promise<ToolResult> => {
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
-      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      const windowArgs = resolved
+        ? { from: resolved.from, to: resolved.to }
+        : { sinceMs, from, to };
       return call<{
         entries: Array<{ level: string; tag: string; message: string; wallTime: string }>;
         capturing: boolean;
         evicted: number;
         notes: string[];
-      }>("logs", { level, tag, contains, ...windowArgs, limit }, (page) => {
-        if (!page.capturing) {
-          return page.notes.join(" ") || "Log capture is not running.";
-        }
-        if (page.entries.length === 0) {
-          return page.notes.join(" ") || "No log entries matched.";
-        }
-        const counts: Record<string, number> = {};
-        for (const entry of page.entries) counts[entry.level] = (counts[entry.level] ?? 0) + 1;
-        const worst = page.entries
-          .filter((entry) => entry.level === "E" || entry.level === "F")
-          .at(-1);
-        return (
-          `${page.entries.length} entries (` +
-          Object.entries(counts)
-            .map(([level, count]) => `${level} ${count}`)
-            .join(", ") +
-          ")" +
-          (worst
-            ? `. Latest error: ${worst.tag}: ${worst.message.split("\n")[0].slice(0, 120)}`
-            : ".")
-        );
-      });
+      }>(
+        "logs",
+        { level, tag, contains, ...windowArgs, limit },
+        (page) => {
+          if (!page.capturing) {
+            return page.notes.join(" ") || "Log capture is not running.";
+          }
+          if (page.entries.length === 0) {
+            return page.notes.join(" ") || "No log entries matched.";
+          }
+          const counts: Record<string, number> = {};
+          for (const entry of page.entries) counts[entry.level] = (counts[entry.level] ?? 0) + 1;
+          const worst = page.entries
+            .filter((entry) => entry.level === "E" || entry.level === "F")
+            .at(-1);
+          return (
+            `${page.entries.length} entries (` +
+            Object.entries(counts)
+              .map(([level, count]) => `${level} ${count}`)
+              .join(", ") +
+            ")" +
+            (worst
+              ? `. Latest error: ${worst.tag}: ${worst.message.split("\n")[0].slice(0, 120)}`
+              : ".")
+          );
+        },
+        undefined,
+        detail,
+      );
     },
   );
 
@@ -3498,11 +3848,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .positive()
           .max(5000)
           .optional()
-          .describe("Newest N events. Default 500."),
+          .describe(
+            'Newest N events. Default 100 at detail: "summary"/"normal" (GRA-68: a context-sized ' +
+              "cap — 500 was chosen for completeness, not for fitting in an agent's context), 500 " +
+              'at detail: "full", the old default, unchanged.',
+          ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceMs, from, to, since, kinds, limit }): Promise<ToolResult> => {
+    async ({ sinceMs, from, to, since, kinds, limit, detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
+      const resolvedDetail = resolveDetail(detail);
+      const NORMAL_LIMIT = 100;
+      const FULL_LIMIT = 500;
       try {
         // Absolute bounds first, so a window quoted from another tool selects the
         // same span here. sinceMs stays as the convenience for "recently".
@@ -3526,7 +3886,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           events = timeline.buffer();
           if (events.length === 0) {
             const page = await device.request<{ events: DeviceEvent[] }>("timeline", {
-              limit: limit ?? 500,
+              limit: limit ?? FULL_LIMIT,
             });
             events = page.events;
           }
@@ -3537,35 +3897,64 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         }
 
         const matched = events.length;
-        const cap = limit ?? 500;
-        events = events.slice(-cap);
-        const truncated = matched > events.length;
+        // GRA-68: the default cap now depends on `detail` — an explicit
+        // `limit` still wins outright, same as every other tool's own
+        // detail-aware default.
+        const cap = limit ?? (resolvedDetail === "full" ? FULL_LIMIT : NORMAL_LIMIT);
+        const capped = events.slice(-cap);
+        const truncated = matched > capped.length;
 
         const counts: Record<string, number> = {};
-        for (const event of events) counts[event.event] = (counts[event.event] ?? 0) + 1;
-        const covered = events.length > 1 ? events[events.length - 1].t - events[0].t : 0;
+        for (const event of capped) counts[event.event] = (counts[event.event] ?? 0) + 1;
+        const covered = capped.length > 1 ? capped[capped.length - 1].t - capped[0].t : 0;
 
         // Say when the answer was cut. Silent truncation is how an agent
         // concludes something did not happen when it simply fell off the end.
         const note = truncated
-          ? ` ${matched} matched, newest ${events.length} returned — raise \`limit\` or narrow the window.`
+          ? ` ${matched} matched, newest ${capped.length} returned — raise \`limit\` or narrow the window.`
           : "";
+        // GRA-91, folded into GRA-68: "the busiest second, the longest gap,
+        // and the thing that happened exactly once" — timeline's own
+        // contribution to detail: "summary", computed off the same `capped`
+        // events this call already resolved.
+        const highlights = describeTimelineHighlights(timelineHighlights(capped));
         const summary =
-          events.length === 0
+          capped.length === 0
             ? "No events matched. Interact with the app, widen the window, or check `kinds`."
-            : `${events.length} events over ${covered}ms: ` +
+            : `${capped.length} events over ${covered}ms: ` +
               Object.entries(counts)
                 .map(([kind, count]) => `${kind} ${count}`)
                 .join(", ") +
               "." +
-              note;
-        return ok(summary, {
-          window: span ? { from: span.from, to: span.to, ms: span.ms } : null,
+              note +
+              (highlights ? ` ${highlights}` : "");
+        const window = span ? { from: span.from, to: span.to, ms: span.ms } : null;
+        const normalPayload = {
+          window,
           matched,
-          returned: events.length,
+          returned: capped.length,
           truncated,
-          events,
-        });
+          events: capped,
+        };
+        // GRA-68: a distinct "full" payload, built for free from the same
+        // `events` this call already has in memory (no second fetch) — only
+        // when there is genuinely more to offer: an explicit `limit` is the
+        // caller's own ceiling regardless of detail, and `detail: "full"`
+        // already used `FULL_LIMIT` as its own cap above.
+        const fullPayload =
+          limit === undefined && resolvedDetail !== "full" && matched > cap
+            ? (() => {
+                const fullCapped = events.slice(-FULL_LIMIT);
+                return {
+                  window,
+                  matched,
+                  returned: fullCapped.length,
+                  truncated: matched > fullCapped.length,
+                  events: fullCapped,
+                };
+              })()
+            : undefined;
+        return ok(summary, normalPayload, fullPayload);
       } catch (error) {
         return fail(error);
       }
@@ -3580,9 +3969,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "Starts the local timeline UI and returns its URL. Lanes for recompositions, state writes, " +
         "navigation, network and database, on a shared time axis. Open it in a browser; it updates " +
         "live over a WebSocket.",
-      inputSchema: {},
+      inputSchema: { ...detailShape },
     },
-    async (): Promise<ToolResult> => {
+    async ({ detail }): Promise<ToolResult> => {
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
       try {
         const url = await timeline.start();
         return ok(`Timeline UI running at ${url}`, { url, events: timeline.buffer().length });
@@ -3618,20 +4009,36 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .int()
           .nonnegative()
           .optional()
-          .describe("Which display to capture (`adb shell dumpsys display` lists them). Defaults to 0, the main display."),
+          .describe(
+            "Which display to capture (`adb shell dumpsys display` lists them). Defaults to 0, the main display.",
+          ),
+        ...detailShape,
       },
       annotations: { readOnlyHint: true },
     },
     async ({
       serial,
       displayId,
+      detail,
     }): Promise<{
-      content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+      content: Array<
+        { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+      >;
       isError?: boolean;
     }> => {
-      const result = await captureScreenshot({ serial, displayId, adbOptions: { env: adbEnv, binary: adbBinary } });
+      const ok = (summary: string, payload: unknown, full?: unknown) =>
+        okShared(summary, payload, { detail, full });
+      const result = await captureScreenshot({
+        serial,
+        displayId,
+        adbOptions: { env: adbEnv, binary: adbBinary },
+      });
       if (!result.ok) {
-        return ok(result.message, { ok: false, reason: result.reason, displayId: result.displayId });
+        return ok(result.message, {
+          ok: false,
+          reason: result.reason,
+          displayId: result.displayId,
+        });
       }
       const kb = Math.max(1, Math.round(result.bytes / 1024));
       const caption =
@@ -3654,12 +4061,29 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // image is a bigger, riskier change than building this one response
       // by hand from the same underlying `attachSinceLastAndBanner()` work.
       const { summary, payload: withSinceLast } = await attachSinceLastAndBanner(caption, payload);
+      // GRA-68: the image itself IS this tool's "headline" — dropped at no
+      // detail level. Only the JSON metadata block (width/bytes/quality —
+      // already legible from the caption) is what `detail: "summary"`
+      // omits, the same "no payload block at all" rule every other tool
+      // follows; `renderDetail` still decides it, so the size note and the
+      // "next level" estimate stay consistent with every other tool's.
+      const decision = renderDetail({
+        summary,
+        normalPayload: withSinceLast,
+        detail: resolveDetail(detail),
+      });
       return {
-        content: [
-          { type: "text", text: summary },
-          { type: "image", data: result.base64, mimeType: result.mimeType },
-          { type: "text", text: JSON.stringify(withSinceLast, null, 2) ?? "null" },
-        ],
+        content:
+          decision.payload !== undefined
+            ? [
+                { type: "text", text: decision.summaryText },
+                { type: "image", data: result.base64, mimeType: result.mimeType },
+                { type: "text", text: compactJson(decision.payload) },
+              ]
+            : [
+                { type: "text", text: decision.summaryText },
+                { type: "image", data: result.base64, mimeType: result.mimeType },
+              ],
       };
     },
   );

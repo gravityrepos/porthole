@@ -120,6 +120,59 @@ shape `exits` does, so `porthole_status {"exitTrace": <timestamp>}` still
 works without a second lookup. The field, and the one sentence both tools
 append for it, are absent — not empty — when there is nothing to add.
 
+## `detail`: answers sized for a context window
+
+Every tool used to return a summary line plus its entire JSON payload,
+pretty-printed. A 500-event `timeline` call is tens of thousands of tokens,
+and an agent that calls tools repeatedly pays that cost every time — whether
+or not it ever reads past the first sentence. Every tool now takes a
+`detail` parameter (unrelated to a `Finding`'s own `detail` field, which
+this shares a name with only by coincidence — one is a request parameter,
+the other a response field several tools already had before this existed):
+
+- **`"summary"` — the default.** The summary line, its headline numbers, and
+  anything needed to make a follow-up call — a window is always quotable
+  straight from the text itself. No JSON payload at all. This is what you
+  get when `detail` is omitted, same as every other parameter.
+- **`"normal"`.** Today's JSON payload, alongside the summary — compact now,
+  not pretty-printed (no change in *what* it carries, only how the bytes are
+  spent on the wire).
+- **`"full"`.** The complete data, at whatever the old, uncapped defaults
+  were before `detail` existed — `timeline`'s 500 events, `semantics_tree`'s
+  1500 nodes — also compact. `timeline` and `semantics_tree` default to a
+  smaller, context-sized cap (100 events, 300 nodes) at `"summary"`/`"normal"`
+  now; pass an explicit `limit`/`maxNodes` to ask for something else at any
+  level, and it wins outright regardless of `detail`.
+
+Every level ends its summary line with the size it actually returned, and
+what the next level up would cost — `[7.9KB returned; full ≈ 38.6KB]` — so an
+agent can decide whether asking for more is worth it before asking. The
+"next level" figure is occasionally an estimate (`semantics_tree`'s, when the
+tree hit its own node budget) rather than a second, discarded fetch; the
+"returned" figure never is — it is measured off the response this call
+actually sent, not guessed ahead of building it.
+
+Three tools' `"summary"` says more than a generic headline number, because a
+bare count would not actually answer the question that detail level exists
+to answer in one line: `semantics_tree` reports the node count, how many
+nodes carry neither `text` nor `contentDescription` ("unlabelled"), and what
+fraction carry a porthole node id ("instrumented"); `state` names every
+field that is not attributable and the API that would make it so
+(`collectAsNamedState` for a `Flow`/`StateFlow`, wrapping it as `State` for a
+plain field); `timeline` names the busiest one-second window, the longest
+gap between two consecutive events, and the one event kind that happened
+exactly once, if there is one.
+
+Truncation notes survive at every level — "20 matched, newest 5 returned",
+"Busiest 1 of 9 nodes shown" — because they live in the summary line itself,
+which every level returns unchanged apart from the size note appended to it;
+only the JSON payload block comes and goes with `detail`.
+
+`porthole_status {"exitTrace": <timestamp>}` is the one exception to
+`"summary"` being the default: the trace text is the entire reason to make
+that call, so an explicit `exitTrace` bumps the effective default to
+`"normal"` on its own — an explicit `detail` still overrides it either way.
+
 ## Layout
 
 ```

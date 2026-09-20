@@ -343,6 +343,53 @@ PR that makes the change, not after the fact.
   class) reads this way instead of the less specific `"not found"`, decided
   from the walk's own file paths already in memory, never an extra read
   (GRA-205).
+- **Every MCP tool now takes a `detail` parameter** (`"summary"` | `"normal"`
+  | `"full"`), and `"summary"` — the summary line, its headline numbers, and
+  anything needed to make a follow-up call, no JSON payload at all — is now
+  the default on every tool, an explicit EM ruling on this ticket. Before
+  this, every call returned its entire JSON payload, pretty-printed,
+  whether or not anything past the first sentence was ever read; a 500-event
+  `timeline` call cost tens of thousands of tokens every single time. JSON
+  is compact rather than pretty-printed at `"normal"`/`"full"` now too —
+  measured on the JSON payload of a 500-event `timeline` capture, compact
+  is 38,602 bytes against 73,151 pretty-printed (47% smaller) before
+  `detail` even enters the picture. Before this ticket every call always
+  returned that whole pretty-printed payload (73KB+ for 500 events, every
+  single call); the same 500 events now cost 176 bytes total at
+  `"summary"` (the new default), 8,036 bytes at `"normal"` (its own new,
+  context-sized default of 100 events rather than the old always-500), and
+  38,729 bytes at `"full"` (the old 500-event default, unchanged, now
+  opt-in rather than automatic). `findings` drops from 1,333 bytes (its
+  `"normal"` payload) to 255 at `"summary"`; a `semantics_tree` capture
+  drops from 28,792 bytes at its own new 300-node `"normal"` default
+  (1,500 nodes, always, before this ticket) to 123 at `"summary"`.
+  `timeline`'s and `semantics_tree`'s own defaults are now detail-aware —
+  100 events/300 nodes at `"summary"`/`"normal"`, the old 500/1500 moved to
+  `"full"` — stated in each tool's own description; an explicit `limit`/
+  `maxNodes` still wins outright, regardless of `detail`. Every truncation
+  note that existed before this ticket (`timeline`'s "N matched, M
+  returned", `recompositions`' "busiest N of M nodes shown", and the rest)
+  still appears at every level, because it lives in the summary line itself,
+  which is present and unchanged at every `detail` — only the JSON payload
+  block comes and goes. Every level states the bytes it actually returned
+  and what the next level up would cost, measured off the real response,
+  never estimated ahead of building it — the one exception being an
+  approximate "next level" figure for `semantics_tree`, where the actual
+  next size cannot be known without a second round trip to the device.
+  GRA-91's asks are folded into what `"summary"` means for three tools:
+  `semantics_tree` reports node count, unlabelled count and
+  instrumented-node coverage; `state` names each unattributable field and
+  the API that would fix it; `timeline` names the busiest second, the
+  longest gap, and the thing that happened exactly once. One exception to
+  `"summary"` being the default: `porthole_status {"exitTrace": <timestamp>}`
+  bumps its own effective default to `"normal"`, since the trace text is
+  the entire reason to make that call and would otherwise be silently
+  withheld. The MCP server's shared rendering path (`render.ts`, new) is
+  the one place this decision is made; `ok()` in `index.ts` is the only
+  caller, the same discipline GRA-55's banner and GRA-171's
+  `joinSummaryAndPayload()` already follow. The timeline UI reads `/api/*`
+  HTTP endpoints, never a tool's own `content`, so none of this touches it
+  (GRA-68, GRA-91).
 - Every Porthole app on a device now binds its own on-device endpoint instead
   of contending for one shared loopback TCP port: the runtime listens by
   default on an Android abstract-namespace Unix socket named

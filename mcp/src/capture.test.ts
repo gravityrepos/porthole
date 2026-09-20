@@ -238,10 +238,7 @@ describe("report() and compare() exit codes", () => {
   });
 
   it("compare() refuses (exit 2, not 0 or 1) a baseline with an unknown trace version", async () => {
-    const baseline = write(
-      "baseline.json",
-      JSON.stringify(trace({ porthole: TRACE_VERSION + 1 })),
-    );
+    const baseline = write("baseline.json", JSON.stringify(trace({ porthole: TRACE_VERSION + 1 })));
     const after = write("after.json", JSON.stringify(trace()));
     const code = await compare(baseline, after);
     expect(code).toBe(2);
@@ -322,9 +319,7 @@ describe("report()'s print call wires real TTY-ness through to renderReport (GRA
       file,
       JSON.stringify(
         trace({
-          findings: [
-            { id: "e", severity: "error", confidence: "observed", title: "an error" },
-          ],
+          findings: [{ id: "e", severity: "error", confidence: "observed", title: "an error" }],
         }),
       ),
     );
@@ -398,7 +393,7 @@ describe("the MCP findings tool never emits colour (GRA-142)", () => {
         { event: "db_start", t: 1_000, data: { id: "q-1" } },
         { event: "db_end", t: 1_012, data: { id: "q-1", sql: "SELECT 1", onMainThread: "true" } },
       ]);
-      const result = await rig.client.callTool("findings", {});
+      const result = await rig.client.callTool("findings", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const payload = result.json as { findings: Array<{ severity: string }> };
       // Sanity check that this actually exercised a coloured-elsewhere
