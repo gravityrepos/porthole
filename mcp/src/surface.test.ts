@@ -407,11 +407,24 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
     ask_system_trace: { trace: "/nonexistent.pftrace" },
   };
 
-  // This walk calls every registered tool, and several shell out to adb; on a runner with no adb the
-  // spawn failures alone took 7.7 s on windows-latest, past the 5 s default (GRA-186's CI run). The
-  // hermetic fix, injecting GRA-89's fake adb into this rig, is on GRA-182; until then the budget is honest.
+  // This walk calls every registered tool, and several shell out to adb. On a runner with no adb the
+  // spawn failures alone took 7.7 s on windows-latest, past the 5 s default (GRA-186's CI run); GRA-62's
+  // porthole_connect and GRA-63's screenshot each add their own adb round trip on top of that, and QA
+  // measured 26-29 s against this test's own 30 s timeout once both existed — one flaky CI run away from
+  // red for a reason that has nothing to do with what this test actually checks. GRA-182 was going to be
+  // the general hermetic fix for every adb-shelling tool in this walk; this injects the same fake adb
+  // (GRA-89's) here now rather than waiting on that ticket, since two more real, unconfigured adb calls
+  // were the specific thing that pushed this over. Nothing is configured for "exec-out screencap -p" —
+  // that is deliberate: the fake's own default (an immediate, fast "no configured response" exit) is
+  // exactly what a real adb-with-no-device eventually says too, just without the wall-clock cost of
+  // actually asking. `porthole_connect`'s "devices -l" IS configured, to an empty list, so it returns a
+  // real `ok()` result (not `fail()`) and is actually exercised by this walk's `sinceLast` check instead
+  // of being silently skipped alongside `capture_system_trace`/`ask_system_trace`.
   it("every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern", { timeout: 30_000 }, async () => {
-    const rig = await buildRig();
+    const fakeAdb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+    });
+    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       await rig.pushEvents([
         { event: "recompose", t: 1_000, data: { name: "Cart" } },
@@ -436,6 +449,7 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
       );
     } finally {
       await rig.close();
+      fakeAdb.cleanup();
     }
   });
 });
@@ -1206,6 +1220,38 @@ describe("screenshot", () => {
     } finally {
       await rig.close();
       adb.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-230 (QA on GRA-62/GRA-63): the not-connected message names
+// porthole_status/porthole_connect everywhere it appears, not just where
+// porthole_status's own active remediation already fixed it in production.
+// device.test.ts's "notConnectedMessage's checklist" is the direct,
+// unit-level pin on the shared string itself; this is the same property
+// proven through the actual running server, on the tool paths that surface
+// it (findings' and what_was_happening's empty-ring branches, and
+// porthole_status's own, all of which route through the one shared
+// `device.pendingMessage()` — see notConnectedMessage()'s own doc comment).
+// ---------------------------------------------------------------------------
+
+describe("every tool's not-connected text names porthole_status and porthole_connect", () => {
+  it("findings, what_was_happening and porthole_status all point at the tools that can fix it, not a manual adb checklist alone", async () => {
+    const rig = await buildRig({ connectDevice: false });
+    try {
+      for (const name of ["findings", "what_was_happening", "porthole_status"]) {
+        const result = await rig.client.callTool(name, {});
+        expect(result.isError, `${name} unexpectedly errored`).toBeFalsy();
+        expect(result.text, `${name}'s not-connected text does not name porthole_status`).toContain(
+          "porthole_status",
+        );
+        expect(result.text, `${name}'s not-connected text does not name porthole_connect`).toContain(
+          "porthole_connect",
+        );
+      }
+    } finally {
+      await rig.close();
     }
   });
 });

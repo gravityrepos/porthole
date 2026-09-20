@@ -131,29 +131,47 @@ interface DecodedImage {
   data: Buffer;
 }
 
-/** Sampled on an 8x8 grid (64 points): enough to catch a genuinely solid-black capture without the cost of scanning every pixel before the decision to even bother scaling one. */
-const BLACK_FRAME_GRID = 8;
-/** Per-channel — screencap's own black-frame output for FLAG_SECURE is exactly (0,0,0); a few points of headroom absorbs codec/rounding noise without also absorbing a merely dark UI (a dark theme's background is dark, not uniformly black across every sampled point). */
+/** Per-channel — screencap's own black-frame output for FLAG_SECURE is exactly (0,0,0); a few points of headroom absorbs codec/rounding noise without also absorbing a merely dark UI (a dark theme's background is dark, not uniformly black across every pixel). */
 const BLACK_FRAME_CHANNEL_THRESHOLD = 8;
 
 /**
- * True only when *every* sampled point is at or below the threshold on every
- * channel — a single bright pixel (a status-bar icon, a cursor) is enough to
- * prove the capture is real content, not a security-blocked black rectangle.
+ * True only when *every* pixel is at or below the threshold on every
+ * channel — a single bright pixel anywhere (a status bar, a small centred
+ * logo, a band of white text on an otherwise-black screen) is enough to
+ * prove the capture is real content, not a security-blocked black
+ * rectangle.
+ *
+ * GRA-230 QA (on GRA-63): this used to sample a fixed 8x8 grid — 64 points
+ * — rather than scan the whole buffer, on the reasoning that a genuinely
+ * solid-black FLAG_SECURE frame does not need every pixel checked to prove
+ * it. That reasoning had the direction backwards: at a real device's
+ * resolution (QA drove this at 1080x2400, ~2.6M pixels) 64 evenly-spaced
+ * samples covers a vanishingly small fraction of the frame, so an AMOLED
+ * true-black screen with a status bar, a white text band, or a small
+ * centred logo was REFUSED and blamed on FLAG_SECURE — every one of those
+ * features is easily missed by a grid that fine at that resolution, even
+ * though the actual bitmap already has the answer sitting in memory. A
+ * full scan is the correct check, not a more-expensive one worth avoiding:
+ * it still exits on the very first bright pixel it finds (immediately, for
+ * ordinary UI content — a black-and-white screen fails within the first
+ * few rows), and only pays for the whole buffer on a capture that turns
+ * out to genuinely need refusing.
+ *
+ * Called on the already-downscaled buffer (see `captureScreenshot`), not
+ * the full-resolution decode: smaller to scan, and it is what actually
+ * ships, so "is this what an agent is about to be shown" is the honest
+ * question to ask, not "was the original black" — a source of both facts
+ * agreeing.
  */
 export function looksLikeBlackFrame(image: DecodedImage): boolean {
-  for (let gy = 0; gy < BLACK_FRAME_GRID; gy++) {
-    const y = Math.min(image.height - 1, Math.floor(((gy + 0.5) * image.height) / BLACK_FRAME_GRID));
-    for (let gx = 0; gx < BLACK_FRAME_GRID; gx++) {
-      const x = Math.min(image.width - 1, Math.floor(((gx + 0.5) * image.width) / BLACK_FRAME_GRID));
-      const idx = (y * image.width + x) * 4;
-      if (
-        image.data[idx] > BLACK_FRAME_CHANNEL_THRESHOLD ||
-        image.data[idx + 1] > BLACK_FRAME_CHANNEL_THRESHOLD ||
-        image.data[idx + 2] > BLACK_FRAME_CHANNEL_THRESHOLD
-      ) {
-        return false;
-      }
+  const { data } = image;
+  for (let i = 0; i < data.length; i += 4) {
+    if (
+      data[i] > BLACK_FRAME_CHANNEL_THRESHOLD ||
+      data[i + 1] > BLACK_FRAME_CHANNEL_THRESHOLD ||
+      data[i + 2] > BLACK_FRAME_CHANNEL_THRESHOLD
+    ) {
+      return false;
     }
   }
   return true;
@@ -301,7 +319,18 @@ export async function captureScreenshot(options: ScreenshotOptions = {}): Promis
     };
   }
 
-  if (looksLikeBlackFrame(decoded)) {
+  // Fixed-width scaling is most of the size cap's own enforcement: the
+  // output byte size tracks `maxWidth`, not the device's native resolution,
+  // so a tablet's screenshot ends up roughly the same size as a phone's.
+  // The shrink loop below is the belt-and-suspenders case — pathological,
+  // noise-heavy content compresses far worse than an ordinary UI ever does.
+  let width = Math.min(maxWidth, decoded.width);
+  let scaled = boxDownscale(decoded, width);
+
+  // GRA-230 QA: checked on `scaled`, not `decoded` — see looksLikeBlackFrame's
+  // own doc comment for why scanning the full-resolution buffer was never
+  // actually the point, and why a sparse sample of it was the real bug.
+  if (looksLikeBlackFrame(scaled)) {
     return {
       ok: false,
       reason: "black-frame",
@@ -313,13 +342,6 @@ export async function captureScreenshot(options: ScreenshotOptions = {}): Promis
     };
   }
 
-  // Fixed-width scaling is most of the size cap's own enforcement: the
-  // output byte size tracks `maxWidth`, not the device's native resolution,
-  // so a tablet's screenshot ends up roughly the same size as a phone's.
-  // The shrink loop below is the belt-and-suspenders case — pathological,
-  // noise-heavy content compresses far worse than an ordinary UI ever does.
-  let width = Math.min(maxWidth, decoded.width);
-  let scaled = boxDownscale(decoded, width);
   let jpegResult = encodeJpeg(scaled, quality);
 
   while (jpegResult.data.length > maxBytes && width > MIN_SHRINK_WIDTH) {

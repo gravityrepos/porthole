@@ -594,11 +594,33 @@ export class DeviceClient extends EventEmitter {
     }
   }
 
+  /**
+   * GRA-230 (QA on GRA-62/GRA-63): this used to open straight into a
+   * five-step manual checklist — run `adb forward` by hand, check
+   * `./gradlew portholeConnect` — for a gap `porthole_status` had, by then,
+   * already learned to close on its own. Seven tool paths print this
+   * verbatim through `pendingMessage()` (every one of them shares this
+   * single string, which is the whole point of it living in one place), and
+   * `findings` — the tool this project's own description says to start
+   * with — was leading a first-time agent through manual `adb` commands for
+   * a problem one more tool call usually fixes by itself.
+   *
+   * The first line now says exactly that: call `porthole_status`, which
+   * re-establishes the forward itself, and `porthole_connect`, which can
+   * launch an installed-but-not-running app — the two tools that can act
+   * from inside this same session, with nothing to copy into a shell. The
+   * numbered manual steps stay, verbatim, as the fallback for the one case
+   * neither tool can fix from here: no device attached at all, or an adb
+   * setup neither can safely guess at (two transports, a port already held
+   * by something else).
+   */
   notConnectedMessage(): string {
     return [
       `Not connected to the app on ${this.host}:${this.port}.`,
       this.lastError ? `Last socket error: ${this.lastError}.` : null,
-      "Check, in order:",
+      "Call porthole_status: it re-establishes the adb forward itself; if the app is installed but " +
+        "not running, porthole_connect can launch it.",
+      "If that doesn't fix it, check by hand, in order:",
       "  1. the debug build is running on the device (the porthole starts with the process)",
       "  2. the adb bridge is up: 'adb forward tcp:PORT tcp:PORT', which",
       "     'porthole ui' and './gradlew portholeConnect' both do for you",

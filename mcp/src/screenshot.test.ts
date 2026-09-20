@@ -54,6 +54,34 @@ function splitPng(width: number, height: number, left: [number, number, number],
   return PNG.sync.write(png);
 }
 
+/**
+ * Solid `bg` everywhere except a horizontal band — a stand-in for a status
+ * bar, a small logo's row-span, or a line of text on an otherwise solid
+ * screen: real UI content that occupies a small fraction of a real device's
+ * pixels, the exact shape QA's 63-A report used to prove the old 8x8-grid
+ * check refused real, non-FLAG_SECURE screens.
+ */
+function blackWithBandPng(
+  width: number,
+  height: number,
+  bg: [number, number, number],
+  band: { y: number; height: number; color: [number, number, number] },
+): Buffer {
+  const png = new PNG({ width, height });
+  for (let y = 0; y < height; y++) {
+    const inBand = y >= band.y && y < band.y + band.height;
+    const [r, g, b] = inBand ? band.color : bg;
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      png.data[idx] = r;
+      png.data[idx + 1] = g;
+      png.data[idx + 2] = b;
+      png.data[idx + 3] = 255;
+    }
+  }
+  return PNG.sync.write(png);
+}
+
 /** Every pixel an independent random RGB value — deliberately close to incompressible, for exercising the size-cap shrink loop. */
 function noisePng(width: number, height: number): Buffer {
   const png = new PNG({ width, height });
@@ -97,20 +125,43 @@ describe("looksLikeBlackFrame", () => {
     expect(looksLikeBlackFrame({ width: png.width, height: png.height, data: png.data })).toBe(false);
   });
 
-  it("a single bright pixel is enough to prove it is not a black frame — GRA-63 AC", () => {
-    // 8x8 is deliberately exact: the 8x8 sample grid's centre points land on
-    // integer pixel coordinates 0..7 in both axes, so every pixel in an 8x8
-    // image is sampled exactly once. One bright corner pixel therefore MUST
-    // be seen, proving the check does not require every pixel to be dark —
-    // only that every *sampled* one is.
-    const png = new PNG({ width: 8, height: 8 });
+  it("is true for a near-black AMOLED level a few points above zero — #050505, still within the threshold", () => {
+    const png = PNG.sync.read(solidPng(64, 64, [5, 5, 5, 255]));
+    expect(looksLikeBlackFrame({ width: png.width, height: png.height, data: png.data })).toBe(true);
+  });
+
+  it("is false for a dark-but-not-black theme colour — #121212, past the threshold", () => {
+    const png = PNG.sync.read(solidPng(64, 64, [0x12, 0x12, 0x12, 255]));
+    expect(looksLikeBlackFrame({ width: png.width, height: png.height, data: png.data })).toBe(false);
+  });
+
+  // GRA-230 QA (63-A/63-B): the previous version of this check sampled a
+  // fixed 8x8 grid, and its own test here proved only that a bright pixel
+  // AT ONE OF THOSE 64 EXACT SAMPLE COORDINATES was caught — which is
+  // exactly the shape of bug QA found: at a real device's resolution
+  // (1080x2400, driven through the built module) a status bar, a white
+  // text band or a small centred logo sits at coordinates a coarse grid
+  // never samples, and was refused as a false FLAG_SECURE. A test built on
+  // the same convenient, sample-aligned coordinate the implementation uses
+  // internally passes for a mutant that reintroduces sparse sampling just
+  // as happily as it passes for a real full scan — it cannot tell the two
+  // apart. This one places a single bright pixel at an arbitrary, non-grid
+  // coordinate in a real-sized image instead, which only a genuine full
+  // scan can find.
+  it("catches a single bright pixel at an arbitrary coordinate in a real-sized image, not only one a coarse grid would happen to sample", () => {
+    const width = 1080;
+    const height = 2400;
+    const png = new PNG({ width, height });
     png.data.fill(0);
     for (let i = 3; i < png.data.length; i += 4) png.data[i] = 255; // alpha channel
-    const idx = 0; // pixel (0,0)
+    // An arbitrary, deliberately not-grid-aligned point.
+    const x = 733;
+    const y = 1847;
+    const idx = (y * width + x) * 4;
     png.data[idx] = 255;
     png.data[idx + 1] = 255;
     png.data[idx + 2] = 255;
-    expect(looksLikeBlackFrame({ width: 8, height: 8, data: png.data })).toBe(false);
+    expect(looksLikeBlackFrame({ width, height, data: png.data })).toBe(false);
   });
 });
 
@@ -280,5 +331,74 @@ describe("captureScreenshot", () => {
     if (!phoneResult.ok || !tabletResult.ok) return;
     expect(phoneResult.width).toBe(DEFAULT_MAX_WIDTH);
     expect(tabletResult.width).toBe(DEFAULT_MAX_WIDTH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-230 QA (63-A): the exact four scenarios QA drove through the built
+// module at a real device's resolution (1080x2400) — a sparse 8x8-grid
+// sample refused three of these that are not FLAG_SECURE at all.
+// ---------------------------------------------------------------------------
+
+describe("captureScreenshot at a real device resolution — GRA-230 QA (63-A)", () => {
+  const WIDTH = 1080;
+  const HEIGHT = 2400;
+
+  it("accepts #000 with a white text band — real content, not a black frame", async () => {
+    const png = blackWithBandPng(WIDTH, HEIGHT, [0, 0, 0], { y: 1000, height: 60, color: [255, 255, 255] });
+    const adb = fakeScreencapAdb(png);
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a status-bar-sized band near the top of an otherwise-black screen", async () => {
+    const png = blackWithBandPng(WIDTH, HEIGHT, [0, 0, 0], { y: 0, height: 72, color: [230, 230, 230] });
+    const adb = fakeScreencapAdb(png);
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a small centred logo on an otherwise-black screen", async () => {
+    const png = new PNG({ width: WIDTH, height: HEIGHT });
+    png.data.fill(0);
+    for (let i = 3; i < png.data.length; i += 4) png.data[i] = 255; // alpha
+    // A 200x200 centred square, well inside one edge of the frame, exactly
+    // as QA's report describes.
+    const logoSize = 200;
+    const x0 = Math.floor((WIDTH - logoSize) / 2);
+    const y0 = Math.floor((HEIGHT - logoSize) / 2);
+    for (let y = y0; y < y0 + logoSize; y++) {
+      for (let x = x0; x < x0 + logoSize; x++) {
+        const idx = (y * WIDTH + x) * 4;
+        png.data[idx] = 255;
+        png.data[idx + 1] = 255;
+        png.data[idx + 2] = 255;
+      }
+    }
+    const adb = fakeScreencapAdb(PNG.sync.write(png));
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a solid #121212 screen — dark theme, not black", async () => {
+    const adb = fakeScreencapAdb(solidPng(WIDTH, HEIGHT, [0x12, 0x12, 0x12, 255]));
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(true);
+  });
+
+  it("refuses a solid #000 screen", async () => {
+    const adb = fakeScreencapAdb(solidPng(WIDTH, HEIGHT, [0, 0, 0, 255]));
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("black-frame");
+  });
+
+  it("refuses a solid #050505 screen — near-black AMOLED, still within the threshold", async () => {
+    const adb = fakeScreencapAdb(solidPng(WIDTH, HEIGHT, [5, 5, 5, 255]));
+    const result = await captureScreenshot({ adbOptions: { binary: adb.binaryPath, env: adb.env } });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("black-frame");
   });
 });

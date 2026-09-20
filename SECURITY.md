@@ -78,9 +78,21 @@ writes into that same trace are named by shape (`db SELECT cart_items`,
 nothing the redaction below covers reaches the trace through them. The file
 itself is written to disk under `.porthole/traces/`, which makes it a
 persistent artifact rather than something held only in memory until asked
-for — treat it like a screenshot: it stays on your machine, with the rest of
-the device's activity in it, until you choose to open it or hand it to
-someone.
+for — treat it like a downloaded file: it stays on your machine, with the
+rest of the device's activity in it, until you choose to open it or hand it
+to someone.
+
+The `screenshot` MCP tool is the opposite shape: a bitmap is unredactable by
+construction — there is no reliable way to know what in a captured frame is
+sensitive, so nothing here even tries. It is returned only to the caller
+that asked for it, in that one response, never written to `.porthole/`
+(neither a trace file nor a session), and never broadcast to the timeline
+UI or anything else with a WebSocket open. It exists for as long as that one
+response does and no longer. The one thing it refuses outright is a frame
+that comes back solid black, which is what `screencap` produces for a
+`FLAG_SECURE` window rather than the app's real content — handing that back
+labelled as a screenshot would be a worse answer than admitting it could not
+be captured.
 
 Sessions on disk (`.porthole/sessions/`, see the README) are the same shift
 from "held in memory until the process dies" to "on your machine for a
