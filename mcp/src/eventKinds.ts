@@ -41,6 +41,7 @@ export const EVENT_KINDS = [
   "blocked",
   "gc",
   "memory",
+  "startup",
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -100,6 +101,16 @@ const KIND_GROUPS: readonly KindGroup[] = [
   {
     kinds: ["log_append", "mark", "work_start", "work_end", "blocked"],
     narrated: "raw here",
+  },
+  {
+    // GRA-60: at most one per launch, carrying fork/onCreate/first-Activity/
+    // first-frame phases — see StartupCollector.kt for what each field means.
+    kinds: ["startup"],
+    narrated:
+      "raw here; `findings` turns a slow one into a `startup-slow` entry naming the dominant phase and " +
+      "cross-referencing any `db-on-main-thread`/`main-thread-stall` finding that fell inside the " +
+      "startup window, and a `startup-not-fully-drawn` note when `Porthole.reportFullyDrawn()` was " +
+      "never called",
   },
 ];
 
