@@ -6,6 +6,7 @@ import android.app.Application
 import android.os.StrictMode
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import live.gravitylabs.porthole.Porthole
 import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
@@ -263,6 +264,70 @@ class StrictModeTest {
         assertTrue(c.install(app))
         c.stop()
         c.stop()
+    }
+
+    // -- wired into Porthole.install(): off by default installs nothing at all,
+    //    and Setup's `strictmode` entry always exists and says the right thing --
+    //
+    // The `porthole_strict_mode` resValue only ever exists in a real consuming
+    // app (the Gradle plugin writes it into the app module, not into this
+    // library's own build) — the same reason RingCapacityTest tests
+    // Porthole.sanitizeRingCapacity() directly rather than faking a resource
+    // for the ring capacity's own resValue. So "the flag is on" is StrictModeTest's
+    // job above, exercised directly against StrictModeCollector; what belongs
+    // here is the one thing only Porthole.install() itself can prove: that
+    // *without* the resource — every test in this suite's own build, and every
+    // app until it opts in — nothing touches StrictMode's policy at all.
+
+    @Test
+    fun `strictMode off by default - Porthole install does not touch StrictMode's policy at all`() {
+        val threadBefore = StrictMode.getThreadPolicy().toString()
+        val vmBefore = StrictMode.getVmPolicy().toString()
+
+        Porthole.install(app, port = 0)
+        try {
+            assertEquals(
+                "no porthole_strict_mode resource exists in this module's own build, so this must read as off",
+                threadBefore,
+                StrictMode.getThreadPolicy().toString(),
+            )
+            assertEquals(vmBefore, StrictMode.getVmPolicy().toString())
+        } finally {
+            Porthole.shutdown()
+        }
+    }
+
+    @Test
+    fun `setup always has an opinion about strict mode, even off`() {
+        Porthole.install(app, port = 0)
+        try {
+            val entry = Setup.report().single { it.name == "strictmode" }
+            assertFalse("off by default", entry.instrumented)
+            assertTrue(
+                "expected the off-by-default hint to point at the opt-in, got: ${entry.hint}",
+                entry.hint.orEmpty().contains("strictMode.set(true)"),
+            )
+        } finally {
+            Porthole.shutdown()
+        }
+    }
+
+    @Test
+    fun `Setup reports a replacement, not a chain, when strict mode is on`() {
+        // Exercises Setup.recordStrictMode directly, the same way the "off by
+        // default" case above exercises it indirectly through Porthole.install
+        // — this is the shape Porthole.install actually calls it with when the
+        // resource says on, see that method's own `note` string.
+        Setup.recordStrictMode(
+            installed = true,
+            note = "Porthole's StrictMode thread and VM policies REPLACED whatever this process had",
+        )
+        val entry = Setup.report().single { it.name == "strictmode" }
+        assertTrue(entry.instrumented)
+        assertTrue(
+            "the EM was explicit: say REPLACED, not chained — got: ${entry.hint}",
+            entry.hint.orEmpty().contains("REPLACED"),
+        )
     }
 }
 
