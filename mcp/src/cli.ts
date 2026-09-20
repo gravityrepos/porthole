@@ -49,7 +49,7 @@ porthole ui — open the live timeline for a running debug build
 
   npx @gravitylabsllc/porthole ui [options]
 
-  --port <n>            device port the porthole is listening on (default 8677)
+  --port <n>            host port the forward listens on, not a port the device opens (default 8677)
   --ui-port <n>          port to serve the timeline on (default 8678)
   --serial <id>          adb device serial, when more than one is attached
   --application-id <id>  the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)

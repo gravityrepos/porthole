@@ -276,6 +276,20 @@ own package, regardless of what `port` either of them is configured with.
 different apps on one workstation still need two different values, the same
 as always.
 
+**One socket per package, not per process.** A multi-process app (a
+WorkManager-only process, a `:remote` service — multi-process apps are not
+otherwise supported yet) has `PortholeInitializer` try
+to install in every one of its own processes, since `androidx.startup` runs
+per-process automatically. Every process races for the same
+`porthole.<applicationId>` socket; the first one to start wins it, and every
+other process's own install is left with nothing to bind. `adb logcat -s
+Porthole:E` names the losing process, this app's package, and the one-line
+fix: remove the manifest entry that runs `PortholeInitializer` automatically
+(its own KDoc shows the snippet) and call `Porthole.install(application)` by
+hand, only from the one process you actually want instrumented — normally
+the main/UI process, which is also usually the one that wins the race
+unmodified.
+
 **Migrating from 0.2.x.** If you were on the plugin (`portholeConnect`,
 `portholeUi`, `portholeStart`) already, there is nothing to do — the plugin
 generates the new `adb forward` target for you, same as it always generated
@@ -555,7 +569,7 @@ pin — and the previous file is kept as `.mcp.json.bak` either way.
 | variable | default | what it sets |
 | --- | --- | --- |
 | `PORTHOLE_HOST` | `127.0.0.1` | host the forwarded device socket is reachable on |
-| `PORTHOLE_PORT` | `8677` | device port the porthole listens on |
+| `PORTHOLE_PORT` | `8677` | the host port the forward listens on — not a port the device opens; see [Setup](#setup) |
 | `PORTHOLE_UI_PORT` | `8678` | port the timeline is served on |
 | `PORTHOLE_TRACE_PROCESSOR` | none | path to Perfetto's `trace_processor`, for [system traces](#system-traces) |
 | `PORTHOLE_TRACE_TIMEOUT_MS` | `60000` | how long `ask_system_trace` waits on `trace_processor` per question before giving up |

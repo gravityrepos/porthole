@@ -53,6 +53,7 @@ import live.gravitylabs.porthole.protocol.SetupEntry
 import live.gravitylabs.porthole.protocol.LogPage
 import live.gravitylabs.porthole.protocol.NavState
 import live.gravitylabs.porthole.protocol.PortholeJson
+import live.gravitylabs.porthole.protocol.portholeSocketName
 import live.gravitylabs.porthole.protocol.RecompositionReport
 import live.gravitylabs.porthole.protocol.SemanticsTree
 import live.gravitylabs.porthole.protocol.StateDump
@@ -281,7 +282,7 @@ object Porthole {
                 packageName = app.packageName,
                 onBindResult = { ok ->
                     if (ok) {
-                        val where = if (legacyTcp) "127.0.0.1:$port" else "localabstract:porthole.${app.packageName}"
+                        val where = if (legacyTcp) "127.0.0.1:$port" else "localabstract:${portholeSocketName(app.packageName)}"
                         Log.i(TAG, "installed on $where, collectors: ${finalCollectors.joinToString()}")
                     }
                 },
@@ -850,7 +851,7 @@ object Porthole {
      */
     private fun writeConnectionFile(context: Context, port: Int, legacyTcp: Boolean) {
         runCatching {
-            val socket = if (legacyTcp) "null" else """"porthole.${context.packageName}""""
+            val socket = if (legacyTcp) "null" else "\"${portholeSocketName(context.packageName)}\""
             File(context.filesDir, "porthole.json").writeText(
                 """{"port":$port,"package":"${context.packageName}","socket":$socket,"protocol":1}""",
             )
