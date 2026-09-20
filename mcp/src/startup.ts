@@ -105,10 +105,12 @@ export function startupFindingsOf(events: DeviceEvent[], otherFindings: Finding[
       confidence: "observed",
       title: "the app never reported itself fully drawn",
       detail:
-        "No `Porthole.reportFullyDrawn()` call landed within the collector's grace window after " +
-        "the first frame. Android gives no way to see a plain `Activity.reportFullyDrawn()` call " +
-        "from outside the app that makes it, so this stays silent unless the app also calls " +
-        "`Porthole.reportFullyDrawn()` — see that function's own doc comment.",
+        "Call `Activity.reportFullyDrawn()` — the standard Android API — once everything on screen " +
+        "is actually ready, not just the first frame. In a Compose app, or any app whose Activity " +
+        "extends androidx.activity.ComponentActivity, that call alone is already enough: this " +
+        "collector hooks ComponentActivity's own fullyDrawnReporter automatically, no other app " +
+        "code needed. `Porthole.reportFullyDrawn()` is the documented fallback for an Activity that " +
+        "is not one — see that function's own doc comment.",
       window: { from: firstFrameMs, to: firstFrameMs },
     });
   }

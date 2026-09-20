@@ -103,14 +103,15 @@ const KIND_GROUPS: readonly KindGroup[] = [
     narrated: "raw here",
   },
   {
-    // GRA-60: at most one per launch, carrying fork/onCreate/first-Activity/
-    // first-frame phases — see StartupCollector.kt for what each field means.
+    // GRA-60: one per launch — cold (process fork + Application.onCreate)
+    // the first time, warm or hot (no fork, no onCreate) for every
+    // relaunch after — see StartupCollector.kt for what each field means.
     kinds: ["startup"],
     narrated:
       "raw here; `findings` turns a slow one into a `startup-slow` entry naming the dominant phase and " +
       "cross-referencing any `db-on-main-thread`/`main-thread-stall` finding that fell inside the " +
-      "startup window, and a `startup-not-fully-drawn` note when `Porthole.reportFullyDrawn()` was " +
-      "never called",
+      "startup window, and a `startup-not-fully-drawn` note when `Activity.reportFullyDrawn()` " +
+      "(caught automatically in a Compose/ComponentActivity app) was never observed",
   },
 ];
 
