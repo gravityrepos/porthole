@@ -160,7 +160,7 @@ class HttpPhasesTest {
         // the exact shape a real app's own connection-pool pressure takes,
         // and the one synchronous calls elsewhere in this file cannot
         // exercise at all.
-        server.enqueue(MockResponse().setBodyDelay(200, TimeUnit.MILLISECONDS).setBody("first"))
+        server.enqueue(MockResponse().setBodyDelay(600, TimeUnit.MILLISECONDS).setBody("first"))
         server.enqueue(MockResponse().setBody("second"))
 
         val client = client().newBuilder()
@@ -186,11 +186,13 @@ class HttpPhasesTest {
                 override fun onFailure(call: Call, e: IOException) = firstDone.countDown()
             },
         )
-        // Gives the first call a moment to actually be admitted (not merely
-        // enqueued) before the second arrives, so the second is the one
-        // genuinely held back by maxRequestsPerHost rather than both racing
-        // for the single slot together.
-        Thread.sleep(30)
+        // Wait until the first request has genuinely reached the server —
+        // i.e. it holds the single per-host slot — before the second is
+        // enqueued, so the second is the one held back by maxRequestsPerHost
+        // rather than both racing for the slot. A fixed sleep did this on a
+        // laptop and not on a loaded CI runner (the wave-2 push failed here
+        // once); takeRequest blocks on the real event instead of guessing.
+        assertTrue("first request never reached the server", server.takeRequest(5, TimeUnit.SECONDS) != null)
 
         // Measured independently of anything InflightCollector/HttpCall
         // itself reports, the same reason the plain phase-sum test above
@@ -214,13 +216,19 @@ class HttpPhasesTest {
         val queuedCall = Porthole.inflight()!!.capture().recentHttp.first { it.url.endsWith("/second") }
         assertTrue(
             "the queued call should show real dispatcher-queue time, got ${queuedCall.phases}",
-            (queuedCall.phases["queued"] ?: 0) >= 100,
+            // The first call holds the slot for its 600ms body delay, minus
+            // whatever of it elapsed before this call was enqueued: well
+            // over half of it on any machine.
+            (queuedCall.phases["queued"] ?: 0) >= 300,
         )
         val summed = queuedCall.phases.values.sum()
         assertTrue(
             "summed phases ($summed from ${queuedCall.phases}) should land within a few ms of the true " +
                 "elapsed time (${secondTrueElapsedMs}ms)",
-            summed in (secondTrueElapsedMs - 30)..(secondTrueElapsedMs + 30),
+            // ±100ms rather than the ±30ms the loopback test above can afford:
+            // the queued span is measured against real wall time on a runner
+            // that may be descheduled for tens of ms at a time.
+            summed in (secondTrueElapsedMs - 100)..(secondTrueElapsedMs + 100),
         )
     }
 
