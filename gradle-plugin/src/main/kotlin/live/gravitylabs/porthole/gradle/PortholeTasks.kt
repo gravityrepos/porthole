@@ -40,10 +40,18 @@ import javax.inject.Inject
  * A free function, tested on its own the same way [adbArgs] is — the shape
  * that matters here (which target string, for which inputs) does not need a
  * device, a Project or a Task to prove.
+ *
+ * GRA-199 QA (F3): [applicationId] is trimmed before it is interpolated, not
+ * merely checked for blankness — `mcp/src/devices.ts`'s own `forwardTarget`
+ * already trimmed (it has to: an env var or a hand-typed `.mcp.json` value is
+ * far more likely to carry stray whitespace than a Gradle `Property`), so an
+ * untrimmed value here could build a target this function accepts but that
+ * disagrees, byte for byte, with the one the MCP server would build for the
+ * same nominal id.
  */
 internal fun forwardTarget(port: Int, applicationId: String?, legacyTcpPort: Boolean): String {
     if (legacyTcpPort) return "tcp:$port"
-    val id = applicationId?.takeIf { it.isNotBlank() }
+    val id = applicationId?.trim()?.takeIf { it.isNotBlank() }
         ?: throw GradleException(
             "porthole { applicationId } is not set, so the abstract socket's name " +
                 "(localabstract:porthole.<applicationId>) cannot be built. An application module " +

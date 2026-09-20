@@ -669,6 +669,17 @@ export function findingsOf(
     const worst = slow.reduce((a, b) => (b.ms > a.ms ? b : a));
     const phases = phasesOf(worst.data);
     const dominant = dominantPhaseOf(phases);
+    // H1 QA nit: phases need not sum to elapsedMs — queueing (dispatcher
+    // contention, connection-pool waits OkHttp's own EventListener has no
+    // callback for) is real time this collector cannot attribute to any
+    // phase at all. A "dominant" phase that is only a sliver of the total
+    // is not what a reader means by "mostly" — it is just the largest of
+    // several small, uninformative numbers. "mostly" is earned only once
+    // the dominant phase actually accounts for at least half of elapsedMs;
+    // below that this says which phase was largest and exactly how much of
+    // the total it was, rather than implying it explains the call.
+    const dominantMs = dominant ? phases[dominant] : undefined;
+    const dominantIsMajority = dominant !== undefined && dominantMs !== undefined && dominantMs * 2 >= worst.ms;
     const network = networkAt(events, worst.startedAt ?? worst.endedAt ?? 0);
     const onCellular = network?.transport === "cellular";
     findings.push({
@@ -677,7 +688,11 @@ export function findingsOf(
       confidence: "observed",
       title:
         `${str(worst.data.method)} ${str(worst.data.url)} took ${worst.ms}ms` +
-        (dominant ? ` — mostly ${dominant}` : "") +
+        (dominant
+          ? dominantIsMajority
+            ? ` — mostly ${dominant}`
+            : ` — largest phase: ${dominant} (${dominantMs} of ${worst.ms}ms)`
+          : "") +
         (onCellular ? " (on cellular)" : ""),
       detail:
         (dominant

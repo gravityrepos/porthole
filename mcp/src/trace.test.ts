@@ -731,18 +731,48 @@ describe("findingsOf: http-call-slow (GRA-66)", () => {
 
   it("attributes to the phase with the largest duration", () => {
     const events = slowCall(4_000, {
-      phases: { dns: 20, connect: 30, requestHeaders: 5, responseHeaders: 3_900, responseBody: 45 },
+      phases: { dns: 20, connect: 30, requestHeaders: 5, waiting: 3_900, responseBody: 45 },
     });
     const finding = find(events).find((f) => f.id === "http-call-slow");
-    expect(finding?.title).toContain("mostly responseHeaders");
-    expect(finding?.detail).toContain("3900ms of 4000ms was responseHeaders");
-    expect(finding?.evidence?.dominantPhase).toBe("responseHeaders");
+    expect(finding?.title).toContain("mostly waiting");
+    expect(finding?.title).not.toContain("largest phase");
+    expect(finding?.detail).toContain("3900ms of 4000ms was waiting");
+    expect(finding?.evidence?.dominantPhase).toBe("waiting");
     expect(finding?.evidence?.phases).toEqual({
       dns: 20,
       connect: 30,
       requestHeaders: 5,
-      responseHeaders: 3_900,
+      waiting: 3_900,
       responseBody: 45,
+    });
+  });
+
+  // H1 QA nit: phases need not sum to elapsedMs at all -- queueing
+  // (dispatcher contention, a connection-pool wait) is real time the
+  // EventListener has no callback for, so a "dominant" phase can be the
+  // largest of several small numbers without explaining the call at all.
+  // "mostly" is reserved for when it actually is most of the call.
+  describe("'mostly' vs 'largest phase' -- H1 QA nit (trace.ts:650)", () => {
+    it("says 'mostly' when the dominant phase is at least half of elapsedMs", () => {
+      // 2000 of 4000ms -- exactly half, the boundary itself, not just comfortably over it.
+      const events = slowCall(4_000, { phases: { connect: 100, waiting: 2_000 } });
+      const finding = find(events).find((f) => f.id === "http-call-slow");
+      expect(finding?.title).toContain("mostly waiting");
+      expect(finding?.title).not.toContain("largest phase");
+    });
+
+    it("says 'largest phase: X (N of M ms)' when the dominant phase is under half, most of the call is unattributed queueing", () => {
+      // 900 of 4000ms (22.5%) -- the largest of several small phases, but
+      // nowhere near "mostly" the call: the other ~3100ms is unattributed.
+      const events = slowCall(4_000, {
+        phases: { dns: 400, connect: 600, requestHeaders: 100, waiting: 900, responseBody: 200 },
+      });
+      const finding = find(events).find((f) => f.id === "http-call-slow");
+      expect(finding?.title).not.toContain("mostly");
+      expect(finding?.title).toContain("largest phase: waiting (900 of 4000ms)");
+      // The detail's own "N ms of M ms" wording is untouched by this nit --
+      // still honest about the dominant phase's own share either way.
+      expect(finding?.detail).toContain("900ms of 4000ms was waiting");
     });
   });
 

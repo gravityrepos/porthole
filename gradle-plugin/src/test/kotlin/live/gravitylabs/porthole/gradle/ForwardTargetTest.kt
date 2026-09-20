@@ -54,4 +54,36 @@ class ForwardTargetTest {
     fun `the port changes the host side of the forward but never the target`() {
         assertEquals("localabstract:porthole.com.example.shop", forwardTarget(9999, "com.example.shop", legacyTcpPort = false))
     }
+
+    // -- GRA-199 QA (F3): trimmed, not just checked for blankness -----------
+
+    @Test
+    fun `trims surrounding whitespace on applicationId before building the target`() {
+        // Not merely "does not refuse" - the built string must be identical
+        // to what an untouched value would produce, so this side's target
+        // agrees byte for byte with mcp devices ts's own forwardTarget for
+        // the same nominal id, which already trims.
+        assertEquals(
+            "localabstract:porthole.com.example.shop",
+            forwardTarget(8677, "  com.example.shop  ", legacyTcpPort = false),
+        )
+        assertEquals(
+            "localabstract:porthole.com.example.shop",
+            forwardTarget(8677, "\tcom.example.shop\n", legacyTcpPort = false),
+        )
+    }
+
+    @Test
+    fun `whitespace-only applicationId is the same refusal as a genuinely blank one`() {
+        // "   " already covers this via isNotBlank, but this pins that trim()
+        // is what actually clears the value now, not merely that isNotBlank
+        // still catches it - removing the trim() call while leaving isNotBlank
+        // in place would still pass the pre-existing blank test above but
+        // would let "  com.example.shop  " through untrimmed, which is
+        // exactly the drift this file's other new test catches.
+        val error = assertThrows(GradleException::class.java) {
+            forwardTarget(8677, "\t\n  ", legacyTcpPort = false)
+        }
+        assertTrue(error.message.orEmpty().contains("porthole { applicationId }"))
+    }
 }

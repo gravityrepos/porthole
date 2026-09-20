@@ -545,6 +545,39 @@ const handlers = {
     const limit = params.limit ?? 1000;
     return { events: ring.slice(-limit), droppedBefore: 0, now: uptime() };
   },
+  // GRA-228 QA (S1): the mock had no `setup` handler at all, so the one
+  // tool that ticket shipped could not be exercised against the project's
+  // own dev loop (`npm run mock`) — `setup` came back "unknown method
+  // 'setup'", and every `porthole_status` call paid a failing round-trip
+  // chasing it (see index.ts's `setupNote` fetch). Real shape: a bare
+  // array of `SetupEntry` (`Setup.kt`'s `report()`), not wrapped in an
+  // envelope. Ktor is deliberately left unwired — onClasspath but not
+  // instrumented — so `setup` has a real, ranked gap to show against the
+  // mock instead of an all-green report nobody can tell apart from a
+  // handler that always says "fine".
+  setup: () => [
+    { name: "socket", onClasspath: true, instrumented: true, hint: null },
+    {
+      name: "strictmode",
+      onClasspath: true,
+      instrumented: true,
+      hint:
+        "Porthole's StrictMode thread and VM policies REPLACED whatever this process had before " +
+        "install() ran — StrictMode has no public API to read or chain an existing policy, so this " +
+        "is a replacement, not an addition. Any penalty (including penaltyDeath) the app's own " +
+        "policy set is no longer in effect.",
+    },
+    { name: "okhttp", onClasspath: true, instrumented: true, hint: null },
+    {
+      name: "ktor",
+      onClasspath: true,
+      instrumented: false,
+      hint: "add install(portholeKtor()) to your HttpClient",
+    },
+    { name: "room", onClasspath: true, instrumented: true, hint: null },
+    { name: "sqlite", onClasspath: false, instrumented: false, hint: null },
+    { name: "navigation", onClasspath: true, instrumented: true, hint: null },
+  ],
   reset: () => ({ ok: true }),
 };
 

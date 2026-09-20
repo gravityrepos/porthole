@@ -130,6 +130,47 @@ internal data class Hello(
 internal const val PROTOCOL_VERSION = 1
 
 // ---------------------------------------------------------------------------
+// GRA-199 QA (F2): the abstract socket's name, in one place
+// ---------------------------------------------------------------------------
+
+/**
+ * `porthole.` — the prefix on the abstract-namespace socket
+ * [PortholeSocketServer] binds by default, and on the `localabstract:`
+ * forward target the Gradle plugin (`PortholeTasks.kt`'s `forwardTarget`) and
+ * the MCP server (`mcp/src/devices.ts`'s `forwardTarget`) build to reach it.
+ *
+ * QA on GRA-199's first pass found six independent copies of this string —
+ * two inside [PortholeSocketServer] alone — and nothing that would catch one
+ * of them drifting a single character: a mismatched prefix or separator
+ * still produces a syntactically valid `adb forward`, one that connects to
+ * adb without error and simply never reaches the app, which is a much
+ * quieter failure than a bind that refuses outright. Runtime call sites
+ * ([PortholeSocketServer], [live.gravitylabs.porthole.Porthole]) now all go
+ * through [portholeSocketName] instead of rebuilding the string. The other
+ * two — `PortholeTasks.kt` in the `gradle-plugin` module and `devices.ts` in
+ * `mcp/` — cannot import this constant at all (neither module depends on
+ * `runtime`, deliberately: see `AndroidWiring.kt`'s own doc comment on why
+ * AGP is kept out of this module and, symmetrically, why this module is kept
+ * out of a plain Kotlin/TS build). Each keeps its own literal, and a
+ * source-text parity test in each of those two modules reads this constant
+ * back out of this file and asserts theirs matches — the same technique
+ * `device.test.ts`'s `PROTOCOL_VERSION` check and `eventKinds.test.ts`
+ * already use for the same cross-module-drift problem.
+ */
+internal const val PORTHOLE_SOCKET_PREFIX = "porthole."
+
+/**
+ * The abstract socket's full name for [packageName] — [PORTHOLE_SOCKET_PREFIX]
+ * plus the package, unmodified. Not trimmed or otherwise sanitised: the
+ * package name is [android.content.Context.getPackageName], never user input
+ * at this layer, so there is nothing here to sanitise against — GRA-199 QA
+ * (F3) trims the applicationId earlier, at the point it is read off a Gradle
+ * `Property`/`process.env`, which is the actual source of the stray
+ * whitespace a hand-edited build script or `.mcp.json` could introduce.
+ */
+internal fun portholeSocketName(packageName: String): String = PORTHOLE_SOCKET_PREFIX + packageName
+
+// ---------------------------------------------------------------------------
 // event kinds
 // ---------------------------------------------------------------------------
 
@@ -447,13 +488,32 @@ internal data class HttpCall(
     val responseBody: BodyPreview? = null,
     /**
      * GRA-66: OkHttp's own `EventListener` timings, only the phases actually
-     * observed — `dns`, `connect`, `secureConnect`, `requestHeaders`,
-     * `requestBody`, `responseHeaders`, `responseBody`, each the time *that
-     * phase itself* took (not cumulative), so summing every key here should
-     * land within a few ms of [elapsedMs]. Empty for a call this collector
-     * has no `EventListener` timings for at all — a Ktor call with no OkHttp
-     * engine underneath (see `KtorPorthole`'s own doc comment for why that
-     * boundary is real, not an oversight), or one still in flight.
+     * observed — `queued`, `dns`, `connect`, `secureConnect`, `dispatch`,
+     * `requestHeaders`, `requestBody`, `waiting`, `responseBody` — each the
+     * time *that phase itself* took (not cumulative), so summing every key
+     * here should now genuinely land within a few ms of [elapsedMs] (QA
+     * F11: it did not, before `queued` and `dispatch` existed — 73ms of a
+     * 748ms call was dispatcher queueing before `dnsStart`, plus OkHttp's
+     * own exchange setup between `connectionAcquired` and
+     * `requestHeadersStart`, and neither had anywhere to go). `waiting` is
+     * named to match [phase]'s own live label above, not OkHttp's callback
+     * name (`responseHeadersStart`/`End`) — it is mostly server think time,
+     * not header-parsing time; see `OkHttpPorthole.kt`'s own doc comment
+     * for why it has to be timed from *before* that callback fires at all.
+     *
+     * `dns` and `connect` are summed across every attempt a call made
+     * (QA F12) — an IPv6 attempt that failed before a IPv4 one succeeded is
+     * not thrown away, [connectAttempts] says how many there were. The
+     * header/body write/read phases are not: a redirect or an auth-challenge
+     * retry re-runs its own request/response legs, and each one's callbacks
+     * simply overwrite the last (QA F13, accepted rather than fixed) — they
+     * describe the *final* leg only, while [elapsedMs] still spans the
+     * whole call, every leg included.
+     *
+     * Empty for a call this collector has no `EventListener` timings for at
+     * all — a Ktor call with no OkHttp engine underneath (see
+     * `KtorPorthole`'s own doc comment for why that boundary is real, not
+     * an oversight), or one still in flight.
      */
     val phases: Map<String, Long> = emptyMap(),
     /**
@@ -473,6 +533,8 @@ internal data class HttpCall(
     val requestBytes: Long? = null,
     /** Bytes actually read for the response body, from `EventListener.responseBodyEnd` — same null-means-no-body rule as [requestBytes]. */
     val responseBytes: Long? = null,
+    /** QA F12: how many `connectStart`s this call made — 1 for an ordinary connect, 2+ for a failover, 0 for a reused connection or a call [phases] has nothing to say about. */
+    val connectAttempts: Int = 0,
 )
 
 /**

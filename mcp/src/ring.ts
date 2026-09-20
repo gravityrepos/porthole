@@ -3,7 +3,7 @@
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAdbAsync, type RunAdbAsyncOptions } from "./adb.js";
+import { resolveProjectRoot, runAdbAsync, type RunAdbAsyncOptions } from "./adb.js";
 import { planRing, ringConfigText, RING_SESSION_NAME, type RingPlan } from "./systrace.js";
 
 /**
@@ -58,10 +58,16 @@ const DEVICE_CONFIG_PATH = "/data/local/tmp/porthole-ring-config.pbtxt";
  * `stop` has to work even when nothing in this MCP process remembers
  * starting the ring — a server restart, or a `system_trace_stop` call from a
  * different process than the one that started it. Reading this file back is
- * what makes that possible without relying on `--query`'s output (which
- * reports a session, not the OS pid of the process that owns it) or on
- * `pgrep -f` matching a command line that says nothing unique about which
- * ring is "ours".
+ * the fast path for that.
+ *
+ * QA (R2) on this ticket's first pass: this write is itself best-effort (a
+ * dropped adb call, or an MCP process killed between the write and the
+ * process it named), so it cannot be the *only* way to find the session —
+ * `findRunningRingPid` below is the real source of truth, a device-side
+ * process-table scan that needs nothing written anywhere in advance. The
+ * marker still exists because it is cheaper than a scan on the common path
+ * (`stop` right after `start`, same process, nothing has had a chance to
+ * fail yet), not because anything here still assumes it landed.
  */
 const DEVICE_PID_PATH = "/data/local/tmp/porthole-ring.pid";
 
@@ -74,6 +80,12 @@ const DEVICE_PID_PATH = "/data/local/tmp/porthole-ring.pid";
  * the session's final buffer contents here before exiting. `stop` deletes it
  * immediately after: `system_trace_stop` promises "no files behind", and a
  * flush nobody asked to keep is not an exception to that.
+ *
+ * QA (R2): also doubles as `findRunningRingPid`'s search tag below — it is
+ * the one string, fixed across every ring session this controller ever
+ * starts, that is guaranteed to appear in the argv of the exact process
+ * this file starts and nothing else, since `-o <this path>` is literally
+ * part of the command line `--background` was invoked with.
  */
 const DEVICE_OUT_PATH = "/data/misc/perfetto-traces/porthole-ring.pftrace";
 
@@ -81,6 +93,40 @@ const DEVICE_TRACE_DIR = "/data/misc/perfetto-traces";
 
 function deviceSnapshotPath(stamp: number, auto: boolean): string {
   return `${DEVICE_TRACE_DIR}/porthole-ring-${auto ? "auto-" : ""}${stamp}.pftrace`;
+}
+
+/**
+ * Scans the device's own process table for a running `perfetto --background`
+ * this controller started, returning its OS pid — or null when none is
+ * found. adb itself failing is also null: a scan that could not run is not
+ * proof of absence, but every caller here already treats "could not
+ * confirm" and "confirmed absent" the same way (nothing more to kill, or
+ * nothing blocking a fresh start).
+ *
+ * QA (R2): this is the fallback `stop` needs when `DEVICE_PID_PATH` was
+ * never written (the marker write is itself best-effort — see its own doc
+ * comment) or this process restarted before reading it, and the mechanism
+ * `start` uses to refuse a second session it did not itself start (a
+ * previous MCP process's ring, still running). `ps -A -o PID,ARGS` is
+ * toybox's own format string (every Android version this project already
+ * requires supports it); PID is the first column, ARGS is everything after
+ * it, matched against `DEVICE_OUT_PATH` — see that constant's own doc
+ * comment for why that string, not `unique_session_name`, is what a `ps`
+ * listing can actually see.
+ */
+async function findRunningRingPid(options: RingAdbOptions): Promise<number | null> {
+  const result = await runAdbAsync(["shell", "ps", "-A", "-o", "PID,ARGS"], adbOptions(options));
+  if (!result.ok) return null;
+  for (const line of result.output.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const [, pidText, args] = match;
+    if (args.includes("perfetto") && args.includes(DEVICE_OUT_PATH)) {
+      const pid = Number(pidText);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,11 +203,19 @@ export interface RingSnapshotResult {
   ok: true;
   path: string;
   bytes: number;
-  startedAt: number;
+  /**
+   * QA (F19): null when this snapshot came from a ring `confirmRunningFromDevice`
+   * found running on the device rather than one this process itself started
+   * — a fresh MCP process genuinely does not know when a session it did not
+   * start began, or how big its buffer is (the config that said so was
+   * already deleted from the device by the time this process asked). `note`
+   * says so in prose; these stay honestly null rather than guessed.
+   */
+  startedAt: number | null;
   requestedAt: number;
-  elapsedMs: number;
-  bufferKb: number;
-  /** Honest, not precise: see `DEFAULT_RING_BUFFER_KB`'s own doc comment in systrace.ts for why this cannot promise an exact "last N seconds". */
+  elapsedMs: number | null;
+  bufferKb: number | null;
+  /** Honest, not precise: see `DEFAULT_RING_BUFFER_KB`'s own doc comment in systrace.ts for why this cannot promise an exact "last N seconds", on top of the `startedAt`/`bufferKb` gap above. */
   note: string;
 }
 
@@ -174,6 +228,14 @@ export interface RingStopResult {
 
 export interface RingStatus {
   running: boolean;
+  /**
+   * QA (F19): `running: true` with `startedAt`/`app`/`categories`/`bufferKb`
+   * all null is a real, honest combination — a ring this process discovered
+   * running on the device (`confirmRunningFromDevice`) rather than one it
+   * started itself, whose plan this process has no way to recover. It is
+   * not a defect in the payload; it is what "confirmed running, unknown
+   * provenance" looks like.
+   */
   startedAt: string | null;
   elapsedMs: number | null;
   app: string | null;
@@ -181,6 +243,8 @@ export interface RingStatus {
   bufferKb: number | null;
   snapshots: number;
   lastSnapshotAt: string | null;
+  /** QA (R4): the most recent completed snapshot's path/bytes — manual or auto, and set even though an auto-snapshot from `findings` is never awaited there. Null until the first snapshot completes. */
+  lastSnapshot: { path: string; bytes: number; auto: boolean } | null;
   overhead: typeof MEASURED_OVERHEAD;
 }
 
@@ -198,10 +262,14 @@ const AUTO_SNAPSHOT_COOLDOWN_MS = 10_000;
  * servers pointed at two devices) never share state neither asked to share.
  *
  * In-memory state is an optimisation, not the source of truth: `stop` always
- * re-reads `DEVICE_PID_PATH` off the device rather than trusting
- * `this.pid`, specifically so it still works after this process restarts
- * and no longer remembers starting anything (GRA-57 AC: "stop leaves
- * nothing running and no files behind" has to hold even then).
+ * re-reads `DEVICE_PID_PATH` off the device rather than trusting `this.pid`,
+ * and falls back to `findRunningRingPid`'s process-table scan when that file
+ * is missing or unreadable (QA's R2 finding on this ticket's first pass: the
+ * marker write is itself best-effort, so it cannot be the only way `stop`
+ * has of finding the session) — specifically so `stop` still works after
+ * this process restarts and no longer remembers starting anything, or after
+ * a marker write that simply never landed (GRA-57 AC: "stop leaves nothing
+ * running and no files behind" has to hold even then).
  */
 export class RingController {
   private running = false;
@@ -211,6 +279,42 @@ export class RingController {
   private snapshotCount = 0;
   private lastSnapshotAt: number | null = null;
   private lastAutoSnapshotAt: number | null = null;
+  /** QA (R4): the most recent snapshot's path/bytes, manual or auto — what `status()` reports as `lastSnapshot`. */
+  private lastSnapshotResult: { path: string; bytes: number; auto: boolean } | null = null;
+  /** QA (R4): a completed fire-and-forget auto-snapshot, waiting for the next `findings` call to attach it — consumed (read once, then cleared) by `triggerAutoSnapshotOnError`. */
+  private pendingAutoSnapshot: { path: string; bytes: number } | null = null;
+  /** QA (R4): true while a fire-and-forget auto-snapshot's own `snapshot()` call is still running — `triggerAutoSnapshotOnError` reads this instead of starting a second one on top of it. */
+  private autoSnapshotInFlight = false;
+
+  /**
+   * QA (R1) on this ticket's first pass: every post-launch failure in this
+   * function used to `return { ok: false, ... }` directly, with the
+   * backgrounded session already recording on the device — reproduced with
+   * a PID line the parse step could not read, which left a live `sched`
+   * session running until reboot while both `this.running` and the device's
+   * own pid marker stayed unset, so `system_trace_stop` reported "nothing
+   * was running" about a session that very much was.
+   *
+   * This is the one exit path every failure *after* the launch command has
+   * actually run goes through, so a session cannot be left behind by a
+   * future failure branch that forgets to clean up — the same reasoning as
+   * `joinSummaryAndPayload` in `index.ts` being the one place a result is
+   * assembled. It scans for and kills whatever is running (R2's
+   * `findRunningRingPid`, not a pid this function may not have — the launch
+   * failing to hand one back cleanly is exactly the case this exists for)
+   * before ever returning the failure, so a caller reading `ok: false` can
+   * trust the device is clean, not merely reported as such.
+   */
+  private async failAfterLaunch(message: string, options: RingAdbOptions): Promise<RingFailure> {
+    const pid = await findRunningRingPid(options);
+    if (pid !== null) {
+      await runAdbAsync(["shell", `kill -TERM ${pid}`], adbOptions(options));
+    }
+    // R3: a failed launch must not leave the pushed config behind either —
+    // every failure path from here on removes it, not only the happy path.
+    await runAdbAsync(["shell", `rm -f ${DEVICE_CONFIG_PATH}`], adbOptions(options));
+    return { ok: false, message };
+  }
 
   async start(options: RingStartOptions): Promise<RingStartResult | RingFailure> {
     if (this.running) {
@@ -232,41 +336,72 @@ export class RingController {
       };
     }
 
+    // QA (R2): refuses a session this process did not itself start, not
+    // only a second call within the same process — an MCP server restart
+    // leaves `this.running` false while a real session is still recording.
+    const alreadyRunning = await findRunningRingPid(options);
+    if (alreadyRunning !== null) {
+      return {
+        ok: false,
+        message:
+          `Already running on the device (pid ${alreadyRunning}), started by a process this one has ` +
+          "no memory of. Call system_trace_stop first if you want to change the app or categories.",
+      };
+    }
+
     const dir = mkdtempSync(join(tmpdir(), "porthole-ring-"));
     const localConfigPath = join(dir, "config.pbtxt");
     writeFileSync(localConfigPath, ringConfigText(plan));
 
     try {
       const pushed = await runAdbAsync(["push", localConfigPath, DEVICE_CONFIG_PATH], adbOptions(options));
+      // Nothing has launched yet — `failAfterLaunch` would scan for nothing
+      // to kill, but going through it anyway costs an extra, pointless adb
+      // round trip on the single most common failure shape (adb itself
+      // unreachable). Returned directly, same as before.
       if (!pushed.ok) return { ok: false, message: `Could not push the ring config: ${pushed.output}` };
 
+      // `--background-wait` (`-D`), not `--background` (`-d`): it blocks
+      // until perfetto's own data sources have confirmed they started (up
+      // to 30s) before the shell command returns, so a `started.ok` result
+      // means the session is genuinely up and registered with `traced` —
+      // not merely that a fork happened moments before adb's shell command
+      // raced ahead of it. This is what makes the ps-scan immediately below
+      // reliable rather than a hope that the fork has become visible yet.
       const started = await runAdbAsync(
-        ["shell", `cat ${DEVICE_CONFIG_PATH} | perfetto --txt -c - --background -o ${DEVICE_OUT_PATH}`],
+        ["shell", `cat ${DEVICE_CONFIG_PATH} | perfetto --txt -c - --background-wait -o ${DEVICE_OUT_PATH}`],
         adbOptions(options),
       );
       if (!started.ok) {
-        return { ok: false, message: `Could not start the ring: ${started.output}` };
+        return this.failAfterLaunch(`Could not start the ring: ${started.output}`, options);
       }
 
-      // `--background`'s PID is the first line of stdout; a PTY warning
-      // perfetto writes to stderr on some hosts lands after it once
-      // runAdbAsync merges the two streams (stdout first, stderr appended —
-      // see adb.ts). Scanning every line for the first one that is purely
-      // digits is robust to that warning appearing, or not, on a given host.
-      const pidLine = started.output.split("\n").find((line) => /^\d+$/.test(line.trim()));
-      const pid = pidLine ? Number(pidLine.trim()) : NaN;
-      if (!Number.isInteger(pid) || pid <= 0) {
-        return {
-          ok: false,
-          message: `Started, but could not read back a PID from perfetto's own output: ${started.output}`,
-        };
+      // QA (R1): the pid comes from the same device-side scan `stop` and
+      // the already-running check above use, not from parsing perfetto's
+      // own stdout — that used to be the *only* source, and it was also the
+      // single point of failure R1 was filed against: a launch that
+      // genuinely succeeded but whose pid could not be read back out of
+      // stdout used to be reported as a failure with the session still
+      // running. A scan of the device's own process table cannot be
+      // "unparseable" the way one specific line of one process's stdout
+      // can — it either finds the process or it does not.
+      const pid = await findRunningRingPid(options);
+      if (pid === null) {
+        return this.failAfterLaunch(
+          `perfetto --background-wait reported success, but no running session could be found ` +
+            `afterward: ${started.output}`,
+          options,
+        );
       }
 
-      // Best-effort: a failure to record the PID marker or clean up the
-      // pushed config does not undo a session that is genuinely running —
-      // `stop` still finds the process by PID if this write landed, and the
-      // config file left behind is harmless (it is overwritten by the next
-      // `start`, and `stop` also removes it defensively).
+      // The marker is written from this same scanned pid, immediately —
+      // "before the parse-dependent step" (QA's own words): there is no
+      // longer a parse of perfetto's own stdout standing between "the
+      // session is confirmed running" and "the device knows its own pid",
+      // the way there used to be. Still best-effort: a failure to write it
+      // does not undo a session that is genuinely running and already
+      // discoverable by `findRunningRingPid` regardless — `stop` falls back
+      // to that scan when this file is missing (see its own doc comment).
       await runAdbAsync(["shell", `printf %s ${pid} > ${DEVICE_PID_PATH}`], adbOptions(options));
       await runAdbAsync(["shell", `rm -f ${DEVICE_CONFIG_PATH}`], adbOptions(options));
 
@@ -277,6 +412,8 @@ export class RingController {
       this.snapshotCount = 0;
       this.lastSnapshotAt = null;
       this.lastAutoSnapshotAt = null;
+      this.pendingAutoSnapshot = null;
+      this.autoSnapshotInFlight = false;
 
       return { ok: true, plan, pid, startedAt: this.startedAt };
     } finally {
@@ -284,9 +421,50 @@ export class RingController {
     }
   }
 
+  /**
+   * QA (F19) on this ticket's second QA pass: `status()` and `snapshot()`
+   * used to answer purely from `this.running` — a fresh MCP process starts
+   * with that false regardless of what is actually happening on the
+   * device, so a restarted client could not see, snapshot from, or be
+   * warned about a ring genuinely burning CPU that a *previous* process
+   * (or a different one entirely) had started. This is the fallback both
+   * now call on a cache miss: the same pid marker `stop` reads, falling
+   * back to the same process-table scan `start`/`stop` already use (R2) —
+   * one shared mechanism for "is a ring actually running", not three
+   * independently-written checks that could disagree.
+   *
+   * Adopting a session this way only ever sets `running`/`pid` — never
+   * `plan`/`startedAt`, which this process has no way to know for a
+   * session it did not itself start (the config that said so was already
+   * deleted from the device before this process ever asked). Callers that
+   * need those two fields see them honestly stay null; see
+   * `RingSnapshotResult`'s and `RingStatus`'s own doc comments.
+   */
+  private async confirmRunningFromDevice(options: RingAdbOptions): Promise<boolean> {
+    if (this.running) return true;
+
+    const catResult = await runAdbAsync(["shell", `cat ${DEVICE_PID_PATH}`], adbOptions(options));
+    const devicePidLine = catResult.ok ? catResult.output.split("\n").find((l) => /^\d+$/.test(l.trim())) : undefined;
+    const pid = devicePidLine ? Number(devicePidLine.trim()) : await findRunningRingPid(options);
+    if (pid === null) return false;
+
+    this.running = true;
+    this.pid = pid;
+    return true;
+  }
+
   async snapshot(options: RingSnapshotOptions): Promise<RingSnapshotResult | RingFailure> {
-    if (!this.running || !this.plan || this.startedAt === null) {
-      return { ok: false, message: "The ring is not running. Call system_trace_start first." };
+    // QA (F19): `this.running` is a cache of what *this process* started —
+    // false from the moment a fresh MCP process boots, regardless of what
+    // is actually happening on the device. A cache miss is checked against
+    // the device itself before concluding there is nothing to snapshot; see
+    // `confirmRunningFromDevice`'s own doc comment for what it can and
+    // cannot recover once adopted this way.
+    if (!this.running) {
+      const confirmed = await this.confirmRunningFromDevice(options);
+      if (!confirmed) {
+        return { ok: false, message: "The ring is not running. Call system_trace_start first." };
+      }
     }
 
     const requestedAt = Date.now();
@@ -330,56 +508,108 @@ export class RingController {
     const bytes = statSync(localPath).size;
     this.snapshotCount++;
     this.lastSnapshotAt = requestedAt;
-    const elapsedMs = requestedAt - this.startedAt;
+    this.lastSnapshotResult = { path: localPath, bytes, auto: options.auto === true };
+    // QA (F19): both stay null for a ring this process adopted rather than
+    // started — see RingSnapshotResult's own doc comment for why that is
+    // the honest answer rather than a guess.
+    const startedAt = this.startedAt;
+    const bufferKb = this.plan?.bufferKb ?? null;
+    const elapsedMs = startedAt !== null ? requestedAt - startedAt : null;
 
     return {
       ok: true,
       path: localPath,
       bytes,
-      startedAt: this.startedAt,
+      startedAt,
       requestedAt,
       elapsedMs,
-      bufferKb: this.plan.bufferKb,
+      bufferKb,
       note:
-        `Covers up to the last ${Math.round(elapsedMs / 1000)}s, or less if the ${this.plan.bufferKb}KB ` +
-        "ring had already filled and wrapped at some point before now — this host has no way to " +
-        "verify the actual span from outside the trace itself.",
+        elapsedMs !== null && bufferKb !== null
+          ? `Covers up to the last ${Math.round(elapsedMs / 1000)}s, or less if the ${bufferKb}KB ring ` +
+            "had already filled and wrapped at some point before now — this host has no way to " +
+            "verify the actual span from outside the trace itself."
+          : "This MCP process did not start the ring itself — it found one already running on the " +
+            "device — so its start time and buffer size are unknown here. The snapshot is still a " +
+            "real, current pull of the ring's contents.",
     };
   }
 
   /**
-   * GRA-57: called from `findings` (in `index.ts`) whenever this call's own
-   * result contains an error-severity finding and the ring is running.
-   * Cooldown-gated (`AUTO_SNAPSHOT_COOLDOWN_MS`) and best-effort — a failed
-   * auto-snapshot is swallowed rather than surfaced, because `findings`
-   * itself must not start failing just because the ring happened to be
-   * mid-restart or the device hiccuped; the finding is still reported either
-   * way, just without a trace attached.
+   * QA (R4) on this ticket's first pass: called from `findings` (in
+   * `index.ts`) whenever this call's own result contains an error-severity
+   * finding and the ring is running. Deliberately synchronous and deliberately
+   * does not await the snapshot itself — cloning the ring and pulling up to
+   * `bufferKb` worth of trace off the device is exactly the adb work GRA-89
+   * made `capture_system_trace` non-blocking for, and `findings` reporting a
+   * fresh error was not a reason to reintroduce that block on the very next
+   * call. Three outcomes, none of which wait on adb:
+   *
+   *  - A previous fire-and-forget snapshot finished since the last time this
+   *    was called: its path is handed back now (`attached`) and cleared, so
+   *    it is reported exactly once — "the next findings call" the ticket
+   *    describes.
+   *  - One is still running (`autoSnapshotInFlight`): `inProgress: true`,
+   *    nothing new started.
+   *  - Neither, and the cooldown allows it: a new one is kicked off with
+   *    `void this.snapshot(...)` — not `await`ed — and `inProgress: true` is
+   *    returned for *this* call, since it has not landed yet either.
+   *
+   * A snapshot that fails (device hiccup, ring died mid-restart) is
+   * swallowed in the `.catch` below the same way the old awaited version
+   * already promised: `findings` itself must never fail because of this.
    */
-  async maybeAutoSnapshotOnError(
+  triggerAutoSnapshotOnError(
     hasErrorFinding: boolean,
     options: RingAdbOptions & { outputDir?: string },
-  ): Promise<{ path: string; bytes: number } | null> {
-    if (!hasErrorFinding || !this.running) return null;
-    const now = Date.now();
-    if (this.lastAutoSnapshotAt !== null && now - this.lastAutoSnapshotAt < AUTO_SNAPSHOT_COOLDOWN_MS) return null;
-    this.lastAutoSnapshotAt = now;
+  ): { attached: { path: string; bytes: number } | null; inProgress: boolean } {
+    if (!hasErrorFinding || !this.running) return { attached: null, inProgress: false };
 
-    const result = await this.snapshot({ ...options, auto: true });
-    return result.ok ? { path: result.path, bytes: result.bytes } : null;
+    if (this.pendingAutoSnapshot) {
+      const attached = this.pendingAutoSnapshot;
+      this.pendingAutoSnapshot = null;
+      return { attached, inProgress: false };
+    }
+    if (this.autoSnapshotInFlight) return { attached: null, inProgress: true };
+
+    const now = Date.now();
+    if (this.lastAutoSnapshotAt !== null && now - this.lastAutoSnapshotAt < AUTO_SNAPSHOT_COOLDOWN_MS) {
+      return { attached: null, inProgress: false };
+    }
+    this.lastAutoSnapshotAt = now;
+    this.autoSnapshotInFlight = true;
+    void this.snapshot({ ...options, auto: true })
+      .then((result) => {
+        if (result.ok) this.pendingAutoSnapshot = { path: result.path, bytes: result.bytes };
+      })
+      .catch(() => {
+        // Best-effort, per this method's own doc comment: nothing to attach,
+        // and nothing for a caller of `findings` to see beyond that.
+      })
+      .finally(() => {
+        this.autoSnapshotInFlight = false;
+      });
+    return { attached: null, inProgress: true };
   }
 
   async stop(options: RingAdbOptions): Promise<RingStopResult> {
     // Re-read the device's own record of the pid rather than trusting
-    // `this.pid` — see this class's own doc comment for why: a `stop` from
-    // a process that never called `start` (an MCP restart in between) must
-    // still be able to find and kill the real session.
+    // `this.pid` — see `DEVICE_PID_PATH`'s own doc comment for why: a `stop`
+    // from a process that never called `start` (an MCP restart in between)
+    // must still be able to find and kill the real session.
     const catResult = await runAdbAsync(["shell", `cat ${DEVICE_PID_PATH}`], adbOptions(options));
     const devicePidLine = catResult.ok ? catResult.output.split("\n").find((l) => /^\d+$/.test(l.trim())) : undefined;
     const devicePid = devicePidLine ? Number(devicePidLine.trim()) : null;
-    const pid = devicePid ?? this.pid;
 
-    const wasRunning = this.running || devicePid !== null;
+    // QA (R2): the marker is itself best-effort (see `DEVICE_PID_PATH`'s doc
+    // comment) — when it is missing or unreadable, fall back to the same
+    // process-table scan `start` uses to refuse a second session, rather
+    // than concluding "nothing to stop" from the absence of one file that
+    // was never the actual source of truth.
+    const scannedPid = devicePid === null ? await findRunningRingPid(options) : null;
+    const pid = devicePid ?? scannedPid ?? this.pid;
+
+    const wasRunning = this.running || devicePid !== null || scannedPid !== null;
 
     if (pid !== null) {
       // Best-effort: a process that already exited (crashed, or a previous
@@ -407,6 +637,12 @@ export class RingController {
     this.pid = null;
     this.startedAt = null;
     this.lastSnapshotAt = null;
+    this.lastSnapshotResult = null;
+    this.pendingAutoSnapshot = null;
+    // Deliberately NOT resetting `autoSnapshotInFlight`: a fire-and-forget
+    // snapshot already in flight when `stop` runs cannot be cancelled, only
+    // left to fail quietly against a session that is now gone (its own
+    // `.catch` already handles that) once it settles.
 
     return {
       ok: true,
@@ -418,7 +654,28 @@ export class RingController {
     };
   }
 
-  status(): RingStatus {
+  /**
+   * QA (F19): async now, and consults the device on a cache miss the same
+   * way `snapshot()` does (`confirmRunningFromDevice`) — `porthole_status`
+   * is exactly the tool a restarted MCP process's caller reaches for first,
+   * and it used to be the one place this ticket's whole feature could go
+   * silently blind to a session still running (and still costing CPU) that
+   * this particular process did not happen to start.
+   */
+  async status(options: RingAdbOptions): Promise<RingStatus> {
+    if (!this.running) await this.confirmRunningFromDevice(options);
+    return this.cachedStatus();
+  }
+
+  /**
+   * `status()` without the device consultation — the cached, in-memory
+   * view alone. `porthole_status`'s one adb-touching exception is itself
+   * gated on `ownsDeviceConnection` (a test-injected device, every test in
+   * this suite, must never cause a real `adb` invocation); this is what it
+   * falls back to there, so that gate stays true for the ring's own status
+   * too, not just for the reconnect diagnosis `index.ts` already gated.
+   */
+  cachedStatus(): RingStatus {
     return {
       running: this.running,
       startedAt: this.startedAt !== null ? new Date(this.startedAt).toISOString() : null,
@@ -428,11 +685,26 @@ export class RingController {
       bufferKb: this.plan?.bufferKb ?? null,
       snapshots: this.snapshotCount,
       lastSnapshotAt: this.lastSnapshotAt !== null ? new Date(this.lastSnapshotAt).toISOString() : null,
+      // QA (R4): the most recent snapshot's path/bytes, manual or auto — so
+      // an auto-snapshot fired from `findings` (never awaited there, see
+      // `triggerAutoSnapshotOnError`) is still discoverable from here even
+      // before the next `findings` call happens to ask again.
+      lastSnapshot: this.lastSnapshotResult,
       overhead: MEASURED_OVERHEAD,
     };
   }
 }
 
+/**
+ * QA (R5): anchored on `resolveProjectRoot()`, not `process.cwd()` — the
+ * same root `save.ts`'s `defaultOutPath` (line 77) is given by its caller in
+ * `index.ts`, and what `sessions.ts` resolves session storage under: an MCP
+ * server's working directory is whatever launched it, not necessarily the
+ * project it is attached to. This used to read `process.cwd()` directly,
+ * the one place among this project's several `.porthole/traces` writers
+ * that did not already agree with `save_moment`'s and the session store's
+ * own choice of root.
+ */
 function resolveOutputDir(outputDir?: string): string {
-  return outputDir ? outputDir : join(process.cwd(), ".porthole", "traces");
+  return outputDir ? outputDir : join(resolveProjectRoot().directory, ".porthole", "traces");
 }

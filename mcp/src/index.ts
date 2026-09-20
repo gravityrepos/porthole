@@ -1178,6 +1178,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // condition `porthole_connect`'s own forward would refuse on.
       const socketTarget = forwardTarget(PORT, APPLICATION_ID, LEGACY_TCP_PORT);
 
+      // QA F18/F19: same PORTHOLE_SERIAL fallback the ring tools themselves
+      // use, and (F19) a real device consultation on a cache miss — see
+      // `RingController.status`'s own doc comment for why this can no
+      // longer answer from in-memory state alone. Gated on
+      // `ownsDeviceConnection`, the same as `reconnect` above: a
+      // test-injected `device` (every test in this suite) is not
+      // necessarily backed by a real, adb-managed device at all, and this
+      // must run no adb command against one — `cachedStatus()` is the
+      // in-memory-only view `status()` itself falls back on.
+      const ringStatus = ownsDeviceConnection
+        ? await ring.status({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary })
+        : ring.cachedStatus();
+
       const payload = {
         state: device.state,
         host: HOST,
@@ -1211,7 +1224,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // on (`system_trace_start`) sees the overhead before asking, not
         // after. Present and non-null even when nothing is running: the
         // `overhead` figures are still worth showing then.
-        ring: ring.status(),
+        ring: ringStatus,
       };
       // GRA-96/GRA-197: a mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
@@ -1440,8 +1453,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "Every integration the runtime can see: on the classpath or not, instrumented or not, each " +
         "with the runtime's own hint when there is something to do about it — the same data the " +
         "timeline UI's setup panel shows, including the `socket` entry (did the loopback socket " +
-        "bind) and the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
-        "policy REPLACES the app's own rather than chaining it).\n\n" +
+        "bind), the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
+        "policy REPLACES the app's own rather than chaining it), and — present only when it actually " +
+        "happened — an `okhttp-listener` entry (GRA-66 F10): the app called its own " +
+        "`eventListener()`/`eventListenerFactory()` *after* `installPorthole()` on the same builder, " +
+        "which silently replaced Porthole's own factory (OkHttp's own last-call-wins) even though " +
+        "`installPorthole()` itself already reported this client wired. Its hint says the fix: call " +
+        "`installPorthole()` after the app's own listener, not before.\n\n" +
         "For each integration that is present but unwired, this also gives the exact line to add " +
         "and names which lanes and tools go dark without it — ranked so the gap that leaves the " +
         "most dark comes first. A fully-instrumented project gets an explicit 'everything present " +
@@ -1509,13 +1527,24 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.\n\n" +
         "`http-call-slow` (GRA-66) fires at warning for a call whose own elapsed time was at least " +
         "3000ms — a pragmatic floor, not a platform-defined one, close to the point Google's own " +
-        "RAIL guidance treats a wait as a wait rather than a step in a sequence — and attributes it " +
-        "to whichever OkHttp phase (dns/connect/secureConnect/requestHeaders/requestBody/" +
-        "responseHeaders/responseBody) took the largest share, when the runtime reported one at " +
-        "all: a Ktor call with no OkHttp engine underneath has no phase breakdown to attribute to, " +
-        "and says so rather than guessing. Joins the device's own most recent `network` event in " +
-        "force when the call started, so a call that ran on a metered cellular connection says so " +
-        "instead of just looking slow for no stated reason.",
+        "RAIL guidance treats a wait as a wait rather than a step in a sequence — and names whichever " +
+        "OkHttp phase (queued/dns/connect/secureConnect/dispatch/requestHeaders/requestBody/" +
+        "waiting/responseBody) took the largest share, when the runtime reported one at all: a Ktor " +
+        "call with no OkHttp engine underneath has no phase breakdown to attribute to, and says so " +
+        "rather than guessing. Called 'mostly `<phase>`' only when that phase actually is at least " +
+        "half of the call's own elapsed time — phases need not sum to it (queueing behind " +
+        "`maxRequestsPerHost` and OkHttp's own exchange setup do, as `queued`/`dispatch`, but a redirect " +
+        "or an auth-challenge retry's own request/response phases describe only the final leg) — " +
+        "below that line it says 'largest phase: `<phase>` (Nms of Mms)' instead, honest about how " +
+        "little of the call the largest phase actually explains. Joins the device's own most recent " +
+        "`network` event in force when the call started, so a call that ran on a metered cellular " +
+        "connection says so instead of just looking slow for no stated reason.\n\n" +
+        "`ringSnapshot` (present only on an error-severity finding, only while `system_trace_start` " +
+        "has a ring running): a fresh snapshot of it, pulled without blocking this call — a path and " +
+        "byte count once it lands, or `{ inProgress: true }` on the call that kicked it off or is " +
+        "still waiting on one already in flight. `porthole_status`'s `ring.lastSnapshot` carries the " +
+        "same result independently, for when the next `findings` call is not the first place you " +
+        "look.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
@@ -1681,13 +1710,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const findings = trace.findings.map(withFollowUp);
 
-      // GRA-57: a fresh ring snapshot, attached to every error-severity
-      // finding in this result, when the ring is running and the cooldown
-      // allows it — see `RingController.maybeAutoSnapshotOnError`'s own doc
-      // comment for why this is best-effort and never turns a `findings`
-      // call itself into a failure. `findingsWithRing` (not `findings`) is
-      // what feeds `classify` below, so the attached path survives into the
-      // classified/new/ongoing shape the payload actually returns.
+      // GRA-57, QA R4: a ring snapshot attached to every error-severity
+      // finding in this result, when the ring is running — but never
+      // *awaited* here. `triggerAutoSnapshotOnError` is synchronous with
+      // respect to the snapshot itself: cloning the ring and pulling up to
+      // `bufferKb` worth of trace off the device is exactly the adb work
+      // GRA-89 made `capture_system_trace` non-blocking for, and the first
+      // `findings` call to see a fresh error is not a reason to reintroduce
+      // that block. `attached` is a *previous* call's finished snapshot
+      // (see that function's own doc comment); `inProgress` says one was
+      // just kicked off (or already was) and has not landed yet — `findings`
+      // says so in the finding itself rather than going quiet about it.
+      // `findingsWithRing` (not `findings`) is what feeds `classify` below,
+      // so whichever of the two survives into the classified/new/ongoing
+      // shape the payload actually returns.
       const hasErrorFinding = findings.some((f) => f.severity === "error");
       // `findings` (unlike system_trace_start/snapshot/stop) takes no
       // `serial` parameter of its own — PORTHOLE_SERIAL is the only way this
@@ -1695,16 +1731,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // attached, the same fallback `diagnoseAndReconnect` already reads.
       // Without it, more than one attached device makes every adb call here
       // fail with "more than one device/emulator" — silently, by design
-      // (`maybeAutoSnapshotOnError` never fails `findings` itself), which
-      // was caught on this ticket's own dev host, not assumed.
-      const autoSnapshot = await ring.maybeAutoSnapshotOnError(hasErrorFinding, {
-        serial: process.env.PORTHOLE_SERIAL,
-        env: adbEnv,
-        binary: adbBinary,
-      });
-      const findingsWithRing = autoSnapshot
-        ? findings.map((f) => (f.severity === "error" ? { ...f, ringSnapshot: autoSnapshot } : f))
-        : findings;
+      // (this never fails `findings` itself), which was caught on this
+      // ticket's own dev host, not assumed.
+      const { attached: autoSnapshot, inProgress: autoSnapshotInProgress } = ring.triggerAutoSnapshotOnError(
+        hasErrorFinding,
+        { serial: process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary },
+      );
+      const findingsWithRing =
+        autoSnapshot || autoSnapshotInProgress
+          ? findings.map((f) =>
+              f.severity === "error"
+                ? { ...f, ringSnapshot: autoSnapshot ?? { inProgress: true as const } }
+                : f,
+            )
+          : findings;
 
       // GRA-200: built from the same windowed `events` `trace` itself came
       // from, so this can never name a different window than the findings
@@ -2279,7 +2319,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         app: target,
         categories,
         bufferKb,
-        serial,
+        // QA F18: falls back to PORTHOLE_SERIAL, same as porthole_status/
+        // porthole_connect and findings' own auto-snapshot — without it,
+        // more than one attached device makes this fail with "more than one
+        // device/emulator" even when every other tool works, because it was
+        // the one place that still passed the bare `serial` argument
+        // through with nothing to fall back to.
+        serial: serial ?? process.env.PORTHOLE_SERIAL,
         env: adbEnv,
         binary: adbBinary,
       });
@@ -2300,6 +2346,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "Pulls the ring buffer's current contents to a file on disk, without interrupting the " +
         "ring itself — it keeps recording. Use this the moment after something goes wrong: the " +
         "trace has already been collecting, so there is no reproduction step to wait through.\n\n" +
+        "Works even from a fresh MCP server that never called system_trace_start itself: this " +
+        "checks the device's own pid marker (and a process-table scan when that marker is " +
+        "missing) before concluding there is nothing to snapshot, the same way porthole_status " +
+        "does. A ring discovered this way is still snapshotted correctly, but its start time and " +
+        "buffer size are honestly unknown here — the result's `note` says so.\n\n" +
         "Uses Perfetto's `--clone-by-name`, discovered by this ticket's own spike rather than the " +
         "detach/attach/stop sequence its research brief named — that sequence turned out to " +
         "require `write_into_file`, which turns the on-device file into a continuously growing " +
@@ -2311,7 +2362,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "The result's `note` says how much of it is trustworthy: the buffer is sized for roughly " +
         "30s at default settings, but under real load it can wrap sooner, and this host has no way " +
         "to verify the actual covered span from outside the trace itself — read it with " +
-        "`ask_system_trace` for that.",
+        "`ask_system_trace` for that. `portholeLabels` counts the runtime's own atrace sections in " +
+        "the snapshot, the same check `capture_system_trace` reports, and the ring's own config " +
+        "carries the same data sources that capture uses (frame timeline, process/thread names) so " +
+        "`ask_system_trace` gets real findings from a ring snapshot, not just from a one-shot capture.",
       inputSchema: {
         outputDir: z.string().optional().describe("Where to write it. Defaults to .porthole/traces."),
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
@@ -2319,10 +2373,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: false },
     },
     async ({ outputDir, serial }): Promise<ToolResult> => {
-      const snapshot = await ring.snapshot({ outputDir, serial, env: adbEnv, binary: adbBinary });
+      // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/stop.
+      const snapshot = await ring.snapshot({
+        outputDir,
+        serial: serial ?? process.env.PORTHOLE_SERIAL,
+        env: adbEnv,
+        binary: adbBinary,
+      });
       if (!snapshot.ok) return fail(snapshot.message);
       const mb = (snapshot.bytes / (1024 * 1024)).toFixed(1);
-      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${snapshot.note}`, snapshot);
+      // QA F20: the same count capture_system_trace reports, so the exact
+      // failure GRA-186 was filed against (a capture that succeeds but
+      // carries none of the runtime's own atrace sections) has evidence on
+      // the ring path too, not only the one-shot capture path.
+      const portholeLabels = await countPortholeLabels(snapshot.path);
+      const labelsSentence =
+        portholeLabels > 0
+          ? `${portholeLabels} Porthole track(s) in it.`
+          : "No Porthole labels found in it — either nothing the runtime annotates happened in " +
+            "this window, or the app tag was not being read (see capture_system_trace's own notes " +
+            "on this).";
+      const result = { ...snapshot, portholeLabels };
+      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${labelsSentence} ${snapshot.note}`, result);
     },
   );
 
@@ -2335,15 +2407,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "device is killed, and every file this feature could have left behind (the PID marker, the " +
         "config, any flushed or snapshotted trace) is removed. Safe to call even when nothing is " +
         "known to be running here — including after this MCP server restarted and no longer " +
-        "remembers starting anything, since this reads the device's own record of the session " +
-        "rather than trusting this process's memory alone.",
+        "remembers starting anything: this reads the device's own pid marker first, and falls back " +
+        "to scanning the device's process table by name when that marker is missing (it is written " +
+        "best-effort and can be absent even for a session that is genuinely running), so a session " +
+        "started by a process this one has no memory of is still found and killed.",
       inputSchema: {
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
       },
       annotations: { readOnlyHint: false },
     },
     async ({ serial }): Promise<ToolResult> => {
-      const stopped = await ring.stop({ serial, env: adbEnv, binary: adbBinary });
+      // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/snapshot.
+      const stopped = await ring.stop({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary });
       return ok(stopped.message, stopped);
     },
   );
@@ -2882,18 +2957,26 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "'why is this screen still spinning'. `http`/`queries`/`work` are always the live set — " +
         "what is happening right now — and ignore the window below entirely.\n\n" +
         "Also returns recentHttp: finished calls with status, headers, OkHttp's own phase " +
-        "breakdown (dns/connect/secureConnect/requestHeaders/requestBody/responseHeaders/" +
-        "responseBody, each already the time that phase itself took), connection reuse, protocol, " +
-        "byte counts, and — when the app opted in via BodyCapture — request and response body " +
-        "previews. A body with text:null carries an omittedReason saying why it was not captured " +
-        "(disabled, wrong content type, one-shot stream); that is different from the call having " +
-        "had no body at all. `phases`/`reused`/`protocol`/`requestBytes`/`responseBytes` are only " +
-        "ever present for a call OkHttp's own EventListener actually instrumented — empty for a " +
-        "Ktor call with no OkHttp engine underneath (GRA-66; see KtorPorthole's own doc comment " +
-        "for why that boundary is real).\n\n" +
+        "breakdown (queued/dns/connect/secureConnect/dispatch/requestHeaders/requestBody/waiting/" +
+        "responseBody, each already the time that phase itself took — queued and dispatch close the " +
+        "two gaps that otherwise went unattributed, dispatcher queueing before any network activity " +
+        "and OkHttp's own exchange setup once a connection exists), connection reuse, protocol, " +
+        "connectAttempts (present only past 1 — a failover, not an ordinary connect), byte counts, " +
+        "and — when the app opted in via BodyCapture — request and response body previews. A body " +
+        "with text:null carries an omittedReason saying why it was not captured (disabled, wrong " +
+        "content type, one-shot stream); that is different from the call having had no body at all. " +
+        "`phases`/`reused`/`protocol`/`requestBytes`/`responseBytes` are only ever present for a call " +
+        "OkHttp's own EventListener actually instrumented — empty for a Ktor call with no OkHttp " +
+        "engine underneath (GRA-66; see KtorPorthole's own doc comment for why that boundary is " +
+        "real). `dns`/`connect` sum every attempt a call made (a route failover included); " +
+        "requestHeaders/requestBody/waiting/responseBody describe only the call's *final* leg — a " +
+        "redirect or an auth-challenge retry re-runs its own, and each overwrites the last — while " +
+        "elapsedMs still spans every leg.\n\n" +
         "GRA-66: recentHttp is now window-aware, the standard sinceMs/from/to below — quote a " +
         "finding's own `window` to reach a call `http-call-slow` named, even one older than the " +
-        "default `limit` (25) would otherwise return.",
+        "default `limit` (25) would otherwise return. Only the newest 25 calls keep their body " +
+        "previews, whatever `limit` is asked for — an older entry still has every other field, just " +
+        "not the body.",
       inputSchema: {
         ...windowShape,
         limit: z

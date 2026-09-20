@@ -45,7 +45,7 @@ porthole capture — record a run and write a trace
   --with-events          include the raw event stream. Large.
   --fail-on <what>       nothing (default), error, or regression
   --baseline <file>      compare against this trace when done
-  --port <n>             device port (default 8677)
+  --port <n>             host port the forward listens on, not a port the device opens (default 8677)
   --serial <id>          adb device serial
   --application-id <id>  the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
   --legacy-tcp-port      forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)

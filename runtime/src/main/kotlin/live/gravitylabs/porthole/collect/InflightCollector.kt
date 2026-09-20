@@ -69,6 +69,8 @@ internal class InflightCollector(
         @Volatile var protocol: String? = null
         @Volatile var requestBytes: Long? = null
         @Volatile var responseBytes: Long? = null
+        /** F12: how many `connectStart`s this call made — 1 for an ordinary connect, 2+ for a failover (IPv6 failed, IPv4 succeeded, say), 0 for a reused connection or one [phases] has nothing to say about at all. */
+        @Volatile var connectAttempts: Int = 0
 
         /** Identity of the system-trace slice. Matched on both at end. */
         @Volatile var traceName: String = ""
@@ -106,6 +108,7 @@ internal class InflightCollector(
             protocol = protocol,
             requestBytes = requestBytes,
             responseBytes = responseBytes,
+            connectAttempts = connectAttempts,
         )
     }
 
@@ -189,6 +192,17 @@ internal class InflightCollector(
         http[token]?.let { it.phase = phase }
     }
 
+    /**
+     * F10: whether [httpStart] has already opened a record for [token] —
+     * [live.gravitylabs.porthole.integration.PortholeInterceptor]'s own tell
+     * that [live.gravitylabs.porthole.integration.PortholeEventListener]
+     * actually saw this call's own `callStart`. It always has, unless a
+     * later `eventListener()`/`eventListenerFactory()` call on the same
+     * builder silently replaced the factory `installPorthole()` installed —
+     * OkHttp's own last-call-wins, with no exception or callback to say so.
+     */
+    fun isTracked(token: Any): Boolean = http.containsKey(token)
+
     /** Called from the interceptor, which is the only place the body is reachable. */
     fun httpRequest(token: Any, headers: Map<String, String>, body: BodyPreview?) {
         http[token]?.let {
@@ -268,6 +282,7 @@ internal class InflightCollector(
         protocol: String?,
         requestBytes: Long?,
         responseBytes: Long?,
+        connectAttempts: Int = 0,
     ) {
         http[token]?.let {
             it.phases = phases
@@ -275,6 +290,7 @@ internal class InflightCollector(
             it.protocol = protocol
             it.requestBytes = requestBytes
             it.responseBytes = responseBytes
+            it.connectAttempts = connectAttempts
         }
     }
 
@@ -294,6 +310,7 @@ internal class InflightCollector(
         synchronized(recentLock) {
             recentHttp.addLast(dto)
             while (recentHttp.size > RECENT_HTTP_CAPACITY) recentHttp.removeFirst()
+            stripOldBodies()
         }
 
         emit(
@@ -320,6 +337,10 @@ internal class InflightCollector(
                 call.protocol?.let { put("protocol", it) }
                 call.requestBytes?.let { put("requestBytes", it.toString()) }
                 call.responseBytes?.let { put("responseBytes", it.toString()) }
+                // F12: only worth a row once there was more than the one,
+                // ordinary attempt to count — 0 or 1 says nothing a reader
+                // needs, and 1 is what "connect" alone already implies.
+                if (call.connectAttempts > 1) put("connectAttempts", call.connectAttempts.toString())
             },
             nested = if (call.phases.isNotEmpty()) {
                 mapOf("phases" to JsonObject(call.phases.mapValues { (_, ms) -> JsonPrimitive(ms) }))
@@ -328,6 +349,37 @@ internal class InflightCollector(
             },
         )
     }
+
+    /**
+     * GRA-66 F15: [RECENT_HTTP_CAPACITY] (200) exists so a window naming an
+     * older call can still reach it, but a body preview is the expensive
+     * part of an [HttpCall] — up to [BodyCapture.maxBytes] (4KB by default)
+     * each way — and holding that for 8x as many calls as `recentHttp` ever
+     * returns by default is real memory nobody asked to keep that far back
+     * (~1.6MB worst case with [BodyCapture.Text]). Only the newest
+     * [RECENT_HTTP_DEFAULT_LIMIT] (25) — what `recentHttp` already returns
+     * unwindowed — keep their body previews; every older entry keeps every
+     * other field (timings, sizes, headers, status, phases) and loses only
+     * `requestBody`/`responseBody`, set back to `null` the same way "never
+     * captured" already reads on the wire — absence, not a second, smaller
+     * kind of preview.
+     *
+     * Must be called with [recentLock] already held — every caller here
+     * already does, immediately after the size trim above, so this only
+     * ever walks entries already known to fit in [RECENT_HTTP_CAPACITY].
+     */
+    private fun stripOldBodies() {
+        val cutoff = recentHttp.size - RECENT_HTTP_DEFAULT_LIMIT
+        if (cutoff <= 0) return
+        val drained = ArrayList<HttpCall>(recentHttp.size)
+        while (recentHttp.isNotEmpty()) drained += recentHttp.removeFirst()
+        for ((index, call) in drained.withIndex()) {
+            recentHttp.addLast(if (index < cutoff) call.strippedOfBodies() else call)
+        }
+    }
+
+    private fun HttpCall.strippedOfBodies(): HttpCall =
+        if (requestBody == null && responseBody == null) this else copy(requestBody = null, responseBody = null)
 
     // -- db ----------------------------------------------------------------
 

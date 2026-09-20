@@ -159,7 +159,7 @@ describe("SelectionPanel renders an HTTP call's phase breakdown (GRA-66)", () =>
   it("shows one row per observed phase, as a small table", () => {
     render(
       <SelectionPanel
-        hit={httpSpanHit({ phases: { dns: 12, connect: 34, responseHeaders: 3_200 } })}
+        hit={httpSpanHit({ phases: { dns: 12, connect: 34, waiting: 3_200 } })}
       />,
     );
     expect(screen.getByText("phases")).toBeTruthy();

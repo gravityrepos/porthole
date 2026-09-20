@@ -154,13 +154,13 @@ describe("fieldsFor tone", () => {
 /** GRA-66: OkHttp's own phase breakdown, connection reuse, protocol and byte counts. */
 describe("fieldsFor http phases (GRA-66)", () => {
   it("renders the phase breakdown as a small pairs table, one row per observed phase", () => {
-    const hit = spanHit("http", { phases: { dns: 5, connect: 12, responseHeaders: 3_100 } });
+    const hit = spanHit("http", { phases: { dns: 5, connect: 12, waiting: 3_100 } });
     expect(find(hit, "phases")).toMatchObject({
       shape: "pairs",
       pairs: [
         ["dns", "5ms"],
         ["connect", "12ms"],
-        ["responseHeaders", "3100ms"],
+        ["waiting", "3100ms"],
       ],
     });
   });
