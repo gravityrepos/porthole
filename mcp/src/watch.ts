@@ -152,7 +152,7 @@ porthole watch — block until something breaks, and say so
   --until-first           exit the instant a qualifying finding appears
   --json                  one finding object per line on stdout; diagnostics go to stderr
   --timeout <seconds>     give up after this long (exit 3) instead of waiting forever
-  --port <n>              host port adb forwards to the device (default 8677)
+  --port <n>              host port the forward listens on, not a port the device opens (default 8677)
   --serial <id>           adb device serial, when more than one is attached
   --application-id <id>   the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
   --legacy-tcp-port       forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)
