@@ -510,6 +510,18 @@ PR that makes the change, not after the fact.
   same directory suggested when one exists, and `asked`/`skipped`/
   `unanswered`/`findings` all come back empty rather than populated with a
   ghost result (GRA-234).
+- `SemanticsCollector.capture()` read `SemanticsNode.config` and
+  `boundsInRoot` straight from whatever thread called it — the socket's own
+  `porthole-io` thread — which Compose's `SnapshotStateObserver` does not
+  allow under composition churn: 4 failures in 60 `semantics_tree` calls
+  polling a screen being tapped, each an `IllegalArgumentException:
+  Detected multithreaded access to SnapshotStateObserver`. The walk now
+  hops to the main thread, bounded by a timeout, the same
+  `Handler(Looper.getMainLooper())` pattern `StartupCollector`, `AutoWire`
+  and `MainThreadWatchdog` already use; a main thread that does not answer
+  in time returns a plain error naming the timeout rather than a partial
+  tree or a hung socket. Both `semantics_tree` and the `accessibility` tool
+  go through this path (GRA-239).
 
 ## [0.2.2] - 2026-09-16
 
