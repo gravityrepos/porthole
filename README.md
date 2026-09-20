@@ -913,15 +913,46 @@ relaunched process on its own. Launching the app after starting the capture
 by hand has the same effect.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
-trace viewer. It runs a fixed set of five questions — jank, thread states,
-binder, render, slices — scoped to one window and one process, using
-parameters Porthole already holds: the window off a finding, the package off
-the handshake with the device. Deliberately not a SQL interface: an agent
-handed a hundred tables and no guidance assembles an answer from whichever
-guess came back non-empty, which is the failure this surface exists to avoid.
-What it is for is ruling causes out — CPU starvation, blocked I/O, the runtime
-compiling its own bytecode in the background — and answering yes to one of
-those means the app's own work was never the whole story.
+trace viewer. It runs a fixed set of eight questions — jank, thread states,
+binder, render, slices, startup, monitor_contention, cpu — scoped to one
+window and one process, using parameters Porthole already holds: the window
+off a finding, the package off the handshake with the device. Deliberately
+not a SQL interface: an agent handed a hundred tables and no guidance
+assembles an answer from whichever guess came back non-empty, which is the
+failure this surface exists to avoid. What it is for is ruling causes out —
+CPU starvation, blocked I/O, the runtime compiling its own bytecode in the
+background — and answering yes to one of those means the app's own work was
+never the whole story.
+
+An `ask` parameter narrows which of the eight actually run, by id — omit it
+and every question runs, same as before this parameter existed. The result
+always says `asked` (what ran) and `skipped` (what `ask` left out) as two
+separate lists, so a caller can tell "not asked this time" apart from "asked
+and failed to compile", the two `unanswered` alone cannot distinguish.
+`wallTimeMs`, keyed by question id, reports how long the invocation that
+answered each one took — one shared number across every question a single
+batched call answered together (trace_processor_shell reports one timing per
+script, not one per statement inside it), and a question's own number when a
+retry after a failure put it in a smaller batch by itself.
+
+Six of the eight — everything except `thread_states` and `cpu` — point at a
+real moment and carry a `window`; those two are a property of the whole
+window asked about (how much of it the main thread spent in each scheduler
+state; where it actually ran and at what frequency) and always come back
+`spanning: true` instead. `startup` reads the platform's own attribution of
+what slowed a launch — binder blocking, lock contention, GC, dex opening,
+bindApplication — through Perfetto's `android.startup.startup_breakdowns`
+module. `monitor_contention` names which Java lock blocked the main thread
+and who was holding it, needing only the `dalvik` atrace category
+`capture_system_trace`'s defaults already enable. `cpu` answers two questions
+at once — where the main thread ran (core, cluster, frequency) and who else
+wanted the same cores in the same window — and is the one question here that
+is `correlated` rather than `observed`: it never claims the placement caused
+the window's own finding, and stays silent entirely unless the main thread
+spent a material share of the window on a little core or throttled below a
+fraction of max frequency, specifically so an idle device sitting on a desk
+does not generate a finding out of a few milliseconds of ordinary
+housekeeping.
 
 Both need `trace_processor_shell`, Perfetto's own query engine and a large
 platform-specific binary that is not bundled with Porthole: it would multiply
