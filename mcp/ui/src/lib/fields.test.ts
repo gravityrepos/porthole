@@ -151,6 +151,64 @@ describe("fieldsFor tone", () => {
   });
 });
 
+/** GRA-66: OkHttp's own phase breakdown, connection reuse, protocol and byte counts. */
+describe("fieldsFor http phases (GRA-66)", () => {
+  it("renders the phase breakdown as a small pairs table, one row per observed phase", () => {
+    const hit = spanHit("http", { phases: { dns: 5, connect: 12, responseHeaders: 3_100 } });
+    expect(find(hit, "phases")).toMatchObject({
+      shape: "pairs",
+      pairs: [
+        ["dns", "5ms"],
+        ["connect", "12ms"],
+        ["responseHeaders", "3100ms"],
+      ],
+    });
+  });
+
+  it("is absent for a call with no phases at all -- a Ktor call, or an older server", () => {
+    expect(find(spanHit("http", {}), "phases")).toBeUndefined();
+  });
+
+  it("is absent for an empty phases object, not an empty table", () => {
+    expect(find(spanHit("http", { phases: {} }), "phases")).toBeUndefined();
+  });
+
+  it("says a reused connection is reused, in the good tone", () => {
+    expect(find(spanHit("http", { reused: true }), "reused")).toMatchObject({
+      value: "reused",
+      tone: "good",
+    });
+  });
+
+  it("says a fresh connection is new, plainly -- not silently nothing", () => {
+    expect(find(spanHit("http", { reused: false }), "reused")).toMatchObject({
+      value: "new",
+      tone: "plain",
+    });
+  });
+
+  it("shows the protocol when present", () => {
+    expect(find(spanHit("http", { protocol: "h2" }), "protocol")).toMatchObject({ value: "h2" });
+  });
+
+  it("formats byte counts in a human unit, scaling with size", () => {
+    expect(find(spanHit("http", { requestBytes: 42 }), "requestBytes")).toMatchObject({ value: "42 B" });
+    expect(find(spanHit("http", { responseBytes: 2_048 }), "responseBytes")).toMatchObject({
+      value: "2.0 KB",
+    });
+    expect(find(spanHit("http", { responseBytes: 5 * 1024 * 1024 }), "responseBytes")).toMatchObject({
+      value: "5.0 MB",
+    });
+  });
+
+  it("a request with no body reports no requestBytes field at all -- absence, not a fake zero", () => {
+    // The runtime never sends requestBytes for a GET (see InflightCollector's
+    // own doc comment); fieldFor's shared empty-value check already drops an
+    // absent key before the switch is even reached, same as any other field.
+    expect(find(spanHit("http", {}), "requestBytes")).toBeUndefined();
+  });
+});
+
 describe("groupFields", () => {
   it("lifts the url out of an http call and leaves bodies at the bottom", () => {
     const hit = spanHit("http", {

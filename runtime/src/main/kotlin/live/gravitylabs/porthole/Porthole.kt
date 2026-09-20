@@ -619,8 +619,19 @@ object Porthole {
             encode(ListSerializer(SetupEntry.serializer()), Setup.report())
         }
 
-        method("inflight") {
-            encode(Inflight.serializer(), s.inflight.capture())
+        method("inflight") { params ->
+            // GRA-66: recentHttp is now window-aware, same sinceMs/from/to/limit
+            // shape as `logs`/`timeline` below — the live `http`/`queries`/`work`
+            // sets inside Inflight are unaffected, see `capture`'s own comment.
+            encode(
+                Inflight.serializer(),
+                s.inflight.capture(
+                    sinceMs = params.long("sinceMs"),
+                    from = params.long("from"),
+                    to = params.long("to"),
+                    limit = params.int("limit") ?: InflightCollector.RECENT_HTTP_DEFAULT_LIMIT,
+                ),
+            )
         }
 
         method("logs") { params ->

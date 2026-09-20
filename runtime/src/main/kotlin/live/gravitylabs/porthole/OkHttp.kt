@@ -19,10 +19,17 @@ import okhttp3.OkHttpClient
  * client and a database reads the same way twice. As members of two objects
  * they collided, and needed an `as` rename to use together.
  *
- * @param existing an event listener factory of your own to keep. The porthole
- *   forwards to it rather than replacing it.
+ * @param existing an event listener factory of your own, if you have one to
+ *   keep — the porthole chains onto it rather than replacing it. Usually
+ *   unneeded: left `null`, this reads whatever the builder already has
+ *   configured (your own `eventListener()`/`eventListenerFactory()` call
+ *   before this one, or OkHttp's own default when there was none) and
+ *   chains onto that automatically — see [OkHttpPorthole.installPorthole]'s
+ *   own doc comment for why that is possible without asking the builder for
+ *   it back.
  * @param bodies request and response body capture. Off by default: phases,
- *   timings, status codes and headers come through either way.
+ *   timings, connection reuse, protocol, byte counts, status codes and
+ *   headers come through either way (GRA-66).
  */
 fun OkHttpClient.Builder.installPorthole(
     existing: EventListener.Factory? = null,

@@ -24,7 +24,21 @@ export type Field = FieldBody & { key: string };
  *  runtime field shows up rather than silently vanishing. */
 const ORDER: Record<string, string[]> = {
   nav: ["route", "args", "depth"],
-  http: ["method", "url", "status", "durationMs", "phase", "requestBody", "responseBody", "error"],
+  http: [
+    "method",
+    "url",
+    "status",
+    "durationMs",
+    "phase",
+    "reused",
+    "protocol",
+    "requestBytes",
+    "responseBytes",
+    "phases",
+    "requestBody",
+    "responseBody",
+    "error",
+  ],
   db: ["sql", "kind", "args", "durationMs", "thread", "onMainThread", "result", "error"],
   db_end: ["sql", "kind", "elapsedMs", "thread", "onMainThread", "result"],
   work: ["name", "state", "attempt", "durationMs", "retrying", "tags", "workId"],
@@ -192,6 +206,37 @@ function fieldFor(key: string, value: unknown): FieldBody | null {
       return inline("status", String(code), code >= 400 ? "bad" : code >= 300 ? "warn" : "good");
     }
 
+    // GRA-66: OkHttp's own EventListener phase breakdown, one row per phase
+    // actually observed (dns, connect, secureConnect, requestHeaders,
+    // requestBody, responseHeaders, responseBody) — the same "pairs" shape
+    // `args` already renders a small key/value table as. Absent entirely
+    // for a call OkHttpPorthole never instrumented (a Ktor call with no
+    // OkHttp engine underneath), which `fieldFor`'s own empty-value check
+    // above already handles for free.
+    case "phases": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+      const pairs = Object.entries(value as Record<string, unknown>).map(
+        ([name, ms]): [string, string] => [name, `${num(ms)}ms`],
+      );
+      return pairs.length ? { shape: "pairs", label: "phases", pairs } : null;
+    }
+
+    // Worth a row either way, unlike `dozing`/`powerSaver` above: whether a
+    // call reused a pooled connection is exactly what "no dns/connect phase
+    // of its own" (GRA-66's own acceptance criterion) needs a plain-English
+    // answer for, not only silence-means-no.
+    case "reused":
+      return value === true || value === "true"
+        ? inline("connection", "reused", "good")
+        : inline("connection", "new");
+
+    case "protocol":
+      return inline("protocol", str(value));
+
+    case "requestBytes":
+    case "responseBytes":
+      return inline(key === "requestBytes" ? "request size" : "response size", formatBytes(num(value)));
+
     case "level": {
       const level = str(value);
       const name = { V: "verbose", D: "debug", I: "info", W: "warn", E: "error", F: "fatal" };
@@ -346,6 +391,13 @@ function fieldFor(key: string, value: unknown): FieldBody | null {
 
 function inline(label: string, value: string, tone: Tone = "plain"): FieldBody {
   return { shape: "inline", label, value, tone };
+}
+
+/** GRA-66: `requestBytes`/`responseBytes` are always a real byte count off `EventListener.requestBodyEnd`/`responseBodyEnd`, never a preview — this only picks the unit, the same way the RAM fields above already do at a coarser (MB-only) grain. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
 function asStrings(value: unknown): string[] {

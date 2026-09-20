@@ -3,6 +3,7 @@
 package live.gravitylabs.porthole.collect
 
 import android.os.Looper
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import live.gravitylabs.porthole.nowMs
@@ -62,6 +63,13 @@ internal class InflightCollector(
         @Volatile var requestBody: BodyPreview? = null
         @Volatile var responseBody: BodyPreview? = null
 
+        /** GRA-66: set once, from [PortholeEventListener], right before [httpEnd] finalises the call. See [HttpCall]'s own doc comments for what each field means. */
+        @Volatile var phases: Map<String, Long> = emptyMap()
+        @Volatile var reused: Boolean = false
+        @Volatile var protocol: String? = null
+        @Volatile var requestBytes: Long? = null
+        @Volatile var responseBytes: Long? = null
+
         /** Identity of the system-trace slice. Matched on both at end. */
         @Volatile var traceName: String = ""
         @Volatile var traceCookie: Int = 0
@@ -93,6 +101,11 @@ internal class InflightCollector(
             responseHeaders = responseHeaders,
             requestBody = resolvedRequestBody(),
             responseBody = responseBody,
+            phases = phases,
+            reused = reused,
+            protocol = protocol,
+            requestBytes = requestBytes,
+            responseBytes = responseBytes,
         )
     }
 
@@ -237,6 +250,34 @@ internal class InflightCollector(
         }
     }
 
+    /**
+     * GRA-66: the `EventListener` phase breakdown, called from
+     * [live.gravitylabs.porthole.integration.PortholeEventListener] once a
+     * call is over — the listener is the only place any of this is
+     * observable, the same reason [httpRequest]/[httpResponse] are fed from
+     * the interceptor rather than computed here. A call with no listener
+     * attached (nothing routes through OkHttp's own instrumentation — Ktor
+     * without the OkHttp engine, say) simply never calls this, and every
+     * field below keeps its default: empty phases, not reused, no protocol,
+     * no byte counts — absence, never an invented zero.
+     */
+    fun httpPhases(
+        token: Any,
+        phases: Map<String, Long>,
+        reused: Boolean,
+        protocol: String?,
+        requestBytes: Long?,
+        responseBytes: Long?,
+    ) {
+        http[token]?.let {
+            it.phases = phases
+            it.reused = reused
+            it.protocol = protocol
+            it.requestBytes = requestBytes
+            it.responseBytes = responseBytes
+        }
+    }
+
     fun httpEnd(token: Any, phase: String, detail: String? = null) {
         val call = http.remove(token) ?: return
         Atrace.end(call.traceName, call.traceCookie)
@@ -269,6 +310,21 @@ internal class InflightCollector(
                 call.resolvedRequestBody()?.let { put("requestBody", it.snippet()) }
                 call.responseBody?.let { put("responseBody", it.snippet()) }
                 if (detail != null) put("detail", detail)
+                // GRA-66: reused/protocol/byte counts are flat, like every
+                // other field here; `phases` alone is nested (see `emit`'s
+                // own `nested` parameter) because it is a breakdown, not a
+                // single value — flattening it into `phaseDnsMs`,
+                // `phaseConnectMs`, ... would just move the structure into
+                // the key names instead of removing it.
+                if (call.reused) put("reused", "true")
+                call.protocol?.let { put("protocol", it) }
+                call.requestBytes?.let { put("requestBytes", it.toString()) }
+                call.responseBytes?.let { put("responseBytes", it.toString()) }
+            },
+            nested = if (call.phases.isNotEmpty()) {
+                mapOf("phases" to JsonObject(call.phases.mapValues { (_, ms) -> JsonPrimitive(ms) }))
+            } else {
+                emptyMap()
             },
         )
     }
@@ -337,7 +393,25 @@ internal class InflightCollector(
 
     // -- report ------------------------------------------------------------
 
-    fun capture(): Inflight {
+    /** See [Window.resolve] for what the three window arguments mean. Unwindowed (every default) reproduces the pre-GRA-66 behaviour exactly: the whole buffer, newest `limit` entries. */
+    fun recentHttp(sinceMs: Long? = null, from: Long? = null, to: Long? = null, limit: Int = RECENT_HTTP_DEFAULT_LIMIT): List<HttpCall> =
+        recentHttp(Window.resolve(sinceMs, from, to, now()), limit)
+
+    /**
+     * Matched by overlap, same rule as [mainThreadHttp] — see [Window.overlaps].
+     * Every entry here has already ended (only [httpEnd] appends), so a call's
+     * span is always known, unlike the still-open set [mainThreadHttp] also has
+     * to account for.
+     *
+     * Newest first: "recent" is the word in the name, and a caller asking for
+     * 25 out of a 200-deep buffer almost always means the last 25, not
+     * whichever 25 happen to be oldest inside the window.
+     */
+    fun recentHttp(window: LongRange, limit: Int): List<HttpCall> = synchronized(recentLock) {
+        recentHttp.filter { Window.overlaps(window, it.startedAt, it.startedAt + it.elapsedMs) }
+    }.sortedByDescending { it.startedAt }.take(limit)
+
+    fun capture(sinceMs: Long? = null, from: Long? = null, to: Long? = null, limit: Int = RECENT_HTTP_DEFAULT_LIMIT): Inflight {
         val at = now()
         val work = runCatching { workSupplier?.invoke() ?: emptyList() }
         val notes = buildList {
@@ -357,7 +431,10 @@ internal class InflightCollector(
                 .sortedBy { it.startedAt }
                 .map { it.toDto(at - it.startedAt, done = false) },
             work = work.getOrDefault(emptyList()),
-            recentHttp = synchronized(recentLock) { recentHttp.toList() },
+            // GRA-66: only recentHttp is windowed — `http`/`queries`/`work`
+            // above are the live set, "what is happening right now," which a
+            // window has no honest meaning for.
+            recentHttp = recentHttp(sinceMs, from, to, limit),
             notes = notes,
         )
     }
@@ -374,13 +451,14 @@ internal class InflightCollector(
         kind = kind,
     )
 
-    private fun emit(event: String, id: String, fields: Map<String, String>) {
+    private fun emit(event: String, id: String, fields: Map<String, String>, nested: Map<String, JsonElement> = emptyMap()) {
         ring.emit(
             event,
             JsonObject(
                 buildMap {
                     put("id", JsonPrimitive(id))
                     fields.forEach { (k, v) -> put(k, JsonPrimitive(v)) }
+                    nested.forEach { (k, v) -> put(k, v) }
                 },
             ),
         )
@@ -402,7 +480,16 @@ internal class InflightCollector(
     private fun String.collapse(): String = Redaction.collapseSql(this)
 
     companion object {
-        private const val RECENT_HTTP_CAPACITY = 25
+        // GRA-66: was 25 — the whole capacity, with no window on top. `recentHttp`
+        // now takes sinceMs/from/to like every other tool here and defaults its
+        // *return* to 25, but a caller quoting an older window (from a finding
+        // that named it) must still be able to reach a call this deque dropped
+        // under the old scheme. 200 is eight defaults' worth of headroom, the
+        // same ratio `MAIN_THREAD_CAPACITY` already keeps over its own 25-ish
+        // typical ask.
+        private const val RECENT_HTTP_CAPACITY = 200
+        /** GRA-66: what "the last 25 finished calls" meant before a window existed to ask for something else — still the default `limit` today. */
+        const val RECENT_HTTP_DEFAULT_LIMIT = 25
         private const val MAIN_THREAD_CAPACITY = 100
         private const val SNIPPET_CHARS = 512
     }

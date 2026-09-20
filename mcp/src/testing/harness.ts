@@ -361,7 +361,18 @@ function defaultHandlers(): FakeDeviceHandlers {
       notes: [],
       askedWindow: askedWindow(params),
     }),
-    inflight: () => ({ capturedAt: 0, http: [], queries: [], work: [], recentHttp: [], notes: [] }),
+    // GRA-66: recentHttp is now windowed, so `inflight` joined the four
+    // above that delegate their window straight to the device — same
+    // askedWindow echo, same reason.
+    inflight: (params) => ({
+      capturedAt: 0,
+      http: [],
+      queries: [],
+      work: [],
+      recentHttp: [],
+      notes: [],
+      askedWindow: askedWindow(params),
+    }),
     nav_state: () => ({
       capturedAt: 0,
       graph: null,

@@ -71,6 +71,26 @@ PR that makes the change, not after the fact.
   (0.45% of one core under a light synthetic workload); a hardware
   measurement is a separate, still-open pass (GRA-57).
 
+- A slow HTTP call now says which part was slow. `installPorthole()` reports
+  OkHttp's own `EventListener` phase breakdown (`dns`, `connect`,
+  `secureConnect`, `requestHeaders`, `requestBody`, `responseHeaders`,
+  `responseBody` — each already the time that phase itself took, summing to
+  within a few ms of the call's own `elapsedMs`), connection reuse, protocol
+  and real request/response byte counts (not a payload, and never a fake
+  zero for a request with no body) — present whether or not `BodyCapture` is
+  on. It reads back whatever `EventListener`/`EventListenerFactory` the
+  builder already had configured and chains onto it, so an app with its own
+  listener keeps receiving every callback rather than going dark the moment
+  `installPorthole()` is added. `findings` gains `http-call-slow` at
+  `warning` for a call at or past 3000ms, attributed to the dominant phase
+  and joined against the device's own most recent `network` event, so a call
+  that ran on cellular says so. `inflight`'s `recentHttp` is now window-aware
+  (the standard `sinceMs`/`from`/`to`, `limit` defaulting to the old "last
+  25"), so quoting a finding's `window` can reach a call older than the
+  default would otherwise return. Ktor gets none of this — its plugin API
+  sits above every engine, with no phase, reuse, protocol or byte-count hook
+  any engine agrees on — and the OkHttp engine remains the documented way to
+  get it anyway (GRA-66).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`
@@ -189,6 +209,21 @@ PR that makes the change, not after the fact.
   hand-typed version string, which had drifted two releases stale, is gone;
   the one hand-maintained version on the page now lives in the status block,
   next to the registries that explain what it means (GRA-131).
+- `ask_system_trace`'s `trace-startup` finding now reconciles against the
+  runtime's own `startup` event for the same launch, when the window holds
+  one: the launch's phases (fork or activity origin, `onCreate`
+  entry/exit, the three activity lifecycle callbacks, first frame,
+  `reportFullyDrawn`) land in `evidence.runtimePhases`, alongside
+  `runtimeTotalMs`, `runtimeOriginKind` and `gapMs`. The trace times a
+  launch from the launch request itself, before the process even forks;
+  Porthole times from the fork (cold) or the relaunched Activity's own
+  first callback (warm/hot) — always a later instant — so a positive
+  `gapMs` is that structural difference, not a discrepancy (see README's
+  Startup section). A `startup-reconciliation-<originMs>` note fires only
+  when the two numbers say something that gap cannot explain: `gapMs`
+  negative, or past the same 5000ms line `startup-slow` already draws for
+  "this cold startup is excessive." Neither side changes when the other is
+  absent (GRA-231).
 
 ### Fixed
 

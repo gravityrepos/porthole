@@ -356,7 +356,8 @@ built, and nothing can discover that for you. Each is one line, each independent
 ```kotlin
 import live.gravitylabs.porthole.*
 
-// OkHttp. Phases, timings, status codes and headers. No bodies.
+// OkHttp. Phases, connection reuse, protocol, byte counts, status codes and
+// headers. No bodies — chains onto your own EventListener if you set one.
 OkHttpClient.Builder().installPorthole().build()
 
 // Bodies too, when you are debugging a payload rather than a timing.
@@ -397,8 +398,10 @@ Room is one of the things that opens a database through it. That is why the same
 factory covers SQLDelight, and why the database inspector reads both.
 
 If your Ktor client uses the OkHttp engine, install the OkHttp porthole on that
-engine instead and you get more: the interceptor sees DNS, connect and TLS as
-separate phases, which a plugin sitting above the engine cannot.
+engine instead and you get more: OkHttp's own `EventListener` sees DNS,
+connect and TLS as separate phases, plus connection reuse, protocol and byte
+counts — none of which a plugin sitting above the engine can see, on any
+engine (see [HTTP](#http)).
 
 WorkManager needs nothing. If it is on the classpath it is observed, and every
 attempt appears on the timeline — retries as separate bars, which is usually the
@@ -1324,6 +1327,86 @@ not.
 completion. Raw access to the underlying `SQLiteDatabase` that bypasses the
 support layer is not seen.
 
+## HTTP
+
+A slow call is easy to see and hard to explain. `findings`/`inflight` used to
+be able to say a request took 3 seconds; they could not say which 3 seconds —
+DNS that never resolved, a pooled connection that was not actually pooled, a
+server that sat on the response, a body that took forever to arrive.
+
+**Phases, from OkHttp's own `EventListener`.** `installPorthole()` reports
+`dns`, `connect`, `secureConnect`, `requestHeaders`, `requestBody`,
+`responseHeaders` and `responseBody` — only the phases actually observed, each
+already the time *that phase itself* took, not a running total, so summing
+every value lands within a few ms of the call's own `elapsedMs`. `connect` and
+`secureConnect` are the one pair worth knowing about: OkHttp fires
+`secureConnectStart`/`secureConnectEnd` *between* `connectStart` and
+`connectEnd`, so `connect` is closed the moment TLS begins (the raw TCP
+portion only) rather than at `connectEnd`, which would silently fold the whole
+handshake into it a second time. A subtler one: OkHttp does not call
+`responseHeadersStart` until the response has actually started arriving, so
+the wait for a slow server is measured from when the request finished
+sending, not from that callback — timing it the naive way reports a slow
+server as instant.
+
+**Connection reuse and protocol come along for free.** `reused: true` means
+`connectStart` never fired for this call — it came straight from OkHttp's own
+`ConnectionPool` — which is also why a reused call carries no `dns`/`connect`/
+`secureConnect` phase of its own: there was no fork of the process to fork.
+`protocol` is `Connection.protocol()` (`h2`, `http/1.1`, …), read at
+`connectionAcquired`.
+
+**Byte counts are sizes, not payloads.** `requestBytes`/`responseBytes` come
+from `EventListener.requestBodyEnd`/`responseBodyEnd` — the real number of
+bytes actually written or read, correct for a chunked response and for a
+one-shot streaming upload alike, and present whether or not `BodyCapture` is
+even on. A request with no body (a GET) has no `requestBytes` at all rather
+than a fake `0`; absence and zero are different facts. This is a different
+number from `BodyPreview.byteCount` below, which needs `BodyCapture` turned on
+and is bounded by `maxBytes` — `requestBytes`/`responseBytes` are unbounded
+and free.
+
+**An app's own `EventListener` still gets every callback.** A client can hold
+exactly one `EventListener` factory — `eventListener()` and
+`eventListenerFactory()` are mutually exclusive on `OkHttpClient.Builder`, and
+whichever was called last wins, silently. `installPorthole()` reads back
+whatever the builder already has configured (via `build().eventListenerFactory`
+— `OkHttpClient.Builder` does not expose that field itself, but the client it
+builds does) and chains onto it, so an app that already set its own listener
+before calling `installPorthole()` keeps receiving every callback, in the same
+order it always did.
+
+**`findings` gains `http-call-slow`** at `warning`, for a call whose own
+elapsed time was at least 3000ms — a pragmatic floor, not a platform-defined
+one, chosen the same way `trace-startup`'s 500ms is: close to the point
+Google's own RAIL guidance treats a wait as a wait rather than a step in a
+sequence. It attributes the call to whichever phase took the largest share,
+and joins the device's own most recent `network` event (transport, metered,
+validated) in force when the call started, so a call that ran on a metered
+cellular connection says so instead of just looking slow for no stated
+reason. A call with no phase breakdown at all — the Ktor case below — says so
+honestly rather than guessing.
+
+**Ktor gets none of this.** Ktor's own client plugin API sits above the
+engine (CIO, OkHttp-as-engine, Darwin, …) and the boundary is structural, not
+an oversight: the only thing every engine agrees on is "the call started" and
+"the call finished," so that is what `KtorPorthole` reports — no phase
+breakdown, no reused, no protocol, no byte counts. **If your Ktor client uses
+the OkHttp engine, install the OkHttp porthole on that engine's own client
+instead** (`installPorthole()` on the `OkHttpClient.Builder` you hand Ktor's
+`OkHttp` engine factory) and you get everything above; `KtorPorthole` remains
+for every engine that is not OkHttp, where there is nothing lower to reach
+for.
+
+**`recentHttp` is window-aware.** `inflight`'s `recentHttp` now takes the
+standard `sinceMs`/`from`/`to`, the same shape every other tool here uses, and
+`limit` (default 25 — what "the last 25" always meant) caps how many come
+back. The buffer itself holds more than the default limit, so quoting a
+`window` from a finding — `http-call-slow`'s, say — can still reach a call
+older than the last 25, not only whatever is newest right now. `http`/
+`queries`/`work` in the same response are unaffected: they are the live set,
+"what is happening right now," which a window has no honest meaning for.
+
 ## Payloads: what gets captured, and what does not
 
 Two knobs, with different defaults, for a reason.
@@ -1398,9 +1481,10 @@ When a body is not captured, you get the reason rather than silence:
 That distinction matters — "we did not look" and "there was nothing there" are
 very different answers to "did we even send that field".
 
-Full previews live in `inflight`'s `recentHttp` (last 25 calls). The event
-timeline carries only a 512-character snippet, so turning bodies on does not
-blow out the ring buffer.
+Full previews live in `inflight`'s `recentHttp` (last 25 calls by default, and
+window-aware — see [HTTP](#http)). The event timeline carries only a
+512-character snippet, so turning bodies on does not blow out the ring
+buffer.
 
 **The `screenshot` MCP tool captures outside this pipeline entirely**, and is
 worth naming here rather than leaving as a silent exception to everything
@@ -1647,6 +1731,24 @@ next launch, hot, reported `TotalTime: 207` against `totalMs: 3`. The
 hardware reconciliation GRA-60's own acceptance criteria ask for — the same
 pairing, on a physical device, with the gap accounted for — has not been run
 yet.
+
+**`ask_system_trace` does that pairing automatically, when it can.** Its
+`startup` question already reads Perfetto's own attribution of a launch
+(`trace-startup`, from `android.startup.startups`/`startup_breakdowns`); when
+the window it was asked about also holds this collector's own `startup`
+event for the same launch, `trace-startup`'s evidence grows the runtime
+event's phases (`runtimePhases`), its own total (`runtimeTotalMs`,
+`runtimeOriginKind`) and the gap between the two (`gapMs`). A positive
+`gapMs` is exactly the structural difference above, not a discrepancy — it
+is never suppressed or explained away. A `startup-reconciliation-<originMs>`
+note fires only when the two numbers disagree in a way that difference
+cannot account for: `gapMs` negative (the runtime claiming more time than
+the trace, which the trace's earlier origin makes impossible for the same
+launch), or a `gapMs` past the same 5000ms line `startup-slow` already draws
+for "this cold startup is excessive" — past that, the pre-fork portion of
+the launch is no longer plausible as ordinary process-creation overhead.
+Neither side is ever silently preferred over the other, and neither changes
+when the other is absent from the window (GRA-231).
 
 Needs API 24 for `Process.getStartUptimeMillis()` — this module's `minSdk` is
 26, so that is never actually a gate in practice. A process only ever runs

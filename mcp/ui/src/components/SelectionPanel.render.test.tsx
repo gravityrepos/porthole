@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SelectionPanel } from "./SelectionPanel";
 import { LANES } from "../timeline/lanes";
 import type { Hit } from "../lib/laneData";
-import type { Finding } from "../types";
+import type { Finding, Span } from "../types";
 
 /**
  * GRA-114 ruling 3: a finding hit arrives in SelectionPanel like any other
@@ -128,5 +128,64 @@ describe("SelectionPanel renders a finding's where (GRA-201)", () => {
     fireEvent.click(screen.getByText("app/src/main/kotlin/CartViewModel.kt:148"));
     expect(writeText).toHaveBeenCalledWith("app/src/main/kotlin/CartViewModel.kt:148");
     expect(await screen.findByText("copied")).toBeTruthy();
+  });
+});
+
+/** GRA-66: OkHttp's own phase breakdown -- there was no `phases` field
+ *  before this ticket, so this is a fresh block, following GRA-167's own
+ *  pattern of adding a describe per new field (see the `where` block
+ *  above). Exercises `fields.ts`'s `phases`/`reused`/`protocol` cases
+ *  through the real component, not just the pure-function assertions
+ *  `fields.test.ts` already has. */
+describe("SelectionPanel renders an HTTP call's phase breakdown (GRA-66)", () => {
+  const httpLane = LANES.find((lane) => lane.key === "http")!;
+
+  function httpSpanHit(data: Record<string, unknown>): Hit {
+    const span: Span = {
+      id: "call-1",
+      start: 100,
+      end: 3_500,
+      open: false,
+      data: { method: "GET", url: "https://api.example.com/cart", status: 200, ...data },
+    };
+    return { kind: "span", lane: httpLane, span };
+  }
+
+  it("shows nothing extra when phases is absent -- a Ktor call, or an older server", () => {
+    render(<SelectionPanel hit={httpSpanHit({})} />);
+    expect(screen.queryByText("phases")).toBeNull();
+  });
+
+  it("shows one row per observed phase, as a small table", () => {
+    render(
+      <SelectionPanel
+        hit={httpSpanHit({ phases: { dns: 12, connect: 34, responseHeaders: 3_200 } })}
+      />,
+    );
+    expect(screen.getByText("phases")).toBeTruthy();
+    expect(screen.getByText("12ms")).toBeTruthy();
+    expect(screen.getByText("34ms")).toBeTruthy();
+    expect(screen.getByText("3200ms")).toBeTruthy();
+  });
+
+  it("says a reused connection is reused, not new", () => {
+    render(<SelectionPanel hit={httpSpanHit({ reused: true })} />);
+    expect(screen.getByText("reused")).toBeTruthy();
+  });
+
+  it("says a fresh connection is new, not silently nothing", () => {
+    render(<SelectionPanel hit={httpSpanHit({ reused: false })} />);
+    expect(screen.getByText("new")).toBeTruthy();
+  });
+
+  it("shows the protocol when present", () => {
+    render(<SelectionPanel hit={httpSpanHit({ protocol: "h2" })} />);
+    expect(screen.getByText("h2")).toBeTruthy();
+  });
+
+  it("shows byte counts in a human unit, not a raw byte count", () => {
+    render(<SelectionPanel hit={httpSpanHit({ requestBytes: 512, responseBytes: 2_048 })} />);
+    expect(screen.getByText("512 B")).toBeTruthy();
+    expect(screen.getByText("2.0 KB")).toBeTruthy();
   });
 });
