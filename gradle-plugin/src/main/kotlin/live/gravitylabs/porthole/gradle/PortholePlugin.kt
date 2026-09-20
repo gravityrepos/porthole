@@ -34,6 +34,7 @@ class PortholePlugin : Plugin<Project> {
             uiPackageVersion.convention(UI_PACKAGE_VERSION)
             uiCommand.convention(emptyList())
             enabled.convention(true)
+            strictMode.convention(false)
         }
 
         var configured = false

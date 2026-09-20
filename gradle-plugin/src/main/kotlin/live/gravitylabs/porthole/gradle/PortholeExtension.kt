@@ -73,6 +73,29 @@ abstract class PortholeExtension {
     abstract val deviceSerial: Property<String>
 
     /**
+     * Installs an Android `StrictMode` thread + VM policy in debug builds and
+     * turns a violation with a frame in the app's own package into a
+     * `findings` entry — main-thread disk writes and network calls at
+     * `error`, leaked closeables/cursors at `warning`, everything else at
+     * `note`. See `StrictModeCollector`'s own KDoc for exactly which checks
+     * are on by default and why `detectDiskReads()` is deliberately not one
+     * of them (it is the single noisiest StrictMode check there is, and
+     * `db-on-main-thread` already covers the read that matters
+     * categorically).
+     *
+     * Off by default. `StrictMode.getThreadPolicy()`/`getVmPolicy()` return
+     * opaque objects with no public accessors, so there is no way to detect —
+     * let alone chain onto — a policy the app already installed. Turning this
+     * on unconditionally would silently discard a debug build's own
+     * `penaltyDeath` the moment this plugin's runtime loaded. Enabling it
+     * REPLACES whatever policy was already in effect; the device-side `setup`
+     * report says so plainly, in exactly those terms. Never enable this in a
+     * release build — `debugBuildTypes` is what this ships on regardless of
+     * this flag, same as every other collector.
+     */
+    abstract val strictMode: Property<Boolean>
+
+    /**
      * Application id to record in the connection file and in `.mcp.json`'s
      * `PORTHOLE_APPLICATION_ID`. No longer only cosmetic (GRA-197): the MCP
      * server compares it against the connected app's own `hello.packageName`
