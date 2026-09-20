@@ -18,7 +18,7 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
-import { askTrace, findTraceProcessor, QUESTIONS } from "./perfetto.js";
+import { askTrace, findTraceProcessor, questionsDescription } from "./perfetto.js";
 import { captureArgs, countPortholeLabels, describeCapture, planCapture } from "./systrace.js";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -1447,7 +1447,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "means the app's own work was never the whole story.\n\n" +
         "Deliberately not a SQL interface. The questions are fixed, because an agent handed a " +
         "hundred tables and no guidance assembles an answer from whichever guess came back " +
-        "non-empty — which is the failure this whole surface was reshaped to avoid.\n\n" +
+        "non-empty — which is the failure this whole surface was reshaped to avoid. The full " +
+        `set: ${questionsDescription()}.\n\n` +
+        "`jank`, `binder`, `render`, `slices`, `startup` and `monitor_contention` point at a " +
+        "moment; `thread_states` and `cpu` are a property of the whole window instead and never " +
+        "carry one. `cpu` also never asserts causation — it says where the main thread ran and " +
+        "who else wanted the same cores during a window something else already flagged, not why " +
+        "that window was slow, and it stays silent unless the placement was a material share of " +
+        "the window, not a passing moment.\n\n" +
         "Needs `trace_processor_shell`, which is not bundled — it is a large platform-specific " +
         "binary — but is fetched on request: `./gradlew portholeTraceProcessor` downloads the " +
         "pinned release, checks its SHA-256 and caches it where this tool looks.",
@@ -1464,10 +1471,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           .optional()
           .describe("Defaults to the app the porthole is attached to."),
         traceProcessor: z.string().optional().describe("Path to trace_processor_shell."),
+        ask: z
+          .array(z.string())
+          .optional()
+          .describe(
+            `Which questions to ask, by id. Defaults to every one of them: ${questionsDescription()}. ` +
+              "An id that is not one of these is reported back in `unanswered` rather than rejected " +
+              "outright, the same as a question that failed to compile.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ trace, from, to, packageName, traceProcessor }): Promise<ToolResult> => {
+    async ({ trace, from, to, packageName, traceProcessor, ask }): Promise<ToolResult> => {
       // GRA-157: connection state checked before the trace_processor lookup,
       // not after. A device still mid-handshake is not the caller's fault and
       // not fixed by anything on this machine, so naming that first means a
@@ -1534,12 +1549,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const bootFrom = toBoot(events, span.from);
       const bootTo = toBoot(events, span.to);
 
-      const { findings: traceFindings, unanswered } = await askTrace({
+      const {
+        findings: traceFindings,
+        unanswered,
+        asked,
+        skipped,
+        wallTimeMs,
+      } = await askTrace({
         binary,
         trace,
         packageName: app,
         fromNs: bootFrom.ns,
         toNs: bootTo.ns,
+        ask,
       });
 
       const findings = traceFindings.map(withFollowUp);
@@ -1550,7 +1572,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // two, the more recent sample is the more representative one to
         // report.
         window: { from: span.from, to: span.to, sleepMs: bootTo.sleepMs },
-        asked: QUESTIONS.map((q) => q.asks),
+        // GRA-61: `asked` is now only what `ask` actually selected (every
+        // question, when `ask` is omitted) — `skipped` names the rest, so a
+        // caller can tell "not asked this time" apart from "asked and
+        // unanswered", the two `unanswered` alone cannot distinguish.
+        asked,
+        skipped,
+        wallTimeMs,
         unanswered,
         findings,
       };
@@ -1560,7 +1588,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         ? `${findings.length} finding(s) from the trace. ${findings[0].title}.`
         : "The trace had nothing to add about that window.";
       return ok(
-        summary + (failures.length ? ` ${failures.length} question(s) failed.` : ""),
+        summary +
+          (failures.length ? ` ${failures.length} question(s) failed.` : "") +
+          (skipped.length ? ` ${skipped.length} question(s) not asked.` : ""),
         payload,
       );
     },

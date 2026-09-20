@@ -1032,12 +1032,18 @@ describe("GRA-115 ruling 4: /api/findings' asked field", () => {
     const response = await timeline.send(`/api/findings?trace=${traceId}`);
     const body = JSON.parse(response.body) as { asked?: Array<{ id: string; answered: boolean }> };
 
+    // GRA-61 added three questions (startup, monitor_contention, cpu) to
+    // QUESTIONS, which this endpoint still maps over directly — nothing in
+    // timeline.ts itself changed, only the list it walks got longer.
     expect(body.asked).toEqual([
       { id: "jank", answered: true },
       { id: "thread_states", answered: true },
       { id: "binder", answered: true },
       { id: "render", answered: true },
       { id: "slices", answered: true },
+      { id: "startup", answered: true },
+      { id: "monitor_contention", answered: true },
+      { id: "cpu", answered: true },
     ]);
   });
 

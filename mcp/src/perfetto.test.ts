@@ -13,8 +13,11 @@ import {
   newNonce,
   matchBatch,
   QUESTIONS,
+  QUESTION_IDS,
+  questionsDescription,
   runBatch,
   runScript,
+  selectQuestions,
   type HoistedQuestion,
   type Question,
   type Rows,
@@ -43,15 +46,72 @@ describe("the questions", () => {
   it("are a fixed set, not an interface for arbitrary SQL", () => {
     // The moment this grows a `query` parameter it stops being a tool and
     // becomes a worse Perfetto, with an agent guessing at a hundred tables.
-    // Six was the ceiling set when this was designed; five are in.
-    expect(QUESTIONS.length).toBeLessThanOrEqual(6);
-    expect(QUESTIONS.length).toBe(5);
+    // Six was the ceiling set when this was designed and five were in; GRA-61
+    // (startup attribution, lock contention, and CPU placement + who-else-
+    // wanted-the-cores, the last two merged into one) raised the ceiling to
+    // ten and filled three of the new four. GRA-85 (a project's own
+    // question) is expected to use the last one.
+    expect(QUESTIONS.length).toBeLessThanOrEqual(10);
+    expect(QUESTIONS.length).toBe(8);
     for (const q of QUESTIONS) {
       expect(q.sql).toContain("$from");
       expect(q.sql).toContain("$to");
       // Narrowed to one process, which is the step a person otherwise performs
       // by picking their app out of the list before exporting anything.
       expect(q.sql, `${q.id} would answer for the whole device`).toContain("$package");
+    }
+  });
+});
+
+/**
+ * GRA-61's `ask` parameter. `selectQuestions` is what `askTrace` calls to
+ * decide which questions to put to trace_processor at all — tested directly
+ * here so the selection logic does not need a spawned process (or even a
+ * fake one) to prove correct.
+ */
+describe("selectQuestions (GRA-61)", () => {
+  it("selects every question when ask is omitted", () => {
+    const { selected, skipped, unknownIds } = selectQuestions();
+    expect(selected).toEqual(QUESTIONS);
+    expect(skipped).toEqual([]);
+    expect(unknownIds).toEqual([]);
+  });
+
+  it("selects every question when ask is an empty array, the same as omitted", () => {
+    // Deliberately the same case as omitted, not "asked for nothing" — see
+    // selectQuestions' own doc comment.
+    const { selected } = selectQuestions([]);
+    expect(selected).toEqual(QUESTIONS);
+  });
+
+  it("runs exactly one question and reports the rest skipped", () => {
+    const { selected, skipped } = selectQuestions(["startup"]);
+    expect(selected).toHaveLength(1);
+    expect(selected[0].id).toBe("startup");
+    expect(skipped).toHaveLength(QUESTIONS.length - 1);
+    const startupAsks = QUESTIONS.find((q) => q.id === "startup")!.asks;
+    expect(skipped).not.toContain(startupAsks);
+  });
+
+  it("keeps QUESTIONS' own order, not the caller's ask order", () => {
+    const { selected } = selectQuestions(["slices", "jank"]);
+    expect(selected.map((q) => q.id)).toEqual(["jank", "slices"]);
+  });
+
+  it("reports an id that is not a real question rather than silently dropping it", () => {
+    const { selected, unknownIds } = selectQuestions(["startup", "bogus"]);
+    expect(selected.map((q) => q.id)).toEqual(["startup"]);
+    expect(unknownIds).toEqual(["bogus"]);
+  });
+
+  it("QUESTION_IDS is exactly QUESTIONS' own ids, in order", () => {
+    expect(QUESTION_IDS).toEqual(QUESTIONS.map((q) => q.id));
+  });
+
+  it("questionsDescription names every question by id, without drifting from QUESTIONS", () => {
+    const description = questionsDescription();
+    for (const q of QUESTIONS) {
+      expect(description, `${q.id} missing from questionsDescription()`).toContain(`\`${q.id}\``);
     }
   });
 });
@@ -259,6 +319,184 @@ describe("interpret + toUptimeMs: placing a window (GRA-113)", () => {
     const finding = findings.find((f) => f.id === "trace-frame-deadline");
     expect(finding?.spanning).toBe(true);
     expect(finding?.window).toBeUndefined();
+  });
+});
+
+/**
+ * GRA-61's `trace-startup`: hand-built rows following the columns the real
+ * SQL selects (see fixtures/stdout/PROVENANCE.md for why these are
+ * hand-built rather than captured — no real trace was available). What is
+ * being pinned here is `interpret()`'s own logic, same as the binder/render
+ * synthetic cases above.
+ */
+describe("interpret: trace-startup (GRA-61)", () => {
+  it("names the platform's own top reasons, worst first", () => {
+    const findings = interpret({
+      startup: [
+        { startup_id: "1", startup_type: "cold", dur: "900000000", "MIN(ts)": "1000000", "MAX(ts)": "901000000", reason: "bind_application", reason_dur: "300000000" },
+        { startup_id: "1", startup_type: "cold", dur: "900000000", "MIN(ts)": "1000000", "MAX(ts)": "901000000", reason: "open_dex_files_from_oat", reason_dur: "150000000" },
+      ],
+    });
+    const startup = findings.find((f) => f.id === "trace-startup");
+    expect(startup?.title).toBe("cold start took 900ms");
+    expect(startup?.severity).toBe("warning"); // >= 500ms
+    expect(startup?.confidence).toBe("observed");
+    expect(startup?.detail).toContain("bindApplication (300ms)");
+    expect(startup?.detail).toContain("opening dex files (150ms)");
+  });
+
+  it("does not read a null reason (no breakdown data) as a zero-ms top contributor", () => {
+    const findings = interpret({
+      startup: [
+        { startup_id: "2", startup_type: "warm", dur: "200000000", "MIN(ts)": "1000000", "MAX(ts)": "201000000", reason: null, reason_dur: null },
+      ],
+    });
+    const startup = findings.find((f) => f.id === "trace-startup");
+    expect(startup?.title).toBe("warm start took 200ms");
+    expect(startup?.severity).toBe("note"); // < 500ms
+    expect(startup?.detail).toBe("No single reason dominated the platform's own breakdown of it.");
+  });
+
+  it("keeps two different startups in the same window as two separate findings", () => {
+    const findings = interpret({
+      startup: [
+        { startup_id: "1", startup_type: "cold", dur: "600000000", "MIN(ts)": "0", "MAX(ts)": "600000000", reason: null, reason_dur: null },
+        { startup_id: "2", startup_type: "hot", dur: "100000000", "MIN(ts)": "1000000000", "MAX(ts)": "1100000000", reason: null, reason_dur: null },
+      ],
+    });
+    expect(findings.filter((f) => f.id === "trace-startup")).toHaveLength(2);
+  });
+
+  it("claims nothing when asked about nothing", () => {
+    expect(interpret({ startup: [] }).find((f) => f.id === "trace-startup")).toBeUndefined();
+  });
+});
+
+/**
+ * GRA-61's `trace-lock-contention`.
+ */
+describe("interpret: trace-lock-contention (GRA-61)", () => {
+  const row = (overrides: Record<string, unknown>) => ({
+    blocking_method: "void Foo.bar()",
+    short_blocking_method: "bar",
+    blocked_method: "void Baz.qux()",
+    short_blocked_method: "qux",
+    blocking_thread_name: "Binder:123_1",
+    blocked_thread_name: "main",
+    is_blocking_thread_main: "0",
+    is_blocked_thread_main: "1",
+    waiter_count: "1",
+    dur: "9000000",
+    "MIN(ts)": "1000000",
+    "MAX(ts)": "10000000",
+    ...overrides,
+  });
+
+  it("reports a main-thread block and names who was holding the lock", () => {
+    const findings = interpret({ monitor_contention: [row({})] });
+    const found = findings.find((f) => f.id === "trace-lock-contention");
+    expect(found?.severity).toBe("warning"); // 9ms >= 8ms
+    expect(found?.title).toContain("bar");
+    expect(found?.detail).toContain("Binder:123_1");
+    expect(found?.confidence).toBe("observed");
+  });
+
+  it("ignores contention that never touches the main thread", () => {
+    const findings = interpret({
+      monitor_contention: [row({ is_blocked_thread_main: "0" })],
+    });
+    expect(findings.find((f) => f.id === "trace-lock-contention")).toBeUndefined();
+  });
+
+  it("stays quiet about sub-millisecond main-thread contention", () => {
+    const findings = interpret({
+      monitor_contention: [row({ dur: "400000" })], // 0.4ms
+    });
+    expect(findings.find((f) => f.id === "trace-lock-contention")).toBeUndefined();
+  });
+
+  it("drops to a note under the 8ms blocking threshold", () => {
+    const findings = interpret({
+      monitor_contention: [row({ dur: "5000000" })], // 5ms
+    });
+    expect(findings.find((f) => f.id === "trace-lock-contention")?.severity).toBe("note");
+  });
+});
+
+/**
+ * GRA-61's merged `trace-cpu-placement` (questions 8+9). The acceptance
+ * criterion this exists to satisfy: no finding on a trace from an idle
+ * device on a desk, plugged into power. These rows stand in for that case
+ * and for a busy one, both hand-built (see fixtures/stdout/PROVENANCE.md).
+ */
+describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
+  it("stays quiet on an idle device: brief, low-duty-cycle running time on a little core", () => {
+    // A real idle-but-not-asleep device: the main thread wakes briefly for
+    // housekeeping, most of it on a little core, but only a couple of
+    // milliseconds total in this window — below MATERIAL_RUNNING_MS.
+    const idle: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "2000000", avg_freq: "700000", max_freq: "1800000", process_name: null, COUNT: null },
+        { kind: "other", core: null, cluster_type: null, dur: "500000", avg_freq: null, max_freq: null, process_name: "system_server", COUNT: "3" },
+      ],
+    };
+    expect(interpret(idle).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+  });
+
+  it("stays quiet when running time is material but neither on a little core nor throttled", () => {
+    // A busy main thread, but on a big core near its own max frequency —
+    // the gate's other half: material time alone is not sufficient.
+    const fine: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "4", cluster_type: "big", dur: "150000000", avg_freq: "2700000", max_freq: "2800000", process_name: null, COUNT: null },
+      ],
+    };
+    expect(interpret(fine).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+  });
+
+  it("fires when the main thread spent a material share of the window on a little core", () => {
+    const busy: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "140000000", avg_freq: "900000", max_freq: "1800000", process_name: null, COUNT: null },
+        { kind: "main_thread", core: "2", cluster_type: "big", dur: "40000000", avg_freq: "2400000", max_freq: "2800000", process_name: null, COUNT: null },
+        { kind: "other", core: null, cluster_type: null, dur: "95000000", avg_freq: null, max_freq: null, process_name: "system_server", COUNT: "42" },
+      ],
+    };
+    const finding = interpret(busy).find((f) => f.id === "trace-cpu-placement");
+    expect(finding).toBeDefined();
+    expect(finding?.confidence).toBe("correlated");
+    expect(finding?.spanning).toBe(true);
+    expect(finding?.severity).toBe("note");
+    // Must not assert causation.
+    expect(finding?.detail).not.toMatch(/because|caused|due to/i);
+    expect(finding?.detail).toContain("does not by itself explain");
+    expect(finding?.evidence?.worstOtherProcess).toBe("system_server");
+  });
+
+  it("fires when the main thread ran throttled, even on a big core", () => {
+    const throttled: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "4", cluster_type: "big", dur: "100000000", avg_freq: "800000", max_freq: "2800000", process_name: null, COUNT: null },
+      ],
+    };
+    const finding = interpret(throttled).find((f) => f.id === "trace-cpu-placement");
+    expect(finding).toBeDefined();
+    expect(finding?.title).toContain("% of max frequency");
+  });
+
+  it("names nothing else when nothing else was contending, without inventing a process", () => {
+    const busyAlone: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "100000000", avg_freq: "900000", max_freq: "1800000", process_name: null, COUNT: null },
+      ],
+    };
+    const finding = interpret(busyAlone).find((f) => f.id === "trace-cpu-placement");
+    expect(finding?.detail).toContain("Nothing else was contending");
+    expect(finding?.evidence?.worstOtherProcess).toBeUndefined();
+  });
+
+  it("claims nothing when asked about nothing", () => {
+    expect(interpret({ cpu: [] }).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
   });
 });
 
@@ -648,6 +886,45 @@ describe("runBatch", () => {
     expect(unanswered).toEqual([]);
     expect((rows as Record<string, unknown>).a).toEqual([{ x: "1" }]);
     expect((rows as Record<string, unknown>).c).toEqual([{ x: "3" }]);
+  });
+
+  /**
+   * GRA-61's wallTimeMs. AskResult's own doc comment explains why this is a
+   * per-invocation number rather than a true per-statement one:
+   * trace_processor_shell reports one "Query execution time" for an entire
+   * `-q` script, not one per statement — so what `runBatch` can honestly
+   * report is which invocation answered each question and how long that
+   * invocation took, not a fabricated share of it.
+   */
+  it("attributes one invocation's wall time to every question it answered together", async () => {
+    const run: RunFn = async (_binary, _args, sql) => {
+      const markers = [...sql.matchAll(/SELECT 'porthole:([0-9a-f]{16}):([\w.]+)' AS marker;/g)];
+      let stdout = "";
+      for (const [, nonce, id] of markers) stdout += `"marker"\n"${markerText(nonce, id)}"\n\n"x"\n"1"\n\n`;
+      return { code: 0, stdout, stderr: "", timedOut: false, elapsedMs: 42 };
+    };
+    const { wallTimeMs } = await runBatch(questions, [], options, run);
+    expect(wallTimeMs).toEqual({ a: 42, b: 42, c: 42 });
+  });
+
+  it("gives a retried question its own call's wall time, not the failed first call's", async () => {
+    let call = 0;
+    const run: RunFn = async (_binary, _args, sql) => {
+      call++;
+      const markers = [...sql.matchAll(/SELECT 'porthole:([0-9a-f]{16}):([\w.]+)' AS marker;/g)];
+      let stdout = "";
+      for (const [, nonce, id] of markers) {
+        if (call === 1 && id === "b") {
+          return { code: 1, stdout, stderr: "no such table: bogus", timedOut: false, elapsedMs: 10 };
+        }
+        stdout += `"marker"\n"${markerText(nonce, id)}"\n\n"x"\n"1"\n\n`;
+      }
+      return { code: 0, stdout, stderr: "", timedOut: false, elapsedMs: call === 1 ? 10 : 5 };
+    };
+    const { wallTimeMs } = await runBatch(questions, [], options, run);
+    expect(wallTimeMs.a).toBe(10); // answered on the first, slower call
+    expect(wallTimeMs.c).toBe(5); // answered only after b was dropped and the rest retried
+    expect(wallTimeMs.b).toBeUndefined(); // never answered at all
   });
 
   it("keeps the other two when one fails, at the cost of one extra call", async () => {
