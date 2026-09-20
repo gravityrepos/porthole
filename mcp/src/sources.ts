@@ -41,6 +41,16 @@ import { resolveProjectRoot } from "./adb.js";
  * in the first place. Once there is something to look up and the feature is
  * on, they always return a `Where`, resolved or not — an unresolved `Where`
  * is itself the useful fact ("ambiguous", "not found", "synthetic").
+ *
+ * Follow-up: a same-named file or label in two modules is the case this
+ * exists for and used to always read "ambiguous" — the multi-module app
+ * the ticket's own example is about. When the evidence carries a package
+ * too (a stack frame's fully qualified class, or a fully qualified
+ * `state`/recomposition name), both lookups narrow their candidates to the
+ * ones declared under that package before falling back to "ambiguous" —
+ * see `narrowByPackage`. Narrowing only ever picks a result when it lands
+ * on exactly one candidate; zero or several and this reports exactly what
+ * it would have without a package at all, never a guess.
  */
 
 /** Why a lookup did not resolve to exactly one place. Exactly what the wire carries under `where.reason` — see this module's own doc comment for what distinguishes them. */
@@ -111,6 +121,16 @@ interface CacheEntry {
   byBaseName: Map<string, string[]>;
   /** Built lazily — most sessions call `whereForFrame` far more than `whereForName`, and a session that never asks about a composable should never pay to parse one. */
   names: Map<string, Declaration[]> | null;
+  /**
+   * `package` line per file, filled lazily and only for files that actually
+   * come up as a disambiguation candidate — reading and regexing every file
+   * under the root just in case two of them later share a basename would
+   * turn the cheap, no-index slice-1 path into a full-tree read on every
+   * lookup. `null` means read and found no `package` declaration (the
+   * default package, or a parse miss); a file only ever ends up in this map
+   * once, whichever of `whereForFrame`/`whereForName` asks for it first.
+   */
+  packageByFile: Map<string, string | null>;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -215,16 +235,68 @@ function getEntry(root: string): CacheEntry {
     if (existing) existing.push(file);
     else byBaseName.set(base, [file]);
   }
-  const entry: CacheEntry = { builtAt: Date.now(), files, capped, byBaseName, names: null };
+  const entry: CacheEntry = { builtAt: Date.now(), files, capped, byBaseName, names: null, packageByFile: new Map() };
   cache.set(absolute, entry);
   return entry;
 }
 
-function resolveFile(root: string, fileName: string): Where {
+/** `^package\s+([\w.]+)` — the same tolerant single-pass-per-line regex the name index already uses for declarations, applied here to just the one line that matters. */
+const PACKAGE_DECLARATION = /^\s*package\s+([\w.]+)/m;
+
+/**
+ * The declared package of `relPath`, read and cached at most once per file
+ * per walk. Reading is deliberately lazy and scoped to disambiguation
+ * candidates only — see `CacheEntry.packageByFile`'s own comment.
+ */
+function packageOf(root: string, entry: CacheEntry, relPath: string): string | null {
+  const cached = entry.packageByFile.get(relPath);
+  if (cached !== undefined) return cached;
+  let declared: string | null = null;
+  try {
+    const text = readFileSync(path.join(root, ...relPath.split("/")), "utf8");
+    const match = PACKAGE_DECLARATION.exec(text);
+    if (match) declared = match[1];
+  } catch {
+    // removed between the walk and here, or unreadable — no package to report
+  }
+  entry.packageByFile.set(relPath, declared);
+  return declared;
+}
+
+/**
+ * Narrows `candidates` to the ones declared under `packageName`, when the
+ * evidence supplied one. GRA-201 follow-up: "never pick one of several" —
+ * filtering to zero or to more than one is not an answer this returns,
+ * only a filter down to exactly one is; the caller falls back to its
+ * ordinary ambiguous/ not-found handling on every other outcome, using the
+ * *unfiltered* candidate list, exactly as it did before package-awareness
+ * existed.
+ */
+function narrowByPackage<T extends { path: string }>(
+  root: string,
+  entry: CacheEntry,
+  candidates: T[],
+  packageName: string | null,
+): T | null {
+  if (!packageName) return null;
+  const filtered = candidates.filter((c) => packageOf(root, entry, c.path) === packageName);
+  return filtered.length === 1 ? filtered[0] : null;
+}
+
+function resolveFile(root: string, fileName: string, packageName: string | null): Where {
   const entry = getEntry(root);
   const matches = entry.byBaseName.get(fileName) ?? [];
   if (matches.length === 1) return { resolved: true, path: matches[0] };
-  if (matches.length > 1) return { resolved: false, reason: "ambiguous" };
+  if (matches.length > 1) {
+    const narrowed = narrowByPackage(
+      root,
+      entry,
+      matches.map((path) => ({ path })),
+      packageName,
+    );
+    if (narrowed) return { resolved: true, path: narrowed.path };
+    return { resolved: false, reason: "ambiguous" };
+  }
   if (entry.capped) {
     return { resolved: false, reason: "too many source files under the project root to search them all" };
   }
@@ -236,7 +308,29 @@ function resolveFile(root: string, fileName: string): Where {
 // ---------------------------------------------------------------------------
 
 /**
- * Extracts `{file, line}` from one rendered stack-frame line —
+ * Splits a qualified prefix (everything before the trailing
+ * `(File.kt:NN)`, e.g. `com.example.shop.ui.CartViewModel.blockTheMainThread`)
+ * into a package, on the one convention the JVM actually guarantees: a
+ * package segment is lowercase, a class is not (`CartViewModel`, or a
+ * top-level Kotlin file's own `ScreensKt`). The longest lowercase-segment
+ * prefix is the package; the first non-lowercase segment after it — a class
+ * name, possibly followed by more (a method, `$1`, a nested class) — is
+ * everything else, which this function has no use for. Returns `null` when
+ * there is no such split to make: nothing lowercase at the front (a
+ * default-package frame, or a bare dummy prefix in a test that names no
+ * real package), or lowercase all the way through (nothing left to be the
+ * class/method that would confirm the split is real).
+ */
+function packageFromQualifiedFrame(qualified: string): string | null {
+  const segments = qualified.split(".").filter(Boolean);
+  let i = 0;
+  while (i < segments.length && /^[a-z_][a-z0-9_]*$/.test(segments[i])) i++;
+  if (i === 0 || i >= segments.length) return null;
+  return segments.slice(0, i).join(".");
+}
+
+/**
+ * Extracts `{file, line, packageName}` from one rendered stack-frame line —
  * `com.example.CartViewModel.blockTheMainThread(CartViewModel.kt:148)`, the
  * exact shape `StackFormat.kt#render` produces on the runtime side. Returns
  * `null` for anything that is not, in fact, a source-mapped frame:
@@ -244,16 +338,22 @@ function resolveFile(root: string, fileName: string): Where {
  * `StackFormat`'s own way of saying "nothing to point at" — not a file this
  * walk simply has not found yet — and a line missing its trailing
  * `(File.kt:NN)` entirely (already-truncated text, a non-JVM frame) is the
- * same story. Exported for its own tests; callers should reach for
- * `whereForFrame` instead.
+ * same story. `packageName` is best-effort (see `packageFromQualifiedFrame`)
+ * and only ever narrows an otherwise-ambiguous match, never widens one.
+ * Exported for its own tests; callers should reach for `whereForFrame`
+ * instead.
  */
-export function parseFrame(frameLine: string): { file: string; line: number | null } | null {
-  const match = /\(([^()]+):(-?\d+)\)\s*$/.exec(frameLine.trim());
+export function parseFrame(
+  frameLine: string,
+): { file: string; line: number | null; packageName: string | null } | null {
+  const trimmed = frameLine.trim();
+  const match = /\(([^()]+):(-?\d+)\)\s*$/.exec(trimmed);
   if (!match) return null;
   const [, file, lineText] = match;
   if (!file || file === "?" || !/\.(kt|java)$/i.test(file)) return null;
   const line = Number(lineText);
-  return { file, line: Number.isInteger(line) && line > 0 ? line : null };
+  const packageName = packageFromQualifiedFrame(trimmed.slice(0, match.index));
+  return { file, line: Number.isInteger(line) && line > 0 ? line : null, packageName };
 }
 
 /**
@@ -272,7 +372,7 @@ export function whereForFrame(frameLine: string | undefined | null): Where | und
   const parsed = parseFrame(frameLine);
   if (!parsed) return { resolved: false, reason: "synthetic" };
 
-  const fileResult = resolveFile(root, parsed.file);
+  const fileResult = resolveFile(root, parsed.file, parsed.packageName);
   if (!fileResult.resolved) return fileResult;
   return parsed.line ? { resolved: true, path: fileResult.path, line: parsed.line } : fileResult;
 }
@@ -348,9 +448,36 @@ function getNameIndex(root: string): Map<string, Declaration[]> {
 }
 
 /**
+ * Splits a fully qualified class name (`com.example.shop.ui.CartViewModel`)
+ * into its package and simple name — the same lowercase-package/capitalised-
+ * class convention `packageFromQualifiedFrame` leans on, but total rather
+ * than longest-prefix: every segment before the last must look like a
+ * package, or this is not a qualified name at all. That distinction is what
+ * keeps a plain composable label like `Cart.PromoField` from being
+ * misparsed as package `Cart` / class `PromoField` — `Cart` is capitalised,
+ * so it fails the package test and `whereForName` looks it up unfiltered,
+ * exactly as it did before this function existed.
+ */
+function splitQualifiedClassName(name: string): { packageName: string; simpleName: string } | null {
+  const segments = name.split(".");
+  if (segments.length < 2) return null;
+  const simpleName = segments[segments.length - 1];
+  if (!/^[A-Z][A-Za-z0-9_]*$/.test(simpleName)) return null;
+  const packageSegments = segments.slice(0, -1);
+  if (!packageSegments.every((s) => /^[a-z_][a-z0-9_]*$/.test(s))) return null;
+  return { packageName: packageSegments.join("."), simpleName };
+}
+
+/**
  * Resolves a composable's name, a `state` owner's registered name, or a
  * class name to where it is declared or labelled in source. Same `undefined`
  * -vs-`Where` contract as `whereForFrame` — see that function's own comment.
+ *
+ * `name` may be fully qualified (a `state` owner registered with its class's
+ * own qualified name, say) — `splitQualifiedClassName` recognises that case
+ * and narrows by package the same way `whereForFrame` does; an unqualified
+ * name (every composable label, most registered names) resolves exactly as
+ * before.
  */
 export function whereForName(name: string | undefined | null): Where | undefined {
   if (!name) return undefined;
@@ -358,10 +485,17 @@ export function whereForName(name: string | undefined | null): Where | undefined
   if (!root) return undefined;
   if (isSyntheticName(name)) return { resolved: false, reason: "synthetic" };
 
+  const qualified = splitQualifiedClassName(name);
+  const lookupName = qualified ? qualified.simpleName : name;
+
   const entry = getEntry(root);
-  const matches = getNameIndex(root).get(name) ?? [];
+  const matches = getNameIndex(root).get(lookupName) ?? [];
   if (matches.length === 1) return { resolved: true, path: matches[0].path, line: matches[0].line };
-  if (matches.length > 1) return { resolved: false, reason: "ambiguous" };
+  if (matches.length > 1) {
+    const narrowed = narrowByPackage(root, entry, matches, qualified?.packageName ?? null);
+    if (narrowed) return { resolved: true, path: narrowed.path, line: narrowed.line };
+    return { resolved: false, reason: "ambiguous" };
+  }
   if (entry.capped) {
     return { resolved: false, reason: "too many source files under the project root to search them all" };
   }

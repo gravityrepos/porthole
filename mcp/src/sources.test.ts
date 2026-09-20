@@ -69,7 +69,7 @@ describe("parseFrame", () => {
   it("reads the file and line off StackFormat.kt's own rendering", () => {
     expect(
       parseFrame("com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:148)"),
-    ).toEqual({ file: "CartViewModel.kt", line: 148 });
+    ).toEqual({ file: "CartViewModel.kt", line: 148, packageName: "com.example.shop.ui" });
   });
 
   it("returns null for a native frame -- StackFormat renders fileName ?? \"?\" -- rather than inventing a file called '?'", () => {
@@ -85,7 +85,19 @@ describe("parseFrame", () => {
   });
 
   it("returns a null line, not a throw, when the frame has no usable line number", () => {
-    expect(parseFrame("com.example.Foo.bar(Foo.kt:0)")).toEqual({ file: "Foo.kt", line: null });
+    expect(parseFrame("com.example.Foo.bar(Foo.kt:0)")).toEqual({
+      file: "Foo.kt",
+      line: null,
+      packageName: "com.example",
+    });
+  });
+
+  it("returns a null packageName for a bare, unqualified frame -- nothing lowercase at the front to be a package", () => {
+    expect(parseFrame("CartViewModel.blockTheMainThread(CartViewModel.kt:1)")).toEqual({
+      file: "CartViewModel.kt",
+      line: 1,
+      packageName: null,
+    });
   });
 });
 
@@ -156,6 +168,79 @@ describe("whereForFrame: ambiguous when a name exists twice under src/", () => {
     expect(whereForFrame("x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)")).toEqual({
       resolved: false,
       reason: "ambiguous",
+    });
+  });
+});
+
+/**
+ * GRA-201 follow-up: the multi-module case this ticket exists for. Two
+ * `Repository.kt` in the fixture, one per module, in different packages
+ * (`com.example.shop.data`, `com.example.network.data`) -- the fully
+ * qualified name a stack frame or a registered `state` owner may carry is
+ * enough to tell them apart even though the bare file/class name alone
+ * cannot.
+ */
+describe("package disambiguation: a fully qualified frame narrows an otherwise-ambiguous file", () => {
+  beforeEach(() => useProjectRoot(FIXTURE_ROOT));
+
+  it("resolves the app module's Repository.kt from its own package", () => {
+    const where = whereForFrame(
+      "com.example.shop.data.Repository.fetch(Repository.kt:9)",
+    );
+    expect(where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/example/shop/data/Repository.kt",
+      line: 9,
+    });
+  });
+
+  it("resolves core/network's Repository.kt from its own, different package", () => {
+    const where = whereForFrame(
+      "com.example.network.data.Repository.fetch(Repository.kt:6)",
+    );
+    expect(where).toEqual({
+      resolved: true,
+      path: "core/network/src/main/kotlin/com/example/network/data/Repository.kt",
+      line: 6,
+    });
+  });
+
+  it("falls back to plain ambiguous when the frame's package matches neither file -- never picks one of several", () => {
+    const where = whereForFrame("com.example.other.Repository.fetch(Repository.kt:1)");
+    expect(where).toEqual({ resolved: false, reason: "ambiguous" });
+  });
+
+  it("stays ambiguous with no package at all in the frame -- the pre-follow-up baseline is unchanged", () => {
+    const where = whereForFrame("x.Repository.fetch(Repository.kt:1)");
+    expect(where).toEqual({ resolved: false, reason: "ambiguous" });
+  });
+
+  it("whereForName resolves a fully qualified class name the same way", () => {
+    expect(whereForName("com.example.shop.data.Repository")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/example/shop/data/Repository.kt",
+      line: 8,
+    });
+    expect(whereForName("com.example.network.data.Repository")).toEqual({
+      resolved: true,
+      path: "core/network/src/main/kotlin/com/example/network/data/Repository.kt",
+      line: 5,
+    });
+  });
+
+  it("whereForName stays ambiguous for the bare class name -- unqualified evidence is unaffected", () => {
+    expect(whereForName("Repository")).toEqual({ resolved: false, reason: "ambiguous" });
+  });
+
+  it("does not mistake a composable label for a qualified class name -- Cart.PromoField still resolves as a label", () => {
+    // Regression guard for splitQualifiedClassName: "Cart" is capitalised,
+    // so it must fail the all-lowercase-package test and this must resolve
+    // exactly as the label-index tests above already prove it does, not
+    // fall through to a package-filtered (and therefore "not found") path.
+    expect(whereForName("Fixture.PromoField")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
+      line: 14,
     });
   });
 });

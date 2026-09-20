@@ -19,12 +19,16 @@ PR that makes the change, not after the fact.
   and a recomposition's composable name resolve to a `{ path, line }` under
   the project root when exactly one source file or declaration matches, and
   to `resolved: false` with a reason (`not found`, `ambiguous`, `synthetic`)
-  otherwise — never to a guess. `blocking`, `recompositions`,
-  `porthole_status`'s `exits`, the timeline UI's selection panel and
-  `porthole report` all carry or show it; resolution is a fact about where
-  evidence lives on disk and never changes a finding's title, severity or
-  detail, and is off entirely (no `where` key at all) whenever
-  `PORTHOLE_PROJECT_ROOT` is unset (GRA-201).
+  otherwise — never to a guess. When the evidence carries a package too (a
+  stack frame's own fully qualified class, or a qualified `state`/
+  recomposition name), a match that would otherwise be ambiguous narrows to
+  the one file in that package — the multi-module case this exists for —
+  and stays ambiguous only when the package matches none or more than one.
+  `blocking`, `recompositions`, `porthole_status`'s `exits`, the timeline
+  UI's selection panel and `porthole report` all carry or show it;
+  resolution is a fact about where evidence lives on disk and never changes
+  a finding's title, severity or detail, and is off entirely (no `where`
+  key at all) whenever `PORTHOLE_PROJECT_ROOT` is unset (GRA-201).
 
 ### Changed
 
