@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GRA-236: debug-only override so the sample's loopback MockWebServer keeps
+  working on API 28+ devices that block cleartext by default (API 36 emulators
+  in particular). See network_security_config.xml for what it permits and why.
+  Merged only into debug builds — release carries no networkSecurityConfig.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+
+</manifest>

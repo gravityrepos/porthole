@@ -138,7 +138,9 @@ brand/           the mark, its lockups, and the script that renders the rasters
 WorkManager and Navigation, with a planted recomposition bug for the porthole to
 find. It serves its own API from a MockWebServer inside the app, so the demo is
 self-contained: the traffic is real HTTP over a real socket, it just does not
-need the internet.
+need the internet. That server is plain `http://localhost`, which newer
+devices block by default, so the debug build carries a `networkSecurityConfig`
+permitting cleartext to `localhost`/`127.0.0.1` only (GRA-236).
 
 It builds on two storage engines behind one `CartStore` interface, because the
 porthole instruments the layer underneath both and the sample should have to
