@@ -1384,7 +1384,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "`startup-slow`/`startup-not-fully-drawn` (present only when a `startup` event exists in " +
         "the window) read a debug build's own launch, not a user's: no R8, JIT compilation rather " +
         "than a warm AOT profile, and dexopt in a state release never ships in. Use the total to " +
-        "find which phase was slow, not to quote as what a user's release build would see.",
+        "find which phase was slow, not to quote as what a user's release build would see. Every " +
+        "launch in the window is judged on its own — reopening the app does not erase an earlier " +
+        "slow launch's own finding — but `startup-slow` and the fully-drawn note only ever judge " +
+        "the cold launch (`originKind: \"fork\"`): a warm/hot relaunch's `totalMs` starts from the " +
+        "relaunched Activity's own onCreate/onStart, already inside the system's own launch work, " +
+        "not the launch request `am start -W` (and Android vitals) measure from — which is also why " +
+        "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
