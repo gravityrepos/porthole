@@ -1,7 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -608,7 +608,7 @@ describe("parseCapture --systrace wiring (GRA-103)", () => {
   });
 
   it("splits --systrace-categories on commas and trims each one", () => {
-    const options = parseCapture(["--systrace-categories", "sched, freq ,gfx", "--", "true"]);
+    const options = parseCapture(["--systrace", "--systrace-categories", "sched, freq ,gfx", "--", "true"]);
     expect(options.systraceCategories).toEqual(["sched", "freq", "gfx"]);
   });
 
@@ -616,6 +616,31 @@ describe("parseCapture --systrace wiring (GRA-103)", () => {
     expect(() => parseCapture(["--systrace-categories"])).toThrow("process.exit");
     expect(exit).toHaveBeenCalledWith(2);
     expect(stderrText()).toContain("--systrace-categories needs a value");
+  });
+
+  /**
+   * QA F12: these two flags used to be accepted and silently ignored
+   * without `--systrace` — no warning, nothing, which reads as "it worked"
+   * to whoever typed it. GRA-93's own discipline (this ticket's dependency)
+   * is that a flag with no effect is a usage error, not a quiet no-op.
+   */
+  it("exits 2 for --systrace-seconds without --systrace, naming the flag", () => {
+    expect(() => parseCapture(["--systrace-seconds", "30", "--", "true"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--systrace-seconds requires --systrace");
+  });
+
+  it("exits 2 for --systrace-categories without --systrace, naming the flag", () => {
+    expect(() => parseCapture(["--systrace-categories", "sched", "--", "true"])).toThrow("process.exit");
+    expect(exit).toHaveBeenCalledWith(2);
+    expect(stderrText()).toContain("--systrace-categories requires --systrace");
+  });
+
+  it("does not care what order --systrace arrives in relative to the flag it licenses", () => {
+    expect(() => parseCapture(["--systrace-seconds", "30", "--systrace", "--", "true"])).not.toThrow();
+    const options = parseCapture(["--systrace-seconds", "30", "--systrace", "--", "true"]);
+    expect(options.systrace).toBe(true);
+    expect(options.systraceSeconds).toBe(30);
   });
 });
 
@@ -840,6 +865,70 @@ describe("porthole capture --systrace (GRA-103)", () => {
       fakeAdb.cleanup();
     }
   }, 10_000);
+
+  /**
+   * QA F11: this used to leave `trace.systrace` entirely absent on a pull
+   * failure — the `!stopped.ok` branch pushed a note onto `systraceNotes`
+   * and then fell straight through, never assigning `systraceBlock` at all,
+   * so the note went nowhere a reader of the trace JSON would ever see it
+   * and the artifact was indistinguishable from a plain `porthole capture`
+   * with no `--systrace`. Also asserts systrace.ts's own half of the fix:
+   * the on-device file is left in place (no `rm -f`) when the pull that was
+   * supposed to retrieve it never succeeded — deleting the only complete
+   * copy of a recording because the *download* of it failed would turn one
+   * flaky `adb pull` into total data loss.
+   */
+  it("still writes a systrace block, with the notes and no local file, when the pull itself fails — and never rm's the device copy (QA F11)", async () => {
+    const options = baseOptions();
+    const plan = planFor(options);
+    const pftracePath = pftracePathFor(options);
+    const pid = 7777;
+
+    const fakeAdb = buildFakeAdb({
+      [fakeAdbArgsKey(backgroundCaptureArgs(plan))]: { stdout: "" },
+      [fakeAdbArgsKey(["shell", "ps", "-A", "-o", "PID,ARGS"])]: {
+        stdout: `PID ARGS\n${pid} perfetto --background-wait -o ${plan.devicePath} -t ${plan.seconds}s\n`,
+      },
+      [fakeAdbArgsKey(["shell", `kill -TERM ${pid}`])]: { stdout: "" },
+      [fakeAdbArgsKey(["pull", plan.devicePath, pftracePath])]: {
+        stderr: "adb: error: failed to stat remote object",
+        exitCode: 1,
+      },
+      // Deliberately no response configured for `shell rm -f <devicePath>`:
+      // if the fix regressed and this were called anyway, the fake adb
+      // process would exit 17 ("no configured response") — belt and braces
+      // alongside the direct assertion on `fakeAdb.calls()` below.
+    });
+
+    try {
+      const code = await capture({
+        ...options,
+        adbBinary: fakeAdb.binaryPath,
+        adbEnv: fakeAdb.env,
+        findTraceProcessor: () => null,
+      });
+      // A failed pull is not itself a reason to fail the whole `porthole
+      // capture` run — the porthole-sourced half of the trace still
+      // recorded fine, same as capture.ts's own baseline() comment on
+      // --systrace failures elsewhere.
+      expect(code).toBe(0);
+
+      const trace = JSON.parse(readFileSync(options.out, "utf8")) as Trace;
+      expect(trace.systrace).toBeDefined();
+      expect(trace.systrace?.pulled).toBe(false);
+      expect(trace.systrace?.bytes).toBe(0);
+      expect(trace.systrace?.path).toBe("");
+      expect(trace.systrace?.notes.join(" ")).toMatch(/could not pull it/);
+      expect(trace.systrace?.notes.join(" ")).toContain(plan.devicePath);
+      expect(existsSync(pftracePath)).toBe(false);
+
+      const calls = fakeAdb.calls();
+      expect(calls.some((c) => c[0] === "pull")).toBe(true);
+      expect(calls.some((c) => c[0] === "shell" && c[1] === "rm")).toBe(false);
+    } finally {
+      fakeAdb.cleanup();
+    }
+  }, 10_000);
 });
 
 /**
@@ -901,6 +990,7 @@ describe("compare() and findings sourced from a system trace (GRA-103)", () => {
     systrace: {
       path: "porthole-trace.pftrace",
       bytes: 1024,
+      pulled: true,
       seconds: 30,
       categories: ["sched"],
       apps: ["com.example.shop"],

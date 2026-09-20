@@ -597,17 +597,29 @@ async function waitForCaptureToExit(devicePath: string, adbOptions: RunAdbAsyncO
   }
 }
 
-export type SystraceStopResult = { ok: true; bytes: number } | { ok: false; message: string };
+export type SystraceStopResult =
+  | { ok: true; bytes: number }
+  | { ok: false; message: string; devicePath: string };
 
 /**
  * Stops a capture [startSystraceCapture] started and pulls it to `localPath`.
  *
  * `kill -TERM` is best-effort and deliberately harmless against a session
  * that already finished on its own once `plan.seconds` elapsed — the same
- * idiom `ring.ts`'s own `stop()` uses for the identical reason. The device's
- * trace directory is not this tool's to fill, so the on-device file is
- * removed regardless of whether the pull succeeded, matching
- * `capture_system_trace`'s own "tidy up regardless" pull in index.ts.
+ * idiom `ring.ts`'s own `stop()` uses for the identical reason.
+ *
+ * QA (F11): the on-device file is deleted only *after* a successful pull —
+ * not "tidy up regardless" the way `capture_system_trace`'s own pull is
+ * (index.ts). That discipline fits a tool call whose whole result is the
+ * pulled file: once the call has failed there is nothing left to protect by
+ * keeping the device copy around. Here a failed pull is recoverable — the
+ * recording itself already finished, and the device still holds a complete
+ * copy at `devicePath` — so deleting it anyway would mean a CI run that hit
+ * one flaky `adb pull` loses the recording entirely: no local `.pftrace`,
+ * no device copy either, an artifact indistinguishable from a run that
+ * never passed `--systrace` at all. Left in place, and named in the
+ * returned message, it is still recoverable by hand even though this call
+ * itself could not get it.
  */
 export async function stopAndPullSystraceCapture(
   handle: SystraceCaptureHandle,
@@ -618,8 +630,17 @@ export async function stopAndPullSystraceCapture(
   await waitForCaptureToExit(handle.plan.devicePath, adbOptions);
 
   const pulled = await runAdbAsync(["pull", handle.plan.devicePath, localPath], adbOptions);
-  await runAdbAsync(["shell", "rm", "-f", handle.plan.devicePath], adbOptions);
-  if (!pulled.ok) return { ok: false, message: `recorded, but could not pull it: ${pulled.output}` };
+  if (!pulled.ok) {
+    return {
+      ok: false,
+      message:
+        `recorded, but could not pull it: ${pulled.output} — the on-device copy at ` +
+        `${handle.plan.devicePath} was left in place rather than deleted, since it is still the ` +
+        "only complete copy of this recording.",
+      devicePath: handle.plan.devicePath,
+    };
+  }
 
+  await runAdbAsync(["shell", "rm", "-f", handle.plan.devicePath], adbOptions);
   return { ok: true, bytes: statSync(localPath).size };
 }
