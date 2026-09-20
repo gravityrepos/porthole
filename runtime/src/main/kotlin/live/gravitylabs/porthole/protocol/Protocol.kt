@@ -322,6 +322,16 @@ internal data class RecompositionReport(
     /** Writes seen in the window that no instrumented node reacted to. */
     val unattributedWrites: List<StateWriteCount>,
     val notes: List<String> = emptyList(),
+    /**
+     * True when `CompositionObserver` (GRA-235) attached this session, so
+     * [nodes] covers every recompose scope in the tree rather than only
+     * `PortholeScreen`/`Modifier.portholeNode` call sites. False on a
+     * pre-1.6 Compose, or whenever the tooling API was otherwise
+     * unavailable — the same counts as before this ticket, not a defect.
+     */
+    val wholeTreeCoverage: Boolean = false,
+    /** True when `porthole { composableNames.set(true) }` is on for this build. See [RecompositionNode.name]'s own note on the cost. */
+    val composableNames: Boolean = false,
 )
 
 @Serializable
@@ -334,11 +344,23 @@ internal data class RecompositionNode(
     val firstAt: Long,
     val lastAt: Long,
     /**
-     * State objects written inside the attribution window before each
-     * recomposition, ranked by how often they preceded one. This is a
-     * correlation, not a causal read of the invalidation graph — see README.
+     * State objects that invalidated this node, ranked by how often they did.
+     * Causal (a read of Compose's own invalidation map) when [attribution] is
+     * "observer"; a temporal correlation — state written in the window before
+     * the recomposition, not proven to be its cause — when [attribution] is
+     * "temporal". See README.
      */
     val triggeredBy: List<StateWriteCount>,
+    /**
+     * "wrapped" — an explicit `PortholeScreen`/`Modifier.portholeNode` name —
+     * or "observer" — found by GRA-235's whole-tree counting, never wrapped.
+     * An "observer" node's [name] is a resolved composable name only when
+     * `composableNames` is on; otherwise it is a stable placeholder like
+     * `<uninstrumented:1a>`.
+     */
+    val source: String = "wrapped",
+    /** "observer" (causal) or "temporal" (correlation). See [triggeredBy]. */
+    val attribution: String = "temporal",
 )
 
 @Serializable

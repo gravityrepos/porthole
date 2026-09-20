@@ -1306,9 +1306,13 @@ against which source state" a human needs to decide whether to re-run the
 task — but never the report's `skippable` verdict, which may no longer be
 true of the source as it stands.
 
-**What joins, and what does not.** A `recompose` event carries the string
-literal given to `PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`,
-never `LeakyRow`. The compiler's report is keyed by the enclosing Kotlin
+**What joins, and what does not.** This join is keyed on a `"wrapped"` node's
+own explicit label — a `recompose` event carries the string literal given to
+`PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`, never
+`LeakyRow`. GRA-235's `"observer"` nodes (whole-tree, unwrapped) carry no
+such label to resolve through `where`'s source index, so `composeReport`
+never appears on one today — wrap the call site to get both counts and this
+join together. The compiler's report is keyed by the enclosing Kotlin
 function's own name, having never heard of the label. The join reuses
 [`where`](#what-happened-while-you-were-not-looking)'s own source index to
 resolve the label to `{path, line}`, then reads the nearest `fun` declaration
@@ -1689,34 +1693,56 @@ Perfetto trace directly, for the same reason.
 This matters more than usual, because an agent will take these outputs at face
 value.
 
-**Recomposition counts cover instrumented call sites only** — for now. The
-porthole counts the scopes you wrapped in `PortholeScreen` or
-`Modifier.portholeNode`. A composable that does not appear in the report is
-uninstrumented, not idle. The report says so in its own `notes` field.
+**Recomposition counts cover the whole tree, on Compose >= 1.6.**
+`androidx.compose.runtime.tooling.CompositionObserver` hands the porthole
+every invalidated recompose scope *and the state objects that invalidated
+it*, whether or not the app ever wrapped that composable — GRA-70's spike
+attached it with no app code at all, and GRA-235 is that spike shipped. A
+`recompositions` report's `wholeTreeCoverage` field says whether it attached
+this session; each node's `source` says `"wrapped"` (you named it —
+`PortholeScreen` / `Modifier.portholeNode`) or `"observer"` (found, not
+wrapped). A wrapped call site is merged with its own observer entry rather
+than counted twice — see
+[docs/spikes/GRA-70-recomposition-counts.md](docs/spikes/GRA-70-recomposition-counts.md)
+for the mechanism, and `CompositionTreeCollector`'s own doc comment for
+exactly what the merge guarantees and where it is a best effort rather than
+a proof.
 
-This is going to stop being true, and the reason it was true has already
-expired. The sentence above used to continue "Compose exposes no public hook
-for every recomposition in the tree"; there is one.
-`androidx.compose.runtime.tooling.CompositionObserver`, added in Compose 1.6,
-hands over every invalidated recompose scope *and the state objects that
-invalidated it*. The GRA-70 spike attached it to the sample with no app code
-whatsoever — a component declared in the manifest, the way `androidx.startup`
-installs itself — and got counts matching the instrumented ones, for the whole
-tree instead of the wrapped part of it. Counting that way is measurably close
-to free; deriving a readable *name* for a scope costs more and will be opt-in,
-because it makes Compose allocate a recompose scope for every composable and
-so slightly changes the app being measured. Two conditions come with it, and
-they are why this paragraph is a plan and not yet a feature: the API is
-experimental, and it does not exist before Compose 1.6, so apps on 1.5 keep
-the behaviour described above. The workings, the measurements and the proposed
-follow-up are in
-[docs/spikes/GRA-70-recomposition-counts.md](docs/spikes/GRA-70-recomposition-counts.md).
+**Names cost more than counts, and are opt-in.** An observer-only node's
+`name` is a stable placeholder like `<uninstrumented:1a>` unless you turn on:
 
-**Attribution is temporal, not causal.** `Snapshot.registerApplyObserver` tells
-us which state objects were written in each apply, and we pair that with the
-recompositions that follow within ~32ms (two frames). When three states change
-in one frame, all three are listed as possible triggers. It is a strong signal,
-not a proof.
+```kotlin
+porthole {
+    composableNames.set(true)
+}
+```
+
+Resolving a real name needs Compose's own `collectParameterInformation()` —
+what the Layout Inspector uses — which sets `forceRecomposeScopes = true` for
+the whole app: Compose allocates a recompose scope for *every* composable,
+not only the ones that need one, so a build with this on recomposes
+measurably differently than the same build with it off. `composableNames` is
+false by default for exactly that reason, and the report's own `notes` say so
+again whenever it is on — turn it off to measure the app as it ships, on when
+a placeholder id isn't enough to find the composable you're looking for.
+
+**Below Compose 1.6, this all falls back to counting instrumented call sites
+only** — the porthole's entire behaviour before GRA-235. The `recompositions`
+report says `wholeTreeCoverage: false` and its `notes` say why; the runtime
+starts and logs the same thing once, and nothing crashes. A composable that
+does not appear in the report is then uninstrumented, not idle. `setup`
+carries a `compose_tree` entry either way, so whether whole-tree counting
+attached is never something you have to infer from its absence.
+
+**Attribution is causal when whole-tree coverage is on, temporal otherwise.**
+A node's `attribution` field says which: `"observer"` means Compose's own
+invalidation map named the actual state objects that caused it — not a guess.
+`"temporal"` (always the case below Compose 1.6, or for the rare pass this
+mechanism can't resolve precisely) falls back to `Snapshot.registerApplyObserver`
+pairing a recomposition with whatever state was written within ~32ms (two
+frames) before it. When three states change in one frame, a temporal
+correlation lists all three as possible triggers — a strong signal, not a
+proof. A causal one names the one that actually did it.
 
 **Names come from an owner.** A state object has no name of its own, so every
 name in a report came from something that owns it. View models are found for

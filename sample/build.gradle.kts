@@ -59,6 +59,12 @@ porthole {
     // for a real app; this repo's own sample is exactly the place to turn
     // it on.
     strictMode.set(true)
+    // GRA-235: same reasoning as strictMode above — on here so the sample
+    // demonstrates whole-tree recomposition counting with real names (the
+    // CoreTextField churn under Cart.PromoField, never wrapped) instead of
+    // placeholder ids. Off is the right default for a real app measuring its
+    // own recompose cost; this sample is exactly the place to turn it on.
+    composableNames.set(true)
 }
 
 dependencies {

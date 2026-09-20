@@ -1,5 +1,8 @@
-# Bump these to whatever your app is on. The runtime only needs Compose >= 1.5
-# and kotlinx-serialization; nothing here is pinned for behaviour.
+# Bump these to whatever your app is on. The runtime needs Compose >= 1.5 for
+# PortholeScreen/Modifier.portholeNode and kotlinx-serialization; whole-tree
+# recomposition counting (GRA-235, CompositionObserver) additionally needs
+# Compose >= 1.6 and degrades gracefully — not a floor, a ceiling on one
+# feature — below it. Nothing here is pinned for behaviour.
 [versions]
 # Porthole's own release version, and the only place it is written. The
 # runtime, the no-op, the plugin and the version the plugin hands consumers
@@ -33,6 +36,14 @@ compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeB
 compose-runtime = { module = "androidx.compose.runtime:runtime" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-util = { module = "androidx.compose.ui:ui-util" }
+# GRA-235: parses the C(Name)…:File.kt#hash slot-table source-info format
+# the compose compiler writes — the same published artifact the Layout
+# Inspector uses, rather than hand-parsing it. Only touched when
+# `porthole { composableNames.set(true) }` is on; bundled unconditionally
+# (implementation, not compileOnly) because it is Porthole's own
+# implementation detail, not an app-optional integration — see
+# CompositionTreeCollector's own doc comment.
+compose-ui-tooling-data = { module = "androidx.compose.ui:ui-tooling-data" }
 
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }

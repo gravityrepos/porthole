@@ -3136,13 +3136,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     {
       title: "Recomposition counts",
       description:
-        "How many times each instrumented composable recomposed, and which state keys were written " +
-        "just before each recomposition. Use it to find the composable doing needless work and the " +
-        "state that keeps invalidating it.\n\n" +
-        "Two limits worth holding in mind: only call sites wrapped in PortholeScreen or " +
-        "Modifier.portholeNode are counted, so an absent composable is uninstrumented rather than " +
-        "idle; and triggeredBy is a temporal correlation within a ~32ms window, not a causal read " +
-        "of the invalidation graph, so several states changing in one frame all get listed.\n\n" +
+        "How many times each composable recomposed, and which state keys caused each recomposition. " +
+        "Use it to find the composable doing needless work and the state that keeps invalidating it.\n\n" +
+        "'wholeTreeCoverage: true' (GRA-235, Compose >= 1.6) means every recompose scope in the tree " +
+        "was counted, not only PortholeScreen/Modifier.portholeNode call sites — each node's 'source' " +
+        "says 'wrapped' (an explicit name you gave it) or 'observer' (found, not wrapped; 'name' is a " +
+        "resolved composable name only when 'composableNames' is also true, otherwise a placeholder " +
+        "like '<uninstrumented:1a>'). A wrapped call site is never counted twice. 'wholeTreeCoverage: " +
+        "false' means this build's Compose is below 1.6 (or the tooling API was otherwise " +
+        "unavailable): only wrapped call sites are counted, and an absent composable is uninstrumented " +
+        "rather than idle — the pre-GRA-235 behaviour.\n\n" +
+        "Each node's 'attribution' says how triggeredBy was determined: 'observer' means Compose's own " +
+        "invalidation map named the actual state objects — causal, not a guess. 'temporal' (always the " +
+        "case when wholeTreeCoverage is false) means state written within a ~32ms window before the " +
+        "recomposition, a correlation: several states changing in one frame all get listed.\n\n" +
         "Keys like 'unnamed#3f2a1c' are state objects nobody named. In a Compose app most of them " +
         "belong to the framework — ripples, scroll offsets, focus, animation clocks — and are not " +
         "worth chasing. A key that is yours and still unnamed means its owner was never registered: " +
@@ -3199,6 +3206,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           name: string;
           count: number;
           triggeredBy: Array<{ key: string; count: number }>;
+          // GRA-235: "wrapped" (PortholeScreen/Modifier.portholeNode) or
+          // "observer" (found by whole-tree counting, never wrapped).
+          source?: "wrapped" | "observer";
+          // GRA-235: "observer" (causal, from Compose's own invalidation
+          // map) or "temporal" (the original ~32ms correlation).
+          attribution?: "observer" | "temporal";
           where?: Where;
           // GRA-69, filled in below by the augment step.
           composeReport?: ComposeReportNodeInfo;
@@ -3206,6 +3219,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         totalNodes?: number;
         truncated?: boolean;
         unattributedWrites: Array<{ key: string; count: number }>;
+        // GRA-235: true once androidx.compose.runtime.tooling.CompositionObserver
+        // attached (Compose >= 1.6) — every recompose scope is counted, not
+        // only wrapped call sites. False is the pre-GRA-235 behaviour.
+        wholeTreeCoverage?: boolean;
+        // GRA-235: whether `porthole { composableNames.set(true) }` is on —
+        // observer-only nodes get resolved names instead of placeholders,
+        // at the forceRecomposeScopes cost the report's own notes explain.
+        composableNames?: boolean;
       }>(
         "recompositions",
         { screen, ...windowArgs, limit: limit ?? 50 },
@@ -3221,11 +3242,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           const cut = report.truncated
             ? ` Busiest ${report.nodes.length} of ${report.totalNodes ?? report.nodes.length} nodes shown.`
             : "";
+          const observerNodes = report.nodes.filter((n) => n.source === "observer").length;
+          const coverage = report.wholeTreeCoverage
+            ? ` Whole-tree coverage (${observerNodes} of ${report.nodes.length} nodes found, not wrapped).`
+            : "";
           return (
             `${total} recompositions across ${report.nodes.length} nodes. ` +
             `Worst: ${top.name} at ${top.count}` +
             (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".") +
-            cut
+            cut +
+            coverage
           );
         },
         // GRA-201: `name` is the string literal given to portholeNode/PortholeScreen

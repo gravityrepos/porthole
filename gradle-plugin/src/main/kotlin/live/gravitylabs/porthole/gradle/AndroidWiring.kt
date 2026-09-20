@@ -122,6 +122,7 @@ internal object AndroidWiring {
         val ringCapacity = extension.ringCapacity.get()
         val strictMode = extension.strictMode.get()
         val legacyTcpPort = extension.legacyTcpPort.get()
+        val composableNames = extension.composableNames.get()
 
         if (buildTypes.any { it.name in debugTypes }) {
             // AGP 9 ships resValues off by default, and calling resValue with
@@ -157,6 +158,10 @@ internal object AndroidWiring {
                 // shared TCP port this flag exists to keep alive for anyone
                 // still forwarding it by hand.
                 buildType.resValue("bool", "porthole_legacy_tcp_port", legacyTcpPort.toString())
+                // GRA-235: same mechanism again, for whole-tree recomposition
+                // naming's own opt-in — see PortholeExtension.composableNames'
+                // KDoc for the forceRecomposeScopes cost this flag is guarding.
+                buildType.resValue("bool", "porthole_composable_names", composableNames.toString())
             }
         }
     }
