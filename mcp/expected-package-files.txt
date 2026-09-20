@@ -42,6 +42,8 @@ dist/screenshot.js
 dist/screenshot.js.map
 dist/sessions.js
 dist/sessions.js.map
+dist/setup.js
+dist/setup.js.map
 dist/sources.js
 dist/sources.js.map
 dist/startup.js
@@ -71,6 +73,7 @@ src/report.ts
 src/save.ts
 src/screenshot.ts
 src/sessions.ts
+src/setup.ts
 src/sources.ts
 src/startup.ts
 src/system.ts

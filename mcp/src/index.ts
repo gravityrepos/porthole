@@ -54,6 +54,7 @@ import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, de
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
 import { captureScreenshot } from "./screenshot.js";
+import { buildSetupReport, type SetupEntry } from "./setup.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -1071,6 +1072,32 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const exits = exitsSection();
       const deathNotice = exitDeathNotice(exits.recent, pending === null);
 
+      // GRA-228: point at `setup` from the first call an agent makes,
+      // rather than leaving "which integration did I forget" for a lucky
+      // find of the tool table. Only asked once this tool has already
+      // decided the connection itself is healthy — not mid-handshake, and
+      // not while talking to the wrong app (packageMismatch) or the wrong
+      // protocol version, where the setup report would be about a session
+      // this call is not really vouching for. Best-effort: a `setup` RPC
+      // failure here must never break `porthole_status` itself, hence its
+      // own try/catch rather than routing through the ones above.
+      let setupNote = "";
+      if (pending === null && !device.packageMismatch && !device.protocolMismatch) {
+        try {
+          const setupEntries = await device.request<SetupEntry[]>("setup", {});
+          const { gaps } = buildSetupReport(setupEntries);
+          if (gaps.length > 0) {
+            setupNote =
+              ` ${gaps.length} integration${gaps.length > 1 ? "s" : ""} present but unwired ` +
+              `(${gaps.map((gap) => gap.displayName).join(", ")}) — call \`setup\` for the exact line to add.`;
+          }
+        } catch {
+          // Connected but `setup` itself failed: say nothing rather than a
+          // second failure mode layered onto the one this tool already
+          // reports plainly elsewhere.
+        }
+      }
+
       // GRA-58: a missing `exitTrace` fails zod validation before the
       // handler ever runs when it is a negative or non-integer number
       // (`exitTrace` is `z.union([z.number().int().positive(), z.string()])`);
@@ -1166,7 +1193,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           device.packageMismatch ??
           device.protocolMismatch ??
           `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
-            `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`);
+            `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`) +
+        setupNote;
       return ok(summary, payload);
     },
   );
@@ -1350,6 +1378,39 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           "the app's debug classpath.",
         { serial: chosenSerial, forward, packageName: targetPackage, ...info },
       );
+    },
+  );
+
+  server.registerTool(
+    "setup",
+    {
+      title: "What's wired up",
+      description:
+        "Every integration the runtime can see: on the classpath or not, instrumented or not, each " +
+        "with the runtime's own hint when there is something to do about it — the same data the " +
+        "timeline UI's setup panel shows, including the `socket` entry (did the loopback socket " +
+        "bind) and the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
+        "policy REPLACES the app's own rather than chaining it).\n\n" +
+        "For each integration that is present but unwired, this also gives the exact line to add " +
+        "and names which lanes and tools go dark without it — ranked so the gap that leaves the " +
+        "most dark comes first. A fully-instrumented project gets an explicit 'everything present " +
+        "is wired' rather than an empty list that looks the same as 'nothing to check'.\n\n" +
+        "Instrumenting a client cannot be discovered by scanning the project for it — being handed " +
+        "the builder before it is built is the only way to attach to one, and a real app usually has " +
+        "several. This names which library is unwired, never where in the project to change it.\n\n" +
+        "Call this once, early: `porthole_status` already names it whenever an integration looks " +
+        "present but unwired, so you rarely have to remember to reach for it yourself.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async (): Promise<ToolResult> => {
+      try {
+        const entries = await device.request<SetupEntry[]>("setup", {});
+        const report = buildSetupReport(entries);
+        return ok(report.summary, report);
+      } catch (error) {
+        return fail(error);
+      }
     },
   );
 

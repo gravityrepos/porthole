@@ -30,6 +30,7 @@ export const RIG_FILES = [
   "src/index.test.ts",
   "src/save.test.ts",
   "src/sessions-integration.test.ts",
+  "src/setup.test.ts",
   "src/surface.test.ts",
   "src/timeline.test.ts",
   "src/watermark.test.ts",

@@ -371,7 +371,15 @@ function defaultHandlers(): FakeDeviceHandlers {
     }),
     state: () => ({ capturedAt: 0, owners: [] }),
     semantics_tree: () => ({ capturedAt: 0, merged: true, root: null }),
-    setup: () => ({ entries: [] }),
+    // GRA-228: the real `setup` RPC (`Porthole.kt`'s `method("setup")`)
+    // encodes `Setup.report()` — a `List<SetupEntry>` — directly as the
+    // wire `result`, not wrapped in an envelope. This used to return
+    // `{ entries: [] }`, a shape nothing on either side ever produced or
+    // consumed; nothing caught it only because no MCP tool called `setup`
+    // yet. A bare `[]` matches the wire exactly, the same way `timeline`'s
+    // and `inflight`'s defaults above are already shaped like their real
+    // RPCs rather than an arbitrary placeholder.
+    setup: () => [],
   };
 }
 

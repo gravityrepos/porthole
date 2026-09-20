@@ -455,13 +455,14 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
 });
 
 describe("the tool surface", () => {
-  // The 19 names `index.ts` registers, in registration order, verified
+  // The 20 names `index.ts` registers, in registration order, verified
   // against the running server rather than copied from the ticket that
   // asked for this test — see the "registers exactly these tools" case
   // below, which is what would have caught this list being wrong.
   const REGISTERED_TOOLS = [
     "porthole_status",
     "porthole_connect",
+    "setup",
     "findings",
     "system_context",
     "ask_system_trace",

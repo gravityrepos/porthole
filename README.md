@@ -49,6 +49,7 @@ them they cover:
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device — and, now, why it died last time |
 | `porthole_connect` | the parts of getting connected `porthole_status` cannot do on its own: install/version checks, launching, restarting |
+| `setup` | which integrations are wired, which are only on the classpath, and — ranked by what it unlocks — the exact line to add for each one that is not |
 | `screenshot` | the device screen right now, as an image — scaled, re-encoded, and refused rather than faked when a FLAG_SECURE window is on top |
 
 Everything is debug-only. Release builds link a no-op artifact with identical
@@ -526,6 +527,29 @@ The short answer to "is it just the plugin and a dependency": nearly.
 
 View models, the semantics tree, frames, the main thread, memory, WorkManager,
 logs and device context all need nothing at all.
+
+## Checking what's wired
+
+Forgetting one of the lines above looks exactly like an app that never made
+the call — an empty lane either way. `setup`, the MCP tool, answers "did I
+forget one" directly: every integration the runtime can see, on the
+classpath or not, instrumented or not, plus the `socket` entry (did the
+loopback socket bind) and the [StrictMode](#strictmode) entry.
+
+For each integration that is present but unwired it gives the exact line to
+add and names which lanes and MCP tools go dark without it, ranked so the
+gap that leaves the most dark comes first — instrumenting neither OkHttp nor
+Ktor empties the `http` lane and leaves `inflight` and `blocking` with
+nothing to say about HTTP calls, which outranks a gap that only costs one
+tool. A fully-instrumented project gets an explicit "everything present is
+wired" rather than an empty list that reads the same as "nothing to check."
+
+It cannot find the `OkHttpClient.Builder` in your project and point at it —
+being handed a builder before it is built is the only way to attach to one,
+and a real app usually has several. `setup` names which library needs a
+line, never where in the project to add it. `porthole_status` already names
+it for you whenever an integration looks present but unwired, so reaching
+for `setup` yourself is usually just to get the exact snippet.
 
 ## What the timeline shows
 
