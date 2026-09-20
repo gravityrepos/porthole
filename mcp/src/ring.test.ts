@@ -95,12 +95,34 @@ describe("the ring's TraceConfig text", () => {
     const text = ringConfigText(planRing({ app: "a", bufferKb: 8192 }));
     expect(text).toContain("size_kb: 8192");
   });
+
+  it("QA F20: declares the same data sources capture_system_trace's light-config shorthand resolves to, not linux.ftrace alone", () => {
+    // Confirmed by reading back a real capture_system_trace-style capture's
+    // own embedded TraceConfig via trace_processor_shell's
+    // `metadata` table (`trace_config_pbtxt`) — see this function's own doc
+    // comment in systrace.ts and the ticket's spike writeup
+    // (docs/spikes/GRA-57-perfetto-ring.md) for the full transcript. Without
+    // these, ask_system_trace got zero findings from every ring snapshot in
+    // a controlled comparison against a capture of the same moment.
+    const text = ringConfigText(planRing({ app: "com.example.shop" }));
+    expect(text).toContain('name: "android.surfaceflinger.frametimeline"');
+    expect(text).toContain('name: "linux.process_stats"');
+    expect(text).toContain('name: "linux.system_info"');
+    expect(text).toContain("symbolize_ksyms: true");
+  });
 });
 
 describe("RingController.status(), with no adb call ever made", () => {
-  it("reports not running, with the measured overhead figures present regardless", () => {
+  // QA (F19): status()/snapshot() now consult the device on a cache miss
+  // (`confirmRunningFromDevice`), so "nothing started" is no longer provable
+  // without an adb binary at all — a deliberately nonexistent one makes
+  // that consultation fail fast and deterministically (ENOENT) rather than
+  // depending on whatever adb this environment does or does not have.
+  const NO_ADB = { binary: "/nonexistent/adb-binary-for-ring-test" };
+
+  it("reports not running, with the measured overhead figures present regardless", async () => {
     const controller = new RingController();
-    const status = controller.status();
+    const status = await controller.status(NO_ADB);
     expect(status.running).toBe(false);
     expect(status.startedAt).toBeNull();
     expect(status.elapsedMs).toBeNull();
@@ -113,9 +135,9 @@ describe("RingController.status(), with no adb call ever made", () => {
     expect(status.overhead).toEqual(MEASURED_OVERHEAD);
   });
 
-  it("a snapshot attempt with nothing started fails without ever touching adb", async () => {
+  it("a snapshot attempt with nothing started fails without a real device to confirm it against", async () => {
     const controller = new RingController();
-    const result = await controller.snapshot({});
+    const result = await controller.snapshot(NO_ADB);
     expect(result.ok).toBe(false);
   });
 });
@@ -221,6 +243,12 @@ if (a[0] === "shell" && typeof a[1] === "string" && a[1].includes("--clone-by-na
     Atomics.wait(new Int32Array(sab), 0, 0, delayMs);
   }
   if (process.env.PORTHOLE_TEST_RING_CLONE_FAIL === "died") {
+    // A dead session is dead everywhere on the device, not just to
+    // --clone-by-name — remove the process marker too, so a subsequent
+    // cat/ps-scan (confirmRunningFromDevice, QA F19) agrees with this
+    // failure instead of re-"discovering" a session that is not really
+    // there.
+    if (PROCESS_MARKER && fs.existsSync(PROCESS_MARKER)) fs.unlinkSync(PROCESS_MARKER);
     process.stderr.write("perfetto_cmd.cc: no tracing session found matching porthole-ring\\n");
     process.exit(1);
   }
@@ -240,7 +268,14 @@ if (a[0] === "pull") {
 
 if (a[0] === "shell" && typeof a[1] === "string" && a[1].startsWith("cat") && a[1].includes(".pid")) {
   logOrder("pid-read");
-  if (process.env.PORTHOLE_TEST_RING_NO_PID_MARKER === "1") {
+  // Stateful, mirroring a real device: the pid-marker text file only ever
+  // exists because a start() call wrote it at the same moment it created
+  // the process itself — QA (F19)'s confirmRunningFromDevice calls this on
+  // every snapshot()/status() cache miss now, not only from stop(), so this
+  // can no longer unconditionally "succeed" regardless of whether anything
+  // was ever actually started.
+  const markerReallyThere = PROCESS_MARKER && fs.existsSync(PROCESS_MARKER);
+  if (process.env.PORTHOLE_TEST_RING_NO_PID_MARKER === "1" || !markerReallyThere) {
     process.stderr.write("cat: No such file or directory\\n");
     process.exit(1);
   }
@@ -412,6 +447,66 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
     }
   });
 
+  it("QA F19: a fresh RingController's status() sees a ring the device reports running, not just this process's own memory", async () => {
+    // rig1 starts a ring — real process marker, real pid-marker text file,
+    // both on the shared fake device. A brand-new, standalone
+    // RingController (never wired into any rig — the same "restarted MCP
+    // process, never called start() itself" shape) is checked directly
+    // against the same fake device: this is `porthole_status`'s own
+    // `ownsDeviceConnection` gate at work — see `index.ts`'s
+    // `porthole_status` handler — every rig in this suite injects a fake
+    // `DeviceClient`, so `porthole_status` itself always answers from
+    // `RingController.cachedStatus()` here, never by touching adb; the
+    // actual device consultation this test is about is `status()` itself,
+    // exercised directly rather than through that gate.
+    const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const started = await rig1.client.callTool("system_trace_start", {});
+      expect(started.isError).toBeFalsy();
+
+      const freshController = new RingController();
+      const status = await freshController.status({ binary: fakeAdb.binaryPath, env: fakeAdb.env });
+      // Confirmed running — the whole point of F19 — even though
+      // freshController never started anything itself. `app`/`startedAt`
+      // stay honestly null: this process cannot know a plan it never
+      // received.
+      expect(status.running).toBe(true);
+      expect(status.app).toBeNull();
+      expect(status.startedAt).toBeNull();
+    } finally {
+      await rig1.close();
+    }
+  });
+
+  it("QA F19: system_trace_snapshot works from a fresh rig that never called system_trace_start, against a ring another rig started", async () => {
+    const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const started = await rig1.client.callTool("system_trace_start", {});
+      expect(started.isError).toBeFalsy();
+
+      // system_trace_snapshot is not gated on ownsDeviceConnection — unlike
+      // porthole_status's ring field, it always talks to the device it was
+      // given, which is exactly what makes this rig2 case meaningful: a
+      // second MCP process (or this same one, restarted) reaching for
+      // system_trace_snapshot with no memory of having started anything.
+      const rig2 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-f19-out-"));
+        const snap = await rig2.client.callTool("system_trace_snapshot", { outputDir });
+        expect(snap.isError).toBeFalsy();
+        const payload = snap.json as { path: string; startedAt: unknown; bufferKb: unknown; note: string };
+        expect(readFileSync(payload.path, "utf8")).toContain("porthole: fake-ring-label");
+        expect(payload.startedAt).toBeNull();
+        expect(payload.bufferKb).toBeNull();
+        expect(payload.note).toMatch(/did not start the ring itself/i);
+      } finally {
+        await rig2.close();
+      }
+    } finally {
+      await rig1.close();
+    }
+  });
+
   it("QA R1: a launch that forks but fails its own acknowledgement is killed before start() reports failure, and leaves the config removed", async () => {
     const rig = await buildRig({
       adbBinary: fakeAdb.binaryPath,
@@ -503,9 +598,14 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
       const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-out-"));
       const snap = await rig.client.callTool("system_trace_snapshot", { outputDir });
       expect(snap.isError).toBeFalsy();
-      const payload = snap.json as { path: string; bytes: number };
+      const payload = snap.json as { path: string; bytes: number; portholeLabels: number };
       expect(readFileSync(payload.path, "utf8")).toContain("porthole: fake-ring-label");
       expect(payload.bytes).toBeGreaterThan(0);
+      // QA F20: system_trace_snapshot now reports the same Porthole-label
+      // count capture_system_trace does, so the GRA-186 AC has evidence on
+      // the ring path — the fake's own pull fixture carries exactly one
+      // label ("porthole: fake-ring-label").
+      expect(payload.portholeLabels).toBe(1);
       // clone, then pull, then a cleanup rm of the on-device snapshot file —
       // never a "stop"/"kill" anywhere in here, which is the whole point of
       // --clone-by-name over --attach --stop.

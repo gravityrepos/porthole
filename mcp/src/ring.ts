@@ -203,11 +203,19 @@ export interface RingSnapshotResult {
   ok: true;
   path: string;
   bytes: number;
-  startedAt: number;
+  /**
+   * QA (F19): null when this snapshot came from a ring `confirmRunningFromDevice`
+   * found running on the device rather than one this process itself started
+   * — a fresh MCP process genuinely does not know when a session it did not
+   * start began, or how big its buffer is (the config that said so was
+   * already deleted from the device by the time this process asked). `note`
+   * says so in prose; these stay honestly null rather than guessed.
+   */
+  startedAt: number | null;
   requestedAt: number;
-  elapsedMs: number;
-  bufferKb: number;
-  /** Honest, not precise: see `DEFAULT_RING_BUFFER_KB`'s own doc comment in systrace.ts for why this cannot promise an exact "last N seconds". */
+  elapsedMs: number | null;
+  bufferKb: number | null;
+  /** Honest, not precise: see `DEFAULT_RING_BUFFER_KB`'s own doc comment in systrace.ts for why this cannot promise an exact "last N seconds", on top of the `startedAt`/`bufferKb` gap above. */
   note: string;
 }
 
@@ -220,6 +228,14 @@ export interface RingStopResult {
 
 export interface RingStatus {
   running: boolean;
+  /**
+   * QA (F19): `running: true` with `startedAt`/`app`/`categories`/`bufferKb`
+   * all null is a real, honest combination — a ring this process discovered
+   * running on the device (`confirmRunningFromDevice`) rather than one it
+   * started itself, whose plan this process has no way to recover. It is
+   * not a defect in the payload; it is what "confirmed running, unknown
+   * provenance" looks like.
+   */
   startedAt: string | null;
   elapsedMs: number | null;
   app: string | null;
@@ -405,9 +421,50 @@ export class RingController {
     }
   }
 
+  /**
+   * QA (F19) on this ticket's second QA pass: `status()` and `snapshot()`
+   * used to answer purely from `this.running` — a fresh MCP process starts
+   * with that false regardless of what is actually happening on the
+   * device, so a restarted client could not see, snapshot from, or be
+   * warned about a ring genuinely burning CPU that a *previous* process
+   * (or a different one entirely) had started. This is the fallback both
+   * now call on a cache miss: the same pid marker `stop` reads, falling
+   * back to the same process-table scan `start`/`stop` already use (R2) —
+   * one shared mechanism for "is a ring actually running", not three
+   * independently-written checks that could disagree.
+   *
+   * Adopting a session this way only ever sets `running`/`pid` — never
+   * `plan`/`startedAt`, which this process has no way to know for a
+   * session it did not itself start (the config that said so was already
+   * deleted from the device before this process ever asked). Callers that
+   * need those two fields see them honestly stay null; see
+   * `RingSnapshotResult`'s and `RingStatus`'s own doc comments.
+   */
+  private async confirmRunningFromDevice(options: RingAdbOptions): Promise<boolean> {
+    if (this.running) return true;
+
+    const catResult = await runAdbAsync(["shell", `cat ${DEVICE_PID_PATH}`], adbOptions(options));
+    const devicePidLine = catResult.ok ? catResult.output.split("\n").find((l) => /^\d+$/.test(l.trim())) : undefined;
+    const pid = devicePidLine ? Number(devicePidLine.trim()) : await findRunningRingPid(options);
+    if (pid === null) return false;
+
+    this.running = true;
+    this.pid = pid;
+    return true;
+  }
+
   async snapshot(options: RingSnapshotOptions): Promise<RingSnapshotResult | RingFailure> {
-    if (!this.running || !this.plan || this.startedAt === null) {
-      return { ok: false, message: "The ring is not running. Call system_trace_start first." };
+    // QA (F19): `this.running` is a cache of what *this process* started —
+    // false from the moment a fresh MCP process boots, regardless of what
+    // is actually happening on the device. A cache miss is checked against
+    // the device itself before concluding there is nothing to snapshot; see
+    // `confirmRunningFromDevice`'s own doc comment for what it can and
+    // cannot recover once adopted this way.
+    if (!this.running) {
+      const confirmed = await this.confirmRunningFromDevice(options);
+      if (!confirmed) {
+        return { ok: false, message: "The ring is not running. Call system_trace_start first." };
+      }
     }
 
     const requestedAt = Date.now();
@@ -452,20 +509,29 @@ export class RingController {
     this.snapshotCount++;
     this.lastSnapshotAt = requestedAt;
     this.lastSnapshotResult = { path: localPath, bytes, auto: options.auto === true };
-    const elapsedMs = requestedAt - this.startedAt;
+    // QA (F19): both stay null for a ring this process adopted rather than
+    // started — see RingSnapshotResult's own doc comment for why that is
+    // the honest answer rather than a guess.
+    const startedAt = this.startedAt;
+    const bufferKb = this.plan?.bufferKb ?? null;
+    const elapsedMs = startedAt !== null ? requestedAt - startedAt : null;
 
     return {
       ok: true,
       path: localPath,
       bytes,
-      startedAt: this.startedAt,
+      startedAt,
       requestedAt,
       elapsedMs,
-      bufferKb: this.plan.bufferKb,
+      bufferKb,
       note:
-        `Covers up to the last ${Math.round(elapsedMs / 1000)}s, or less if the ${this.plan.bufferKb}KB ` +
-        "ring had already filled and wrapped at some point before now — this host has no way to " +
-        "verify the actual span from outside the trace itself.",
+        elapsedMs !== null && bufferKb !== null
+          ? `Covers up to the last ${Math.round(elapsedMs / 1000)}s, or less if the ${bufferKb}KB ring ` +
+            "had already filled and wrapped at some point before now — this host has no way to " +
+            "verify the actual span from outside the trace itself."
+          : "This MCP process did not start the ring itself — it found one already running on the " +
+            "device — so its start time and buffer size are unknown here. The snapshot is still a " +
+            "real, current pull of the ring's contents.",
     };
   }
 
@@ -588,7 +654,28 @@ export class RingController {
     };
   }
 
-  status(): RingStatus {
+  /**
+   * QA (F19): async now, and consults the device on a cache miss the same
+   * way `snapshot()` does (`confirmRunningFromDevice`) — `porthole_status`
+   * is exactly the tool a restarted MCP process's caller reaches for first,
+   * and it used to be the one place this ticket's whole feature could go
+   * silently blind to a session still running (and still costing CPU) that
+   * this particular process did not happen to start.
+   */
+  async status(options: RingAdbOptions): Promise<RingStatus> {
+    if (!this.running) await this.confirmRunningFromDevice(options);
+    return this.cachedStatus();
+  }
+
+  /**
+   * `status()` without the device consultation — the cached, in-memory
+   * view alone. `porthole_status`'s one adb-touching exception is itself
+   * gated on `ownsDeviceConnection` (a test-injected device, every test in
+   * this suite, must never cause a real `adb` invocation); this is what it
+   * falls back to there, so that gate stays true for the ring's own status
+   * too, not just for the reconnect diagnosis `index.ts` already gated.
+   */
+  cachedStatus(): RingStatus {
     return {
       running: this.running,
       startedAt: this.startedAt !== null ? new Date(this.startedAt).toISOString() : null,

@@ -1346,7 +1346,30 @@ would normally allow. Doze was not usefully testable on an emulator —
 without the real hardware path (actual CPU or radio suspension), so a pass
 there proves only that the simulated state does not kill the session, not
 that genuine deep sleep on a phone would not. That is left to the hardware
-pass along with the overhead number above.
+pass along with the overhead number above. The full transcript — every
+command, the `--detach`/`write_into_file` dead end, and the data-source gap
+below — is in
+[docs/spikes/GRA-57-perfetto-ring.md](docs/spikes/GRA-57-perfetto-ring.md).
+
+**The ring's own config declares the same data sources `capture_system_trace`
+gets from its light-config shorthand**, not `linux.ftrace` alone: a QA pass
+found `ask_system_trace` got zero findings from every ring snapshot until
+`android.surfaceflinger.frametimeline`, `linux.process_stats` and
+`linux.system_info` were added to match what `perfetto`'s bare-category CLI
+form actually resolves to (confirmed by reading a real capture's own embedded
+config back with `trace_processor_shell`, not assumed from the docs — see
+the spike writeup). `system_trace_snapshot`'s own `portholeLabels` field
+reports the same runtime-annotation count `capture_system_trace` does, so the
+GRA-186 acceptance criterion has evidence on the ring path too.
+
+**`porthole_status` and `system_trace_snapshot` consult the device, not just
+this process's memory**, on a cache miss: a restarted MCP server used to
+report a genuinely-running ring as `running: false` and refuse to snapshot
+it, unable to see (or warn about) a session still costing CPU. Both now fall
+back to the same pid-marker-then-process-scan check `system_trace_stop`
+already used — a ring discovered this way reports `running: true` with an
+honestly-`null` `app`/`startedAt`/`bufferKb`, since a process that did not
+start a session has no way to know its plan.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of eight questions — jank, thread states,

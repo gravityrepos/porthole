@@ -1178,6 +1178,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // condition `porthole_connect`'s own forward would refuse on.
       const socketTarget = forwardTarget(PORT, APPLICATION_ID, LEGACY_TCP_PORT);
 
+      // QA F18/F19: same PORTHOLE_SERIAL fallback the ring tools themselves
+      // use, and (F19) a real device consultation on a cache miss — see
+      // `RingController.status`'s own doc comment for why this can no
+      // longer answer from in-memory state alone. Gated on
+      // `ownsDeviceConnection`, the same as `reconnect` above: a
+      // test-injected `device` (every test in this suite) is not
+      // necessarily backed by a real, adb-managed device at all, and this
+      // must run no adb command against one — `cachedStatus()` is the
+      // in-memory-only view `status()` itself falls back on.
+      const ringStatus = ownsDeviceConnection
+        ? await ring.status({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary })
+        : ring.cachedStatus();
+
       const payload = {
         state: device.state,
         host: HOST,
@@ -1211,7 +1224,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // on (`system_trace_start`) sees the overhead before asking, not
         // after. Present and non-null even when nothing is running: the
         // `overhead` figures are still worth showing then.
-        ring: ring.status(),
+        ring: ringStatus,
       };
       // GRA-96/GRA-197: a mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
@@ -2296,7 +2309,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         app: target,
         categories,
         bufferKb,
-        serial,
+        // QA F18: falls back to PORTHOLE_SERIAL, same as porthole_status/
+        // porthole_connect and findings' own auto-snapshot — without it,
+        // more than one attached device makes this fail with "more than one
+        // device/emulator" even when every other tool works, because it was
+        // the one place that still passed the bare `serial` argument
+        // through with nothing to fall back to.
+        serial: serial ?? process.env.PORTHOLE_SERIAL,
         env: adbEnv,
         binary: adbBinary,
       });
@@ -2317,6 +2336,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "Pulls the ring buffer's current contents to a file on disk, without interrupting the " +
         "ring itself — it keeps recording. Use this the moment after something goes wrong: the " +
         "trace has already been collecting, so there is no reproduction step to wait through.\n\n" +
+        "Works even from a fresh MCP server that never called system_trace_start itself: this " +
+        "checks the device's own pid marker (and a process-table scan when that marker is " +
+        "missing) before concluding there is nothing to snapshot, the same way porthole_status " +
+        "does. A ring discovered this way is still snapshotted correctly, but its start time and " +
+        "buffer size are honestly unknown here — the result's `note` says so.\n\n" +
         "Uses Perfetto's `--clone-by-name`, discovered by this ticket's own spike rather than the " +
         "detach/attach/stop sequence its research brief named — that sequence turned out to " +
         "require `write_into_file`, which turns the on-device file into a continuously growing " +
@@ -2328,7 +2352,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "The result's `note` says how much of it is trustworthy: the buffer is sized for roughly " +
         "30s at default settings, but under real load it can wrap sooner, and this host has no way " +
         "to verify the actual covered span from outside the trace itself — read it with " +
-        "`ask_system_trace` for that.",
+        "`ask_system_trace` for that. `portholeLabels` counts the runtime's own atrace sections in " +
+        "the snapshot, the same check `capture_system_trace` reports, and the ring's own config " +
+        "carries the same data sources that capture uses (frame timeline, process/thread names) so " +
+        "`ask_system_trace` gets real findings from a ring snapshot, not just from a one-shot capture.",
       inputSchema: {
         outputDir: z.string().optional().describe("Where to write it. Defaults to .porthole/traces."),
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
@@ -2336,10 +2363,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: false },
     },
     async ({ outputDir, serial }): Promise<ToolResult> => {
-      const snapshot = await ring.snapshot({ outputDir, serial, env: adbEnv, binary: adbBinary });
+      // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/stop.
+      const snapshot = await ring.snapshot({
+        outputDir,
+        serial: serial ?? process.env.PORTHOLE_SERIAL,
+        env: adbEnv,
+        binary: adbBinary,
+      });
       if (!snapshot.ok) return fail(snapshot.message);
       const mb = (snapshot.bytes / (1024 * 1024)).toFixed(1);
-      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${snapshot.note}`, snapshot);
+      // QA F20: the same count capture_system_trace reports, so the exact
+      // failure GRA-186 was filed against (a capture that succeeds but
+      // carries none of the runtime's own atrace sections) has evidence on
+      // the ring path too, not only the one-shot capture path.
+      const portholeLabels = await countPortholeLabels(snapshot.path);
+      const labelsSentence =
+        portholeLabels > 0
+          ? `${portholeLabels} Porthole track(s) in it.`
+          : "No Porthole labels found in it — either nothing the runtime annotates happened in " +
+            "this window, or the app tag was not being read (see capture_system_trace's own notes " +
+            "on this).";
+      const result = { ...snapshot, portholeLabels };
+      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${labelsSentence} ${snapshot.note}`, result);
     },
   );
 
@@ -2362,7 +2407,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: false },
     },
     async ({ serial }): Promise<ToolResult> => {
-      const stopped = await ring.stop({ serial, env: adbEnv, binary: adbBinary });
+      // QA F18: same PORTHOLE_SERIAL fallback as system_trace_start/snapshot.
+      const stopped = await ring.stop({ serial: serial ?? process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary });
       return ok(stopped.message, stopped);
     },
   );

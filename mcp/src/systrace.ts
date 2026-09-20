@@ -375,7 +375,7 @@ export function planRing(options: { app: string; categories?: string[]; bufferKb
 
 /**
  * The TraceConfig text `ring.ts` pushes to the device and starts with
- * `perfetto --txt -c - --background`.
+ * `perfetto --txt -c - --background-wait`.
  *
  * `fill_policy: RING_BUFFER` is the whole point — the central buffer drops
  * its oldest, not-yet-read packets once full rather than blocking or
@@ -390,6 +390,25 @@ export function planRing(options: { app: string; categories?: string[]; bufferKb
  * `capture_system_trace`'s per-package `--app` flag; the two enable the
  * exact same thing (`ATRACE_TAG_APP` for that package), just spelled for a
  * config file instead of a command line.
+ *
+ * QA (F20) on this ticket's second pass: this used to declare `linux.ftrace`
+ * alone, and a controlled comparison — the same moment on the same device,
+ * once via `capture_system_trace`, once via a ring snapshot — found
+ * `ask_system_trace` got real findings from the first and nothing at all
+ * from the second, across all eight questions. `captureArgs` in this file
+ * invokes `perfetto` in its "light config" shorthand (bare category names on
+ * the command line, no `-c`), and that shorthand silently expands to more
+ * than `linux.ftrace`: read back with `trace_processor_shell`'s own
+ * `SELECT str_value FROM metadata WHERE name = 'trace_config_pbtxt'` against
+ * a real capture, it resolves to four data sources —
+ * `android.surfaceflinger.frametimeline` (what `jank`'s own frame-timeline
+ * detail comes from), `linux.ftrace` with `symbolize_ksyms: true` set,
+ * `linux.process_stats` and `linux.system_info` (thread/process names most
+ * questions need to say anything human-readable at all). The ring's own
+ * config now declares the same four, verified the same way rather than
+ * assumed from Perfetto's own docs — see the ticket's spike writeup
+ * (`docs/spikes/GRA-57-perfetto-ring.md`) for the full transcript and the
+ * before/after `ask_system_trace` comparison this fixed.
  */
 export function ringConfigText(plan: RingPlan): string {
   const lines = [
@@ -400,11 +419,29 @@ export function ringConfigText(plan: RingPlan): string {
     "}",
     "data_sources {",
     "  config {",
+    '    name: "android.surfaceflinger.frametimeline"',
+    "  }",
+    "}",
+    "data_sources {",
+    "  config {",
     '    name: "linux.ftrace"',
     "    ftrace_config {",
     ...plan.categories.map((c) => `      atrace_categories: "${c}"`),
     `      atrace_apps: "${plan.app}"`,
+    "      symbolize_ksyms: true",
     "    }",
+    "  }",
+    "}",
+    "data_sources {",
+    "  config {",
+    '    name: "linux.process_stats"',
+    "    target_buffer: 0",
+    "  }",
+    "}",
+    "data_sources {",
+    "  config {",
+    '    name: "linux.system_info"',
+    "    target_buffer: 0",
     "  }",
     "}",
   ];
