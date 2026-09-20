@@ -6,6 +6,7 @@ import { DeviceClient, type ConnectionState } from "./device.js";
 import { TimelineServer, type PortInUse } from "./timeline.js";
 import { capture, compare, parseCapture, report } from "./capture.js";
 import { resolveProjectRoot, runAdb } from "./adb.js";
+import { forwardTarget } from "./devices.js";
 import { bootPortholeServer } from "./index.js";
 import { parseDuration, parseMillis, parsePort, requiredValue } from "./args.js";
 import { sessionsRoot } from "./sessions.js";
@@ -26,6 +27,10 @@ interface Options {
   serial?: string;
   forward: boolean;
   open: boolean;
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_APPLICATION_ID`. */
+  applicationId?: string;
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_LEGACY_TCP_PORT` being set. */
+  legacyTcpPort: boolean;
 }
 
 const USAGE = `
@@ -44,11 +49,13 @@ porthole ui — open the live timeline for a running debug build
 
   npx @gravitylabsllc/porthole ui [options]
 
-  --port <n>       device port the porthole is listening on (default 8677)
-  --ui-port <n>    port to serve the timeline on (default 8678)
-  --serial <id>    adb device serial, when more than one is attached
-  --no-forward     skip 'adb forward'; use it if you set the bridge up yourself
-  --no-open        do not launch a browser, just print the URL
+  --port <n>            device port the porthole is listening on (default 8677)
+  --ui-port <n>          port to serve the timeline on (default 8678)
+  --serial <id>          adb device serial, when more than one is attached
+  --application-id <id>  the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
+  --legacy-tcp-port      forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)
+  --no-forward           skip 'adb forward'; use it if you set the bridge up yourself
+  --no-open              do not launch a browser, just print the URL
 
 Needs a device or emulator with the debug build running: the porthole lives inside
 the app process, and adb forward is what makes its socket reachable from here.
@@ -66,6 +73,8 @@ export function parse(argv: string[]): Options {
     uiPort: 8678,
     forward: true,
     open: true,
+    applicationId: process.env.PORTHOLE_APPLICATION_ID || undefined,
+    legacyTcpPort: Boolean(process.env.PORTHOLE_LEGACY_TCP_PORT),
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -94,7 +103,15 @@ export function parse(argv: string[]): Options {
         process.exit(2);
       }
       options.serial = value;
-    } else if (arg === "--no-forward") options.forward = false;
+    } else if (arg === "--application-id") {
+      const value = requiredValue(argv[++i], "--application-id");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.applicationId = value;
+    } else if (arg === "--legacy-tcp-port") options.legacyTcpPort = true;
+    else if (arg === "--no-forward") options.forward = false;
     else if (arg === "--no-open") options.open = false;
     else if (arg === "--help" || arg === "-h") {
       process.stdout.write(USAGE);
@@ -226,15 +243,21 @@ async function ui(argv: string[]): Promise<void> {
     // Same call `porthole capture` makes, through the same runAdb: this used to
     // be a second copy of adb discovery and a second copy of the advice to pass
     // --serial, and the copy here was the one that could not find the SDK.
-    const forwarded = runAdb(
-      ["forward", `tcp:${options.port}`, `tcp:${options.port}`],
-      options.serial,
-    );
-    if (forwarded.ok) {
-      console.error(`forwarded 127.0.0.1:${options.port} to the device`);
-    } else {
-      console.error(forwarded.output);
+    // GRA-199: forwardTarget decides tcp:PORT vs the abstract socket; a
+    // missing applicationId is reported the same way an adb failure is,
+    // rather than silently forwarding to a socket name nothing binds.
+    const target = forwardTarget(options.port, options.applicationId, options.legacyTcpPort);
+    if (!target.ok) {
+      console.error(target.error);
       console.error("Pass --no-forward if the bridge is already up.");
+    } else {
+      const forwarded = runAdb(["forward", `tcp:${options.port}`, target.target], options.serial);
+      if (forwarded.ok) {
+        console.error(`forwarded 127.0.0.1:${options.port} to ${target.target}`);
+      } else {
+        console.error(forwarded.output);
+        console.error("Pass --no-forward if the bridge is already up.");
+      }
     }
   }
 
@@ -333,11 +356,14 @@ if (command === "ui") {
 } else if (command === "capture") {
   const options = parseCapture(rest);
   if (options.forward) {
-    const forwarded = runAdb(
-      ["forward", `tcp:${options.port}`, `tcp:${options.port}`],
-      options.serial,
-    );
-    if (!forwarded.ok) console.error(forwarded.output);
+    // GRA-199: same forwardTarget() `porthole ui` uses above.
+    const target = forwardTarget(options.port, options.applicationId, options.legacyTcpPort);
+    if (!target.ok) {
+      console.error(target.error);
+    } else {
+      const forwarded = runAdb(["forward", `tcp:${options.port}`, target.target], options.serial);
+      if (!forwarded.ok) console.error(forwarded.output);
+    }
   }
   process.exit(await capture(options));
 } else if (command === "watch") {

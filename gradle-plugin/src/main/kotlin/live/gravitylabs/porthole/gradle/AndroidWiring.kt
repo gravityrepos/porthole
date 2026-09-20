@@ -99,6 +99,7 @@ internal object AndroidWiring {
         val port = extension.port.get()
         val ringCapacity = extension.ringCapacity.get()
         val strictMode = extension.strictMode.get()
+        val legacyTcpPort = extension.legacyTcpPort.get()
 
         if (buildTypes.any { it.name in debugTypes }) {
             // AGP 9 ships resValues off by default, and calling resValue with
@@ -127,6 +128,13 @@ internal object AndroidWiring {
                 // absent — see PortholeExtension.strictMode's own KDoc for why
                 // the default is off rather than on.
                 buildType.resValue("bool", "porthole_strict_mode", strictMode.toString())
+                // GRA-199: same mechanism, same reason, for the abstract
+                // socket's own opt-out — see PortholeExtension.legacyTcpPort's
+                // KDoc. Absent (a build predating this flag) reads as false,
+                // which is the new default: the abstract socket, not the
+                // shared TCP port this flag exists to keep alive for anyone
+                // still forwarding it by hand.
+                buildType.resValue("bool", "porthole_legacy_tcp_port", legacyTcpPort.toString())
             }
         }
     }

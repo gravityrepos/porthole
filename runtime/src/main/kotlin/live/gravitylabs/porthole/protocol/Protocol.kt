@@ -10,7 +10,14 @@ import kotlinx.serialization.json.JsonObject
 import live.gravitylabs.porthole.nowMs
 
 /**
- * The wire format is newline-delimited JSON over a loopback TCP socket.
+ * The wire format is newline-delimited JSON over one local socket per
+ * connection.
+ *
+ * GRA-199: the socket itself is, by default, an abstract-namespace Unix
+ * domain socket keyed by package name rather than a loopback TCP port shared
+ * by every app on the device (`porthole { legacyTcpPort.set(true) }` keeps
+ * the old TCP bind for one release) — this file's framing does not care
+ * which one carries it, and neither does anything below.
  *
  * Two kinds of frame travel on the same connection:
  *  - request / response, correlated by [Request.id]

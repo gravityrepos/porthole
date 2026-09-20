@@ -121,13 +121,63 @@ export function resolveSerial(
 // the forward
 // ---------------------------------------------------------------------------
 
-/** `adb [-s serial] forward tcp:port tcp:port` — the exact call `porthole ui`/`porthole capture` already make, idempotent by construction (adb replaces an existing identical forward rather than erroring). */
+export type ForwardTargetResult = { ok: true; target: string } | { ok: false; error: string };
+
+/**
+ * GRA-199: the far end of `adb forward tcp:PORT <target>` — the
+ * abstract-namespace Unix socket the runtime binds by default,
+ * `localabstract:porthole.<applicationId>`, keyed by package so two
+ * Porthole apps on one device no longer contend for the same on-device
+ * endpoint at all, or (opted into with `legacyTcpPort`) the pre-GRA-199
+ * shared TCP port, `tcp:PORT`, collision and all. Mirrors
+ * `gradle-plugin/.../PortholeTasks.kt`'s own `forwardTarget` by construction
+ * — both sides of the forward have to agree on what the far end is called,
+ * and the Kotlin side is the one that actually builds the abstract socket
+ * (`LocalServerSocket`), so this stays a line-for-line port of it rather than
+ * an independent guess.
+ *
+ * The abstract socket's name needs `applicationId`, which is only ever known
+ * here from `PORTHOLE_APPLICATION_ID` (written into `.mcp.json` by
+ * `portholeMcpConfig` from AGP's own `applicationId`, GRA-197) or a tool's
+ * own `applicationId` argument — never guessed. Missing it is a refusal, not
+ * a blank socket name that adb would forward to and never match: an empty
+ * `localabstract:porthole.` target is confidently wrong in a way that is
+ * much harder to notice than an explicit error naming the fix.
+ */
+export function forwardTarget(port: number, applicationId: string | undefined, legacyTcpPort: boolean): ForwardTargetResult {
+  if (legacyTcpPort) return { ok: true, target: `tcp:${port}` };
+  const id = applicationId?.trim();
+  if (!id) {
+    return {
+      ok: false,
+      error:
+        "PORTHOLE_APPLICATION_ID is not set, so the abstract socket's name " +
+        "(localabstract:porthole.<applicationId>) cannot be built. It is normally written into .mcp.json " +
+        "by `portholeMcpConfig`; without the plugin, set it by hand, or forward the old shared TCP port " +
+        "instead (not recommended - it reintroduces the collision GRA-199 removed) with " +
+        "`porthole { legacyTcpPort.set(true) }` and PORTHOLE_LEGACY_TCP_PORT=1.",
+    };
+  }
+  return { ok: true, target: `localabstract:porthole.${id}` };
+}
+
+/**
+ * `adb [-s serial] forward tcp:port <target>` — the exact call `porthole
+ * ui`/`porthole capture` already make, idempotent by construction (adb
+ * replaces an existing identical forward rather than erroring). [target]
+ * decides `<target>` (GRA-199); a refusal from it short-circuits before adb
+ * is even invoked, reported the same shape a real adb failure would be.
+ */
 export function ensureForward(
   port: number,
   serial: string | undefined,
+  applicationId: string | undefined,
+  legacyTcpPort: boolean,
   options: RunAdbAsyncOptions = {},
 ): Promise<AdbResult> {
-  return runAdbAsync(["forward", `tcp:${port}`, `tcp:${port}`], { ...options, serial });
+  const target = forwardTarget(port, applicationId, legacyTcpPort);
+  if (!target.ok) return Promise.resolve({ ok: false, output: target.error });
+  return runAdbAsync(["forward", `tcp:${port}`, target.target], { ...options, serial });
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +218,10 @@ export interface DiagnoseAndReconnectOptions {
   serial?: string;
   /** `process.env.PORTHOLE_SERIAL`, read by the caller so this stays a pure-ish function to test. */
   envSerial?: string;
+  /** GRA-199: `PORTHOLE_APPLICATION_ID`, read by the caller — see [forwardTarget]. */
+  applicationId?: string;
+  /** GRA-199: `PORTHOLE_LEGACY_TCP_PORT`, read by the caller — see [forwardTarget]. Default false. */
+  legacyTcpPort?: boolean;
   adbOptions?: RunAdbAsyncOptions;
   /** How long to give a freshly-forwarded device to attach before giving up on THIS call. Default 4000. */
   waitMs?: number;
@@ -250,7 +304,13 @@ export async function diagnoseAndReconnect(
     };
   }
 
-  const forward = await ensureForward(port, resolution.serial, options.adbOptions);
+  const forward = await ensureForward(
+    port,
+    resolution.serial,
+    options.applicationId,
+    options.legacyTcpPort ?? false,
+    options.adbOptions,
+  );
   if (!forward.ok) {
     return {
       ...notAttempted,

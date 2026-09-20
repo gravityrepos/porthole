@@ -28,6 +28,10 @@ export interface CaptureOptions {
   forward: boolean;
   baseline?: string;
   command: string[];
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_APPLICATION_ID`. */
+  applicationId?: string;
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_LEGACY_TCP_PORT` being set. */
+  legacyTcpPort: boolean;
 }
 
 export const CAPTURE_USAGE = `
@@ -35,15 +39,17 @@ porthole capture — record a run and write a trace
 
   porthole capture --scenario <name> [options] -- <command to run>
 
-  --scenario <name>   what this run is, and what a baseline is matched against
-  --out <file>        where to write the trace (default porthole-trace.json)
-  --driver <name>     what drove the app; compare warns when two runs differ
-  --with-events       include the raw event stream. Large.
-  --fail-on <what>    nothing (default), error, or regression
-  --baseline <file>   compare against this trace when done
-  --port <n>          device port (default 8677)
-  --serial <id>       adb device serial
-  --no-forward        skip 'adb forward'; use it if the bridge is already up
+  --scenario <name>      what this run is, and what a baseline is matched against
+  --out <file>           where to write the trace (default porthole-trace.json)
+  --driver <name>        what drove the app; compare warns when two runs differ
+  --with-events          include the raw event stream. Large.
+  --fail-on <what>       nothing (default), error, or regression
+  --baseline <file>      compare against this trace when done
+  --port <n>             device port (default 8677)
+  --serial <id>          adb device serial
+  --application-id <id>  the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
+  --legacy-tcp-port      forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)
+  --no-forward           skip 'adb forward'; use it if the bridge is already up
 
   porthole report <trace.json>
   porthole compare <baseline.json> <trace.json>
@@ -214,6 +220,8 @@ export function parseCapture(argv: string[]): CaptureOptions {
     failOn: "nothing",
     forward: true,
     command: [],
+    applicationId: process.env.PORTHOLE_APPLICATION_ID || undefined,
+    legacyTcpPort: Boolean(process.env.PORTHOLE_LEGACY_TCP_PORT),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -279,7 +287,15 @@ export function parseCapture(argv: string[]): CaptureOptions {
         process.exit(2);
       }
       options.serial = value;
-    } else if (arg === "--no-forward") options.forward = false;
+    } else if (arg === "--application-id") {
+      const value = requiredValue(argv[++i], "--application-id");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.applicationId = value;
+    } else if (arg === "--legacy-tcp-port") options.legacyTcpPort = true;
+    else if (arg === "--no-forward") options.forward = false;
     else if (arg === "--help" || arg === "-h") {
       process.stdout.write(CAPTURE_USAGE);
       process.exit(0);

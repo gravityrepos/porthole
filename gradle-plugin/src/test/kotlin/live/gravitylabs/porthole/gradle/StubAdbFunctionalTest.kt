@@ -35,12 +35,18 @@ abstract class StubAdbFunctionalTest {
         System.getProperty("porthole.gradleVersion")?.takeIf(String::isNotBlank)
 
     protected fun build(vararg arguments: String) =
+        runner(*arguments).build()
+
+    /** Same runner as [build], for a test that expects the build to fail on purpose. */
+    protected fun buildAndFail(vararg arguments: String) =
+        runner(*arguments).buildAndFail()
+
+    private fun runner(vararg arguments: String) =
         GradleRunner.create()
             .withProjectDir(projectDir.root)
             .withPluginClasspath()
             .withArguments(*arguments, "--stacktrace")
             .apply { gradleVersion?.let(::withGradleVersion) }
-            .build()
 
     protected fun write(path: String, text: String): File {
         val file = File(projectDir.root, path)
@@ -97,6 +103,7 @@ abstract class StubAdbFunctionalTest {
 
             import live.gravitylabs.porthole.gradle.PortholeConnectTask
             import live.gravitylabs.porthole.gradle.PortholeDisconnectTask
+            import live.gravitylabs.porthole.gradle.PortholeUiTask
 
             plugins { id("live.gravitylabs.porthole") }
 
@@ -108,12 +115,25 @@ abstract class StubAdbFunctionalTest {
     protected val connectionFile: File
         get() = File(projectDir.root, "build/porthole/connection.json")
 
-    /** `portholeConnect`, wired to [adb] and the usual port. */
-    protected fun connectTask(adb: File): String =
+    /**
+     * `portholeConnect`, wired to [adb] and the usual port.
+     *
+     * [applicationId] defaults to a fixed scratch value rather than being
+     * left unset: since GRA-199 the forward's target is
+     * `localabstract:porthole.<applicationId>`, so an unset applicationId
+     * would make every one of these tests fail at task-action time with
+     * [forwardTarget]'s own refusal instead of exercising what each test is
+     * actually about. Pass `applicationId = null` (and `legacyTcpPort = true`
+     * where that matters) for the tests that are about that refusal, or
+     * about the legacy TCP path, on purpose.
+     */
+    protected fun connectTask(adb: File, applicationId: String? = "com.example.scratch", legacyTcpPort: Boolean = false): String =
         """
         tasks.register<PortholeConnectTask>("portholeConnect") {
             adbExecutable.set(${quoted(adb.absolutePath)})
             port.set(8677)
+            ${applicationId?.let { "applicationId.set(${quoted(it)})" } ?: ""}
+            legacyTcpPort.set($legacyTcpPort)
             connectionFile.set(layout.buildDirectory.file("porthole/connection.json"))
         }
         """

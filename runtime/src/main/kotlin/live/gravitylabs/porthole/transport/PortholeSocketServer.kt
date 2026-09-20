@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.transport
 
+import android.net.LocalServerSocket
+import android.net.LocalSocket
 import android.util.Log
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -14,7 +16,9 @@ import live.gravitylabs.porthole.protocol.Response
 import live.gravitylabs.porthole.store.EventRing
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.InputStream
 import java.io.InterruptedIOException
+import java.io.OutputStream
 import java.net.BindException
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -27,20 +31,43 @@ import java.util.concurrent.atomic.AtomicLong
 internal typealias MethodHandler = (JsonObject) -> JsonElement
 
 /**
- * Loopback-only JSON-lines server.
+ * A per-package JSON-lines server, off by default on a TCP port at all.
  *
- * Loopback-only is the whole security story: the socket binds to 127.0.0.1, so
- * nothing off-device can reach it without an explicit `adb forward`, which in
- * turn needs USB debugging authorisation. The module being debug-only sits on
- * top of that.
+ * GRA-199: every Porthole app used to bind the same loopback TCP port
+ * (127.0.0.1:8677 by default), so two Porthole apps on one device could never
+ * both be reachable — the second one's bind simply lost the race GRA-196
+ * taught this class to report loudly. The fix keys the on-device endpoint by
+ * package instead of by port: [start] binds an [LocalServerSocket] in
+ * Android's abstract namespace, named `porthole.<packageName>`, which is
+ * unique by construction the same way the package name it is built from is.
+ * `adb forward tcp:PORT localabstract:porthole.<applicationId>` bridges it to
+ * the workstation exactly as `adb forward tcp:PORT tcp:PORT` used to — the
+ * host side of the wire is unchanged, only the far end of the forward moved.
+ *
+ * An abstract-namespace Unix domain socket carries the same loopback-only
+ * security story a TCP bind to 127.0.0.1 did: it is not reachable from
+ * another device, another network namespace, or anything off-device at all —
+ * only a process on the same device (in practice, `adbd`, itself confined to
+ * a `adb forward`) can connect to it. Nothing here changes what the module
+ * being debug-only already guarded.
+ *
+ * [legacyTcp] is the escape hatch for anyone who was forwarding the old TCP
+ * port by hand and has not moved their tooling yet — see
+ * `PortholeExtension.legacyTcpPort`'s own doc comment for the deprecation
+ * story. It restores the pre-GRA-199 bind exactly: `ServerSocket(port, ...,
+ * 127.0.0.1)`, with the same collision the rest of this class's doc comment
+ * describes.
  */
 internal class PortholeSocketServer(
     private val port: Int,
     private val ring: EventRing,
     /**
-     * Named in the bind-failure log so whoever reads logcat on a device with
-     * two Porthole apps installed knows which of them is complaining, not
-     * just which port. [Porthole.install] has this on hand already
+     * The device-side identity: named in the bind-failure log so whoever
+     * reads logcat on a device with two Porthole apps installed knows which
+     * of them is complaining, and (GRA-199) it is also literally the abstract
+     * socket's name (`porthole.<packageName>`) — the thing that makes two
+     * Porthole apps on one device no longer contend for anything at all.
+     * [Porthole.install] has this on hand already
      * ([android.content.Context.getPackageName]); nothing here goes looking
      * for it itself, so the class stays constructible from a plain unit test
      * with no `Application`.
@@ -58,6 +85,38 @@ internal class PortholeSocketServer(
      * directly have no reason to pass one.
      */
     private val onBindResult: (ok: Boolean) -> Unit = {},
+    /**
+     * GRA-199: bind the legacy loopback TCP socket instead of the abstract
+     * Unix socket that is now the default. Off unless `porthole { legacyTcpPort.set(true) }`
+     * asked for it — see that property's own KDoc for who still needs this
+     * and for how long.
+     */
+    private val legacyTcp: Boolean = false,
+    /**
+     * The one call [bindWithRetry] repeats: `ServerSocket(port, ...)` wrapped
+     * as a [TcpBoundServer] when [legacyTcp], `LocalServerSocket(socketName)`
+     * wrapped as a [LocalBoundServer] otherwise — the real bind, in
+     * production, always. A constructor parameter rather than a direct call
+     * so a plain JVM test can drive the retry loop, the two message shapes
+     * and the [Setup] recording with a fake that throws on demand, without
+     * ever touching `android.net.LocalServerSocket` itself: Robolectric ships
+     * no shadow for it (no `ShadowLocalServerSocket` anywhere in
+     * shadows-framework, unlike `ServerSocket`, which is plain Java and needs
+     * none), and its real implementation calls native methods with no host
+     * backing, so `new LocalServerSocket(name)` under Robolectric throws
+     * `IOException: socket not created` unconditionally — confirmed by
+     * running it, not assumed. Exercising the abstract-socket bind itself is
+     * therefore only ever provable on a real device or emulator; this
+     * ticket's own report records that run. Nothing outside a test ever
+     * passes a non-default value.
+     */
+    private val bindOnce: () -> BoundServer = {
+        if (legacyTcp) {
+            TcpBoundServer(ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK)))
+        } else {
+            LocalBoundServer(LocalServerSocket("porthole.$packageName"))
+        }
+    },
 ) {
     private val handlers = LinkedHashMap<String, MethodHandler>()
     private val clients = CopyOnWriteArrayList<ClientConnection>()
@@ -105,7 +164,7 @@ internal class PortholeSocketServer(
     private val outbound = ArrayBlockingQueue<EventFrame>(OUTBOUND_CAPACITY)
     private val dropped = AtomicLong(0)
 
-    @Volatile private var server: ServerSocket? = null
+    @Volatile private var server: BoundServer? = null
     @Volatile private var running = false
 
     fun method(name: String, handler: MethodHandler) {
@@ -167,21 +226,35 @@ internal class PortholeSocketServer(
      * case: no retry ever needed) would be a worse regression than the bug
      * this exists to log.
      */
-    private fun bindWithRetry(): ServerSocket? {
+    /**
+     * `porthole.<packageName>` — the abstract socket's name, and (GRA-199)
+     * the reason two Porthole apps on one device no longer contend for
+     * anything: each app's own package name makes this unique by
+     * construction, the same guarantee a Java package namespace already
+     * gives every class on it. Only used to describe the target in a log
+     * line here; [legacyTcp] never calls this, and [bindOnce] builds its own
+     * copy of the same string for the real bind.
+     */
+    private val socketName = "porthole.$packageName"
+
+    /** How the current [legacyTcp]/[port] combination reads in a log line. */
+    private val bindDescription = if (legacyTcp) "$LOOPBACK:$port" else "localabstract:$socketName"
+
+    private fun bindWithRetry(): BoundServer? {
         var lastError: Exception? = null
         for (attempt in 1..BIND_RETRY_ATTEMPTS) {
             bindAttempts = attempt
             try {
-                val socket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK))
+                val socket = bindOnce()
                 listening = true
                 listeningFailure = null
                 Setup.recordSocketBind(listening = true, failure = null, attempts = attempt)
                 Log.i(
                     TAG,
                     if (attempt == 1) {
-                        "listening on $LOOPBACK:$port"
+                        "listening on $bindDescription"
                     } else {
-                        "listening on $LOOPBACK:$port after $attempt attempts"
+                        "listening on $bindDescription after $attempt attempts"
                     },
                 )
                 return socket
@@ -190,7 +263,7 @@ internal class PortholeSocketServer(
                 if (attempt < BIND_RETRY_ATTEMPTS) {
                     Log.d(
                         TAG,
-                        "bind attempt $attempt/$BIND_RETRY_ATTEMPTS on $LOOPBACK:$port failed, retrying: ${e.message}",
+                        "bind attempt $attempt/$BIND_RETRY_ATTEMPTS on $bindDescription failed, retrying: ${e.message}",
                     )
                     try {
                         Thread.sleep(BIND_RETRY_DELAY_MS)
@@ -208,11 +281,29 @@ internal class PortholeSocketServer(
         // exception's message text, which is not guaranteed stable across
         // platforms. Anything else (a malformed port, a security manager
         // refusal, ...) is named by its own class instead of being folded
-        // into a claim about address-in-use that would not be true.
-        val reason = if (e is BindException) "EADDRINUSE" else e.javaClass.simpleName
-        val message = "could not bind $LOOPBACK:$port for $packageName after $bindAttempts attempt(s) " +
-            "($reason: ${e.message}); another app on this device has a Porthole on $port; stop it, " +
-            "or give this app its own porthole { port.set(...) }"
+        // into a claim about address-in-use that would not be true. A
+        // LocalSocketImpl bind failure is not guaranteed to surface as a
+        // BindException the way ServerSocket's is (it is a thinner JNI
+        // wrapper over the same EADDRINUSE errno), so the message text is
+        // checked too rather than trusting the exception's Java type alone.
+        val reason = if (e is BindException || e.message?.contains("EADDRINUSE") == true) {
+            "EADDRINUSE"
+        } else {
+            e.javaClass.simpleName
+        }
+        val message = if (legacyTcp) {
+            "could not bind $bindDescription for $packageName after $bindAttempts attempt(s) " +
+                "($reason: ${e.message}); another app on this device has a Porthole on $port; stop it, " +
+                "or give this app its own porthole { port.set(...) }"
+        } else {
+            // GRA-199: the abstract socket is keyed by package, so this is no
+            // longer "another app took the port" — it can only mean a second
+            // instance of THIS SAME app (two processes, or a reinstall whose
+            // old process has not fully released the name) still holding it
+            // once every retry above is exhausted.
+            "could not bind $bindDescription for $packageName after $bindAttempts attempt(s) " +
+                "($reason: ${e.message}); another process of this same app still holds it"
+        }
         listening = false
         listeningFailure = message
         Setup.recordSocketBind(listening = false, failure = message, attempts = bindAttempts)
@@ -279,15 +370,15 @@ internal class PortholeSocketServer(
         clients.forEach { it.send(line) }
     }
 
-    private inner class ClientConnection(private val socket: Socket) {
+    private inner class ClientConnection(private val socket: BoundClient) {
         private val writeLock = Any()
         private var writer: BufferedWriter? = null
 
         fun serve() {
             try {
-                socket.tcpNoDelay = true
-                val reader: BufferedReader = socket.getInputStream().bufferedReader()
-                val out = socket.getOutputStream().bufferedWriter()
+                socket.disableNagle()
+                val reader: BufferedReader = socket.input.bufferedReader()
+                val out = socket.output.bufferedWriter()
                 synchronized(writeLock) { writer = out }
 
                 while (running && !socket.isClosed) {
@@ -368,4 +459,67 @@ internal class PortholeSocketServer(
         private const val BIND_RETRY_ATTEMPTS = 5
         private const val BIND_RETRY_DELAY_MS = 500L
     }
+}
+
+// ---------------------------------------------------------------------------
+// GRA-199: the abstraction that lets the accept loop, ClientConnection and
+// stop() above stay ignorant of which of the two socket families is live
+// underneath — the abstract-namespace LocalServerSocket that is the default,
+// or the legacy loopback ServerSocket kept behind `legacyTcp`. Free functions
+// on `ServerSocket`/`Socket` and `LocalServerSocket`/`LocalSocket` already
+// agree closely enough (both pairs offer accept()/close() and
+// getInputStream()/getOutputStream()) that this is a thin adapter, not a
+// reimplementation of either.
+// ---------------------------------------------------------------------------
+
+/** What [PortholeSocketServer.bindWithRetry] binds: either shape, once bound. */
+internal interface BoundServer {
+    fun accept(): BoundClient
+    fun close()
+}
+
+/** One accepted connection, either shape. */
+internal interface BoundClient {
+    val input: InputStream
+    val output: OutputStream
+    val isClosed: Boolean
+    fun close()
+
+    /**
+     * Disables Nagle's algorithm on a real TCP socket, where batching small
+     * writes trades latency the timeline UI feels for a bandwidth saving this
+     * loopback link does not need. A no-op on the abstract Unix-domain
+     * socket: there is no Nagle algorithm to disable on a socket that was
+     * never a TCP stream in the first place, and `LocalSocket` has no such
+     * setting to call.
+     */
+    fun disableNagle()
+}
+
+internal class TcpBoundServer(private val delegate: ServerSocket) : BoundServer {
+    override fun accept(): BoundClient = TcpBoundClient(delegate.accept())
+    override fun close() = delegate.close()
+}
+
+internal class TcpBoundClient(private val socket: Socket) : BoundClient {
+    override val input: InputStream get() = socket.getInputStream()
+    override val output: OutputStream get() = socket.getOutputStream()
+    override val isClosed: Boolean get() = socket.isClosed
+    override fun close() = socket.close()
+    override fun disableNagle() {
+        socket.tcpNoDelay = true
+    }
+}
+
+internal class LocalBoundServer(private val delegate: LocalServerSocket) : BoundServer {
+    override fun accept(): BoundClient = LocalBoundClient(delegate.accept())
+    override fun close() = delegate.close()
+}
+
+internal class LocalBoundClient(private val socket: LocalSocket) : BoundClient {
+    override val input: InputStream get() = socket.inputStream
+    override val output: OutputStream get() = socket.outputStream
+    override val isClosed: Boolean get() = !socket.isConnected
+    override fun close() = socket.close()
+    override fun disableNagle() {}
 }

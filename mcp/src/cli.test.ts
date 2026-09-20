@@ -546,6 +546,13 @@ describe("capture command: refused before device contact", () => {
           "capture",
           "--port",
           String(port),
+          // GRA-199: the default forward target is the abstract socket
+          // named for applicationId, so this positive control needs one —
+          // without it, forwardTarget refuses before adb is ever reached,
+          // which would make this test fail for a reason unrelated to what
+          // it is actually checking (that the fake-adb shim is reachable).
+          "--application-id",
+          "com.example.shop",
           "--out",
           out,
           "--",

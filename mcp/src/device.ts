@@ -611,8 +611,22 @@ export class DeviceClient extends EventEmitter {
    * from inside this same session, with nothing to copy into a shell. The
    * numbered manual steps stay, verbatim, as the fallback for the one case
    * neither tool can fix from here: no device attached at all, or an adb
-   * setup neither can safely guess at (two transports, a port already held
-   * by something else).
+   * setup neither can safely guess at (two transports).
+   *
+   * GRA-199 QA: the old step 4 here — "another Porthole app on the device
+   * isn't already holding this port" — described GRA-196/197's collision, on
+   * a shared TCP port every Porthole app used to bind. GRA-199 makes that
+   * collision structurally impossible (each app now binds its own
+   * abstract-namespace socket, keyed by package), so the step is deleted
+   * outright rather than reworded: there is no adb-side "check by hand" for
+   * a problem that no longer exists, and leaving a step here that can never
+   * fire is worse than renumbering. What *can* still go wrong on the far end
+   * of the forward is `PORTHOLE_APPLICATION_ID` being unset — but that is
+   * `forwardTarget`'s own refusal, reached before this message is ever
+   * printed (a forward that never ran leaves the socket unreachable, which
+   * is this same "not connected" state, but the specific reason is already
+   * in `deviceDiagnosis`/the forward failure text, not something this
+   * generic fallback needs to re-derive).
    */
   notConnectedMessage(): string {
     return [
@@ -622,17 +636,9 @@ export class DeviceClient extends EventEmitter {
         "not running, porthole_connect can launch it.",
       "If that doesn't fix it, check by hand, in order:",
       "  1. the debug build is running on the device (the porthole starts with the process)",
-      "  2. the adb bridge is up: 'adb forward tcp:PORT tcp:PORT', which",
+      "  2. the adb bridge is up: 'adb forward tcp:PORT localabstract:porthole.<applicationId>', which",
       "     'porthole ui' and './gradlew portholeConnect' both do for you",
-      `  3. nothing else on this machine is holding ${this.port}`,
-      // GRA-197: the two cases that incident's own report named — a wrong
-      // app answering is only reachable from here for a device that is not
-      // even accepting connections on the port; a device that is, but
-      // answers as the wrong app, is packageMismatch's territory above,
-      // reached while "connected", not from this message at all.
-      "  4. another Porthole app on the device isn't already holding this port — stop it, or " +
-        "give this app its own port with 'porthole { port.set(...) }'",
-      "  5. there's only one adb transport for this device — wireless plus wired both attached " +
+      "  3. there's only one adb transport for this device — wireless plus wired both attached " +
         "makes 'adb forward' ambiguous and it fails silently for this port; pin one with " +
         "'porthole { deviceSerial.set(...) }'",
     ]

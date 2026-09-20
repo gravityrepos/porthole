@@ -13,6 +13,7 @@ import {
   describeDevices,
   diagnoseAndReconnect,
   ensureForward,
+  forwardTarget,
   listDevices,
   resolveSerial,
 } from "./devices.js";
@@ -72,6 +73,15 @@ const UI_PORT = Number(process.env.PORTHOLE_UI_PORT ?? 8678);
  * `DeviceClient` to skip the check entirely rather than compare against "".
  */
 const APPLICATION_ID = process.env.PORTHOLE_APPLICATION_ID || undefined;
+/**
+ * GRA-199: opts back into the pre-GRA-199 shared TCP port instead of the
+ * abstract socket keyed by [APPLICATION_ID] — see `devices.ts`'s
+ * `forwardTarget` for what this actually changes. Written by
+ * `portholeMcpConfig` only when `porthole { legacyTcpPort.set(true) }`
+ * (omitted, not `"0"`, otherwise — same convention [APPLICATION_ID] uses),
+ * so any truthy value here means it was deliberately set.
+ */
+const LEGACY_TCP_PORT = Boolean(process.env.PORTHOLE_LEGACY_TCP_PORT);
 
 /**
  * GRA-89: how much longer than the plan's own recording duration
@@ -1038,6 +1048,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         ? await diagnoseAndReconnect(device, PORT, {
             serial,
             envSerial: process.env.PORTHOLE_SERIAL,
+            // GRA-199: what ensureForward forwards to — see forwardTarget's
+            // own doc comment for why a missing applicationId refuses rather
+            // than guessing.
+            applicationId: APPLICATION_ID,
+            legacyTcpPort: LEGACY_TCP_PORT,
             adbOptions: { env: adbEnv, binary: adbBinary },
           })
         : null;
@@ -1148,10 +1163,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         }
       }
 
+      // GRA-199: the far end of the forward this server expects — reported
+      // as data (not just implied by `forwardTarget`'s success/failure
+      // inside `deviceDiagnosis.forward`) so a caller can see it even on a
+      // call that never needed to (re-)forward at all, i.e. already
+      // connected. `null` only when it cannot be computed yet (no
+      // applicationId known and not on the legacy TCP path) — the same
+      // condition `porthole_connect`'s own forward would refuse on.
+      const socketTarget = forwardTarget(PORT, APPLICATION_ID, LEGACY_TCP_PORT);
+
       const payload = {
         state: device.state,
         host: HOST,
         port: PORT,
+        socketTarget: socketTarget.ok ? socketTarget.target : null,
         app: device.hello,
         timelineUi: timeline.isRunning() ? timeline.url() : null,
         bufferedEvents,
@@ -1291,7 +1316,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
       const chosenSerial = resolution.serial;
 
-      const forward = await ensureForward(PORT, chosenSerial, adbOptions);
+      // GRA-199: an explicit `packageName` argument wins over
+      // PORTHOLE_APPLICATION_ID here too — the same precedence `targetPackage`
+      // below uses for everything after the forward — since a caller naming
+      // a package is asking about that one, not whatever this server was
+      // configured for.
+      const forward = await ensureForward(PORT, chosenSerial, packageName || APPLICATION_ID, LEGACY_TCP_PORT, adbOptions);
       if (!forward.ok) {
         return ok(`Found ${chosenSerial}, but could not forward the port: ${forward.output}`, {
           serial: chosenSerial,

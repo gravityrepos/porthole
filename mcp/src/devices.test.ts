@@ -6,6 +6,7 @@ import {
   checkInstalledApp,
   diagnoseAndReconnect,
   ensureForward,
+  forwardTarget,
   listDevices,
   parseDevicesOutput,
   resolveSerial,
@@ -141,25 +142,67 @@ describe("listDevices, against a real (faked) adb process", () => {
 });
 
 describe("ensureForward", () => {
-  it("runs 'adb -s SERIAL forward tcp:PORT tcp:PORT' — the exact call porthole ui/capture already make", async () => {
+  it("runs 'adb -s SERIAL forward tcp:PORT localabstract:porthole.<applicationId>' by default (GRA-199)", async () => {
     const adb = fakeAdb({
-      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "tcp:8677"])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "localabstract:porthole.com.example.shop"])]: {},
     });
-    const result = await ensureForward(8677, "A1", { env: adb.env, binary: adb.binaryPath });
+    const result = await ensureForward(8677, "A1", "com.example.shop", false, { env: adb.env, binary: adb.binaryPath });
     expect(result.ok).toBe(true);
-    expect(adb.calls()).toEqual([["-s", "A1", "forward", "tcp:8677", "tcp:8677"]]);
+    expect(adb.calls()).toEqual([["-s", "A1", "forward", "tcp:8677", "localabstract:porthole.com.example.shop"]]);
   });
 
   it("surfaces adb's own failure text when the forward fails", async () => {
     const adb = fakeAdb({
-      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "tcp:8677"])]: {
+      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "localabstract:porthole.com.example.shop"])]: {
         exitCode: 1,
         stderr: "error: device 'A1' not found\n",
       },
     });
-    const result = await ensureForward(8677, "A1", { env: adb.env, binary: adb.binaryPath });
+    const result = await ensureForward(8677, "A1", "com.example.shop", false, { env: adb.env, binary: adb.binaryPath });
     expect(result.ok).toBe(false);
     expect(result.output).toContain("not found");
+  });
+
+  it("legacyTcpPort forwards to the old shared TCP port instead, applicationId or not", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "tcp:8677"])]: {},
+    });
+    const result = await ensureForward(8677, "A1", undefined, true, { env: adb.env, binary: adb.binaryPath });
+    expect(result.ok).toBe(true);
+    expect(adb.calls()).toEqual([["-s", "A1", "forward", "tcp:8677", "tcp:8677"]]);
+  });
+
+  it("refuses, without ever calling adb, when applicationId is unset and legacyTcpPort is off", async () => {
+    const adb = fakeAdb({});
+    const result = await ensureForward(8677, "A1", undefined, false, { env: adb.env, binary: adb.binaryPath });
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("PORTHOLE_APPLICATION_ID");
+    expect(adb.calls()).toEqual([]);
+  });
+});
+
+describe("forwardTarget", () => {
+  it("defaults to the abstract socket named for applicationId", () => {
+    expect(forwardTarget(8677, "com.example.shop", false)).toEqual({
+      ok: true,
+      target: "localabstract:porthole.com.example.shop",
+    });
+  });
+
+  it("legacyTcpPort forwards to the port itself, applicationId or not", () => {
+    expect(forwardTarget(8677, "com.example.shop", true)).toEqual({ ok: true, target: "tcp:8677" });
+    expect(forwardTarget(8677, undefined, true)).toEqual({ ok: true, target: "tcp:8677" });
+  });
+
+  it("refuses a missing applicationId rather than build a blank socket name", () => {
+    const result = forwardTarget(8677, undefined, false);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("PORTHOLE_APPLICATION_ID");
+  });
+
+  it("refuses a blank applicationId the same way as a missing one", () => {
+    const result = forwardTarget(8677, "   ", false);
+    expect(result.ok).toBe(false);
   });
 });
 
@@ -288,13 +331,16 @@ describe("diagnoseAndReconnect", () => {
     const device = new DeviceClient("127.0.0.1", 1);
     const adb = fakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "tcp:8677"])]: {
+      [fakeAdbArgsKey(["-s", "A1", "forward", "tcp:8677", "localabstract:porthole.com.example.shop"])]: {
         exitCode: 1,
         stderr: "error: device offline\n",
       },
     });
 
-    const outcome = await diagnoseAndReconnect(device, 8677, { adbOptions: { env: adb.env, binary: adb.binaryPath } });
+    const outcome = await diagnoseAndReconnect(device, 8677, {
+      applicationId: "com.example.shop",
+      adbOptions: { env: adb.env, binary: adb.binaryPath },
+    });
 
     expect(outcome.serial).toBe("A1");
     expect(outcome.forward?.ok).toBe(false);
@@ -311,10 +357,11 @@ describe("diagnoseAndReconnect", () => {
 
     const adb = fakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${fakeDevice.port}`, `tcp:${fakeDevice.port}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${fakeDevice.port}`, "localabstract:porthole.com.example.shop"])]: {},
     });
 
     const outcome = await diagnoseAndReconnect(device, fakeDevice.port, {
+      applicationId: "com.example.shop",
       adbOptions: { env: adb.env, binary: adb.binaryPath },
     });
 
@@ -346,10 +393,11 @@ describe("diagnoseAndReconnect", () => {
     const device = new DeviceClient("127.0.0.1", port);
     const adb = fakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${port}`, `tcp:${port}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${port}`, "localabstract:porthole.com.example.shop"])]: {},
     });
 
     const outcome = await diagnoseAndReconnect(device, port, {
+      applicationId: "com.example.shop",
       adbOptions: { env: adb.env, binary: adb.binaryPath },
       waitMs: 250,
       pollMs: 25,
@@ -359,5 +407,25 @@ describe("diagnoseAndReconnect", () => {
     expect(outcome.message).toContain("porthole_connect");
 
     device.stop();
+  });
+
+  it("reports forwardTarget's own refusal, without calling adb's forward, when applicationId is unknown", async () => {
+    const device = new DeviceClient("127.0.0.1", 1);
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+    });
+
+    // No applicationId, no legacyTcpPort — the one combination GRA-199's
+    // forwardTarget refuses outright, from a caller (porthole_status, via
+    // this function) that has no `packageName` argument of its own to fall
+    // back on the way porthole_connect does.
+    const outcome = await diagnoseAndReconnect(device, 8677, { adbOptions: { env: adb.env, binary: adb.binaryPath } });
+
+    expect(outcome.serial).toBe("A1");
+    expect(outcome.forward?.ok).toBe(false);
+    expect(outcome.message).toContain("PORTHOLE_APPLICATION_ID");
+    // Only the device listing ran - forwardTarget's refusal is synchronous
+    // and short-circuits ensureForward before it ever calls adb again.
+    expect(adb.calls()).toEqual([["devices", "-l"]]);
   });
 });

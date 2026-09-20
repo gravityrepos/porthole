@@ -42,7 +42,12 @@ class PortholeConnectTaskFunctionalTest : StubAdbFunctionalTest() {
         val recorded = invocations()
         assertEquals("expected two adb invocations, got $recorded", 2, recorded.size)
         for (line in recorded) {
-            assertTrue("expected a forward, got: $line", line.contains("forward tcp:8677 tcp:8677"))
+            // GRA-199: the far end is the abstract socket keyed by
+            // applicationId, not a second copy of the port.
+            assertTrue(
+                "expected a forward to the abstract socket, got: $line",
+                line.contains("forward tcp:8677 localabstract:porthole.com.example.scratch"),
+            )
         }
     }
 
@@ -82,5 +87,54 @@ class PortholeConnectTaskFunctionalTest : StubAdbFunctionalTest() {
         )
         assertEquals(TaskOutcome.SUCCESS, second.task(":portholeConnect")?.outcome)
         assertEquals(2, invocations().size)
+    }
+
+    // -- GRA-199: the far end of the forward -------------------------------
+
+    @Test
+    fun `legacyTcpPort forwards to the old shared TCP port instead of the abstract socket`() {
+        scratchProject(connectTask(stubAdb(), applicationId = null, legacyTcpPort = true))
+
+        val result = build("portholeConnect")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeConnect")?.outcome)
+
+        val recorded = invocations()
+        assertEquals(1, recorded.size)
+        assertTrue(
+            "legacyTcpPort must forward tcp:PORT to tcp:PORT, the pre-GRA-199 shape, got: ${recorded.single()}",
+            recorded.single().contains("forward tcp:8677 tcp:8677"),
+        )
+        assertTrue(
+            "the connection file's target must match what was actually forwarded",
+            connectionFile.readText().contains("\"target\": \"tcp:8677\""),
+        )
+    }
+
+    @Test
+    fun `refuses rather than forward to a blank abstract socket name when applicationId is unset`() {
+        // No legacyTcpPort escape hatch here on purpose: this is the case
+        // forwardTarget() exists to catch before adb ever runs, not a real
+        // device state to work around.
+        scratchProject(connectTask(stubAdb(), applicationId = null))
+
+        val result = buildAndFail("portholeConnect")
+        assertTrue(
+            "expected the refusal naming applicationId and the legacyTcpPort escape hatch, got:\n${result.output}",
+            result.output.contains("porthole { applicationId }") && result.output.contains("legacyTcpPort"),
+        )
+        // The whole point: no adb call was even attempted, so there is
+        // nothing wrong to leave half-forwarded.
+        assertEquals(0, invocations().size)
+    }
+
+    @Test
+    fun `the connection file records the abstract socket target the default path actually forwarded to`() {
+        scratchProject()
+
+        build("portholeConnect")
+
+        assertTrue(
+            connectionFile.readText().contains("\"target\": \"localabstract:porthole.com.example.scratch\""),
+        )
     }
 }

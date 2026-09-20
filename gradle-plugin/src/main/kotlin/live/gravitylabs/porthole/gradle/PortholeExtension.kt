@@ -20,8 +20,14 @@ abstract class PortholeExtension {
     abstract val enabled: Property<Boolean>
 
     /**
-     * Port on both sides of the adb forward. Change it if 8677 is taken, or if
-     * you want two apps watched at once.
+     * The host port the `adb forward` listens on — not a port the device
+     * opens. GRA-199: the far end is an abstract-namespace Unix socket keyed
+     * by [applicationId] (`localabstract:porthole.<applicationId>`), not a
+     * second copy of this port, so two Porthole apps on one *device* never
+     * contend for anything here at all. Change it if 8677 is taken on your
+     * *workstation*, or if you want two of your own MCP servers watching two
+     * apps on the same workstation at once — that is still a host-side
+     * collision this value has to resolve, same as always.
      */
     abstract val port: Property<Int>
 
@@ -124,4 +130,30 @@ abstract class PortholeExtension {
      * unset.
      */
     abstract val applicationId: Property<String>
+
+    /**
+     * Keeps the pre-GRA-199 bind: a loopback TCP `ServerSocket` shared by
+     * every app on the device, forwarded with `adb forward tcp:PORT
+     * tcp:PORT`, instead of the abstract-namespace Unix socket keyed by
+     * `applicationId` that is now the default (`adb forward tcp:PORT
+     * localabstract:porthole.<applicationId>`). The abstract socket is what
+     * makes two Porthole apps on one device reachable at the same time —
+     * two different apps can no longer contend for the same on-device
+     * endpoint at all — so this exists only for whoever has something
+     * outside this plugin (a hand-rolled `adb forward`, a CI script, a tool
+     * that shells out to `adb` on its own) still pointed at the old TCP
+     * port and has not moved it yet.
+     *
+     * Default `false`. Planned for removal one release after it ships —
+     * there is no migration this flag can do FOR you, since the whole point
+     * of the abstract socket is that it needs no port coordination between
+     * apps; it only buys time to update whatever is forwarding by hand.
+     * Setting it here flows to three places that all have to agree for the
+     * bridge to work at all: the runtime (a generated `porthole_legacy_tcp_port`
+     * bool resource, read the same way [strictMode] is), `portholeConnect`/
+     * `portholeUi`'s own `adb forward` (the far end becomes `tcp:PORT`
+     * again, not `localabstract:...`), and the connection file each of those
+     * writes.
+     */
+    abstract val legacyTcpPort: Property<Boolean>
 }
