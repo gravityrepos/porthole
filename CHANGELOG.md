@@ -52,6 +52,25 @@ PR that makes the change, not after the fact.
   the MCP surface's own "since your last call" banner, keyed by the same
   session identity, so a `watch` and an agent on one session never
   double-report the same error (GRA-56).
+- `system_trace_start`/`system_trace_snapshot`/`system_trace_stop`: a
+  detached Perfetto session that records continuously into a fixed-size
+  ring buffer, so a system trace of a problem that already happened can be
+  pulled without reproducing it under `capture_system_trace`. Opt-in only —
+  nothing runs until `system_trace_start` is called. `system_trace_snapshot`
+  pulls the ring's current contents via Perfetto's `--clone-by-name` without
+  interrupting it (a spike found the ticket's own proposed `--detach`/
+  `--attach --stop` sequence requires `write_into_file: true`, which turns
+  the on-device file into a growing stream rather than a ring, and would
+  have stopped the recording on every snapshot). `system_trace_stop` kills
+  the backgrounded session and removes every file it could have left behind,
+  reading the device's own record of the pid so it works even after an MCP
+  server restart. Any error-severity finding `findings` reports while the
+  ring is running gets a fresh snapshot attached to it automatically
+  (rate-limited to once per ten seconds). `porthole_status` carries the
+  ring's running state, depth and a measured-on-emulator overhead figure
+  (0.45% of one core under a light synthetic workload); a hardware
+  measurement is a separate, still-open pass (GRA-57).
+
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

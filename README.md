@@ -44,6 +44,9 @@ them they cover:
 | `what_was_happening` | the narrative for one instant: screen, in-flight work, main thread, state just written |
 | `system_context` | thermal state, CPU governor, busiest processes, memory pressure — the half Porthole cannot see |
 | `capture_system_trace` | records a Perfetto trace, annotated with the app's own spans |
+| `system_trace_start` | starts a continuous ring-buffer trace, detached, opt-in, for the problem that already happened |
+| `system_trace_snapshot` | flushes the running ring to a file without interrupting it |
+| `system_trace_stop` | stops the ring and removes everything it left on the device |
 | `ask_system_trace` | puts a fixed set of questions to a captured trace, to rule causes in or out |
 | `save_moment` | turns a window of what already happened into a named trace file, no recording required |
 | `open_timeline` | a live timeline UI in the browser |
@@ -1117,6 +1120,66 @@ force-stopping and relaunching the target app right after the capture starts,
 at the cost of the trace containing a cold start; Porthole reconnects to the
 relaunched process on its own. Launching the app after starting the capture
 by hand has the same effect.
+
+### The trace of the problem that already happened
+
+`capture_system_trace` needs a human standing by to reproduce something while
+it records. Most of what is worth a system trace already happened by the time
+anyone thinks to ask for one — `system_trace_start`, `system_trace_snapshot`
+and `system_trace_stop` are for that case instead: a detached Perfetto session
+that records continuously into a fixed-size in-memory ring buffer, so
+"capture the last stretch of what just went wrong" needs no reproduction step
+at all.
+
+**Opt-in only.** Nothing here runs until `system_trace_start` is called —
+there is no default-on path, and `capture_system_trace` keeps working exactly
+as it did before this existed. That is a deliberate ruling, not a first-cut
+limitation: continuous `sched` tracing had to be measured cheap enough before
+it could run unasked, and the honest answer, for now, is "measured cheap on an
+emulator, not yet on hardware." `system_trace_start` scopes the ring to one
+app (`ATRACE_TAG_APP`, the same mechanism `capture_system_trace` uses), the
+same `DEFAULT_CATEGORIES` by default, and a 32MB ring buffer sized for roughly
+30 seconds of the sample app — a starting point, not a promise, since the
+actual span a 32MB buffer covers depends on how much the device is doing, not
+on a fixed duration. `system_trace_snapshot` pulls the buffer's current
+contents to a file **without interrupting the ring** — it keeps recording —
+using Perfetto's `--clone-by-name`, which this ticket's own spike found in
+place of the `--detach`/`--attach --stop` sequence originally proposed for it
+(that sequence needs `write_into_file: true`, which turns the on-device file
+into a continuously growing stream rather than a ring, and stopping-to-flush
+would have interrupted the very recording a snapshot exists to preserve).
+`system_trace_stop`
+kills the backgrounded process and removes every file the feature could have
+left behind, and does so even after an MCP server restart that no longer
+remembers starting anything — it reads the device's own record of the pid,
+not just this process's memory. Any error-severity finding produced by
+`findings` while the ring is running gets a snapshot attached to it
+automatically (`ringSnapshot` on the finding), rate-limited to once per ten
+seconds so an agent polling `findings` for an ongoing problem does not pull a
+fresh multi-megabyte trace on every call.
+
+**Overhead, measured on an emulator (`porthole-gra57`, Pixel 6 profile, API
+36, arm64-v8a) — hardware pending.** 20 seconds of synthetic input (alternating
+`input swipe`/`input tap` against `sample/`) against the default 32MB ring,
+full `DEFAULT_CATEGORIES` plus `ATRACE_TAG_APP`: `traced` + `traced_probes` +
+the detached `perfetto` process combined for **0.45% of one core**
+(`/proc/<pid>/stat` utime+stime delta over wall time, against a measured 0%
+baseline with the same workload and no session running). `porthole_status`'s
+`ring.overhead` field carries this same figure, labelled the same way, so an
+agent deciding whether to turn the ring on sees it before asking. This is a
+light workload on an emulator, not a device under real load — a hardware
+measurement is a separate, still-open pass.
+
+**The spike's other findings**, from starting a ring session on that same
+emulator: it survives the host's own adb server being killed and restarted
+(`adb kill-server` / `adb devices`), and it survives the device's screen being
+turned off (`input keyevent 26`) for well over the interval a display timeout
+would normally allow. Doze was not usefully testable on an emulator —
+`dumpsys deviceidle force-idle` jumps straight to the simulated `IDLE` state
+without the real hardware path (actual CPU or radio suspension), so a pass
+there proves only that the simulated state does not kill the session, not
+that genuine deep sleep on a phone would not. That is left to the hardware
+pass along with the overhead number above.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of eight questions — jank, thread states,
