@@ -34,9 +34,12 @@ PR that makes the change, not after the fact.
   trips during ordinary startup) is never counted or reported at all. Off by
   default: `StrictMode` has no public API to detect or chain an existing
   policy, so enabling this replaces whatever was already installed, and the
-  `setup` report says so plainly rather than claiming to chain. A flood at
-  one call site is throttled to a handful of ring events carrying an
-  accurate running count, not one event per violation (GRA-59).
+  `setup` report says so plainly rather than claiming to chain. A call site
+  reports its first hit immediately, then the exact, current count at most
+  once a second while it keeps happening — a background flush, not a
+  per-violation check, so a site that goes quiet still gets one final
+  accurate count instead of sitting on a stale one for the rest of the
+  session (GRA-59).
 - Findings now carry `where`: a stall's top frame, an exit's `topAppFrame`
   and a recomposition's composable name resolve to a `{ path, line }` under
   the project root when exactly one source file or declaration matches, and

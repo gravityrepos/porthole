@@ -43,7 +43,17 @@ class StrictModeTest {
 
     private val appPackages = listOf("com.example.app.")
 
-    private fun collector(ring: EventRing) = StrictModeCollector(ring, appPackages)
+    /**
+     * `onViolation` only ever reports a site's first sighting on its own;
+     * every repeat is a `StrictModeCollector.flushPending()` call away —
+     * scheduled in production, called directly here to simulate a tick
+     * without a real timer (`StrictModeCollector.stop()` calls it once more,
+     * synchronously, which is what a test calling `stop()` instead is
+     * exercising). `now` is frozen unless a test supplies its own: nothing
+     * here reads the clock to decide whether to report any more, only to
+     * stamp the emitted event's own timestamp.
+     */
+    private fun collector(ring: EventRing, now: () -> Long = { 0L }) = StrictModeCollector(ring, appPackages, now)
 
     private fun strictEvents(ring: EventRing): List<EventFrame> =
         ring.since(0, 10_000).filter { it.event == EventKinds.STRICT_VIOLATION }
@@ -151,26 +161,105 @@ class StrictModeTest {
         return strictEvents(ring).single().field("category").content
     }
 
-    // -- counting: a flood at one call site is not a flood on the wire -------
+    // -- counting: a flood at one call site is not a flood on the wire, and
+    //    every count reported is the exact, current total — never stale --------
+    //
+    // GRA-59 QA fixup: the original design decided whether to report on its
+    // own, per violation (first a count-based cap, `count == 1 || count % 50
+    // == 0`; then an elapsed-time check at the moment each violation
+    // arrived). Both share the same defect QA's repro exposed: a site that
+    // stops violating stops getting calls into that decision at all, so six
+    // taps on the sample produced one event (count 1) and then silence,
+    // forever, in a live session that never calls stop(). The fix replaces
+    // that decision with a real scheduler (StrictModeCollector.flushPending,
+    // ticking on its own) — these tests call it directly to simulate a tick
+    // without a real timer, and assert the *exact* final count rather than
+    // an arbitrary schedule of checkpoints.
 
     @Test
-    fun `two hundred violations at one call site produce far fewer than two hundred events`() {
+    fun `QA repro - six violations at one site eventually report the exact count, not one`() {
         val ring = EventRing()
         val c = collector(ring)
+        repeat(6) {
+            val violation = DiskWriteViolation().apply {
+                stackTrace = arrayOf(frame("com.example.app.CartViewModel", "triggerStrictModeViolation", 150))
+            }
+            c.onViolation(violation, fromThreadPolicy = true)
+        }
+        // The six taps happen "at once" on a frozen clock, so only the first
+        // is reported live; stop()'s flush is what QA's repro was missing —
+        // without it, the site really would go silent after count 1 forever.
+        c.stop()
+
+        assertEquals(listOf(1, 6), strictEvents(ring).map { it.field("count").content.toInt() })
+    }
+
+    @Test
+    fun `seventy-three violations at one site eventually report the exact count, not fifty`() {
+        val ring = EventRing()
+        val c = collector(ring)
+        repeat(73) {
+            val violation = DiskWriteViolation().apply {
+                stackTrace = arrayOf(frame("com.example.app.CartAdapter", "onBindViewHolder", 88))
+            }
+            c.onViolation(violation, fromThreadPolicy = true)
+        }
+        c.stop()
+
+        assertEquals(listOf(1, 73), strictEvents(ring).map { it.field("count").content.toInt() })
+    }
+
+    @Test
+    fun `two hundred violations at one call site still produce a handful of events, not two hundred`() {
+        val ring = EventRing()
+        val c = collector(ring) // frozen clock: nothing but the first hit can report during the burst itself
         repeat(200) {
             val violation = DiskWriteViolation().apply {
                 stackTrace = arrayOf(frame("com.example.app.CartAdapter", "onBindViewHolder", 88))
             }
             c.onViolation(violation, fromThreadPolicy = true)
         }
+        c.stop() // the burst is still "recent" when it ends; the flush is what carries the exact total
 
-        val counts = strictEvents(ring).map { it.field("count").content.toInt() }
-        // Emitted at 1 (first sighting) and every 50th occurrence after that —
-        // see StrictModeCollector.onViolation's own comment for why a count-based
-        // cap rather than a wall-clock interval. 5 events, not 200, and the last
-        // one's count is the true, exact total: nothing was ever dropped, only
-        // the *reporting* of it was throttled.
-        assertEquals(listOf(1, 50, 100, 150, 200), counts)
+        // Two events for two hundred violations — not one per violation, and
+        // the last one is the true, exact total: nothing was ever dropped,
+        // only the *reporting* of it was throttled while the burst was live.
+        assertEquals(listOf(1, 200), strictEvents(ring).map { it.field("count").content.toInt() })
+    }
+
+    @Test
+    fun `a scheduled tick reports the exact count live — no stop() needed`() {
+        // The heart of the QA fixup: a session that never calls stop() — the
+        // ordinary case, since an app keeps running — still gets an accurate
+        // count while it is still live, because flushPending() is on its own
+        // schedule (production: a real ScheduledExecutorService tick, every
+        // UPDATE_INTERVAL_MS) rather than being triggered by the next
+        // violation, which might never come.
+        val ring = EventRing()
+        val c = collector(ring)
+        val violation = DiskWriteViolation().apply {
+            stackTrace = arrayOf(frame("com.example.app.Foo", "bar", 1))
+        }
+
+        c.onViolation(violation, fromThreadPolicy = true) // count 1, reports immediately
+        repeat(4) {
+            c.onViolation(
+                DiskWriteViolation().apply { stackTrace = arrayOf(frame("com.example.app.Foo", "bar", 1)) },
+                fromThreadPolicy = true,
+            )
+        } // counts 2..5, none reported yet — no flush has run
+
+        c.flushPending() // simulates one scheduled tick
+
+        assertEquals(
+            "a scheduled tick reports the exact count without the session ever stopping",
+            listOf(1, 5),
+            strictEvents(ring).map { it.field("count").content.toInt() },
+        )
+
+        // A second tick with nothing new pending is a no-op, not a repeat report.
+        c.flushPending()
+        assertEquals(listOf(1, 5), strictEvents(ring).map { it.field("count").content.toInt() })
     }
 
     @Test
@@ -183,11 +272,11 @@ class StrictModeTest {
 
         c.onViolation(violationAt("a"), fromThreadPolicy = true)
         c.onViolation(violationAt("b"), fromThreadPolicy = true)
-        c.onViolation(violationAt("a"), fromThreadPolicy = true) // 2nd at "a" — below the update cap, no new event
+        c.onViolation(violationAt("a"), fromThreadPolicy = true) // 2nd at "a" — no flush has run, no new event yet
 
         val sites = strictEvents(ring).map { it.field("site").content }
         assertEquals(
-            "one event per site's first sighting; a site's own repeat before the update cap must not spam a second site's count",
+            "one event per site's first sighting; a site's own repeat before the next flush must not spam a second site's count",
             listOf("com.example.app.Foo.a:1", "com.example.app.Foo.b:1"),
             sites,
         )
@@ -222,7 +311,7 @@ class StrictModeTest {
         // this test is actually about.
         val before = StrictMode.getThreadPolicy().toString()
 
-        val ok = c.install(app)
+        val ok = c.install()
 
         assertFalse("no penaltyListener exists below API 28 — no logcat-scraping fallback", ok)
         assertFalse(c.installed)
@@ -244,7 +333,7 @@ class StrictModeTest {
         val threadBefore = StrictMode.getThreadPolicy().toString()
         val vmBefore = StrictMode.getVmPolicy().toString()
 
-        assertTrue(c.install(app))
+        assertTrue(c.install())
         assertTrue(c.installed)
 
         c.stop()
@@ -261,7 +350,7 @@ class StrictModeTest {
         c.stop()
         c.stop()
 
-        assertTrue(c.install(app))
+        assertTrue(c.install())
         c.stop()
         c.stop()
     }
