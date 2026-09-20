@@ -49,6 +49,7 @@ them they cover:
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device — and, now, why it died last time |
 | `porthole_connect` | the parts of getting connected `porthole_status` cannot do on its own: install/version checks, launching, restarting |
+| `setup` | which integrations are wired, which are only on the classpath, and the `socket`/`strictmode` entries beside them |
 | `screenshot` | the device screen right now, as an image — scaled, re-encoded, and refused rather than faked when a FLAG_SECURE window is on top |
 
 Everything is debug-only. Release builds link a no-op artifact with identical
@@ -526,6 +527,18 @@ The short answer to "is it just the plugin and a dependency": nearly.
 
 View models, the semantics tree, frames, the main thread, memory, WorkManager,
 logs and device context all need nothing at all.
+
+## Checking what's wired
+
+Forgetting one of the lines above looks exactly like an app that never made
+the call — an empty lane either way. `setup`, the MCP tool, answers "did I
+forget one" directly: every integration the runtime can see, on the
+classpath or not, instrumented or not, plus the `socket` entry (did the
+loopback socket bind) and the [StrictMode](#strictmode) entry — the same
+report the timeline UI's own setup panel already shows, on `GET
+/api/setup`, now on the MCP surface too. `porthole_status` already names it
+for you whenever an integration looks present but unwired, so reaching for
+`setup` yourself is usually just to see the whole report.
 
 ## What the timeline shows
 

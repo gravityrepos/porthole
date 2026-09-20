@@ -15,6 +15,16 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- New `setup` MCP tool: every entry the runtime's `setup` report carries —
+  which integration is instrumented, which is only on the classpath, and
+  the `socket`/`strictmode` entries alongside them — was previously
+  reachable only through the timeline UI's `GET /api/setup` or the raw
+  socket, so GRA-59's "the setup report says whether StrictMode is
+  installed" was true on the wire and invisible to an agent. `setup` now
+  exposes the identical data on the MCP surface. `porthole_status` also
+  now names `setup` in its own summary whenever an integration looks
+  present but unwired, so the first call an agent makes already points at
+  it (GRA-228).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`
