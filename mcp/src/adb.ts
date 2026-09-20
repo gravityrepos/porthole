@@ -326,6 +326,19 @@ export function findAdb(): string {
 export interface AdbResult {
   ok: boolean;
   output: string;
+  /**
+   * GRA-233 QA F15: `output` above is stdout and stderr merged (and, on a
+   * timeout or a spawn failure, synthesised text that was never on either
+   * real stream) — fine for an error message a human reads, wrong for code
+   * that has to tell adb's own chatter apart from the command's actual
+   * answer. `adb`'s one-time "daemon not running; starting now at
+   * tcp:5037" notice lands on stderr and contains a digit, which a caller
+   * parsing `output` for a pid can misread as one. Populated only where a
+   * real child process actually ran and its stdout was captured (`runAdb`,
+   * `runAdbAsync`'s `close` handler); undefined on a spawn error or a
+   * timeout, where there is no real stdout to report.
+   */
+  stdout?: string;
 }
 
 /**
@@ -357,7 +370,8 @@ export function runAdb(args: string[], serial?: string): AdbResult {
     };
   }
 
-  const output = ((result.stdout || "") + (result.stderr || "")).trim();
+  const rawStdout = result.stdout || "";
+  const output = (rawStdout + (result.stderr || "")).trim();
   if (result.status !== 0) {
     return {
       ok: false,
@@ -365,9 +379,10 @@ export function runAdb(args: string[], serial?: string): AdbResult {
         output.includes("more than one") && !serial
           ? `${output}\nStart the UI with --serial <id>; 'adb devices' lists them.`
           : output || `adb exited ${result.status}`,
+      stdout: rawStdout,
     };
   }
-  return { ok: true, output };
+  return { ok: true, output, stdout: rawStdout };
 }
 
 /**
@@ -528,10 +543,11 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
             output.includes("more than one") && !serial
               ? `${output}\nStart the UI with --serial <id>; 'adb devices' lists them.`
               : output || `adb exited ${code}`,
+          stdout,
         });
         return;
       }
-      finish({ ok: true, output });
+      finish({ ok: true, output, stdout });
     });
   });
 }
@@ -616,29 +632,23 @@ export function parseAmStart(output: string): AmStartInfo {
   };
 }
 
-/** `adb shell pidof <packageName>` reads as running the same way `devices.ts`'s `checkInstalledApp` already does — any digit in its output. */
-async function isProcessUp(packageName: string, options: RunAdbAsyncOptions): Promise<boolean> {
-  const result = await runAdbAsync(["shell", "pidof", packageName], options);
-  return result.ok && /\d/.test(result.output.trim());
-}
-
 /**
- * Polls `pidof` until `packageName` is up or `timeoutMs` runs out — the one
- * honest signal a launch actually worked, since GRA-233 exists precisely
- * because the launcher's own stdout is not one on every API level.
+ * `adb shell pidof <packageName>`'s pid, read from stdout only — GRA-233 QA
+ * F15: `result.output` (used here up to that finding) is stdout and stderr
+ * merged, and adb's own one-time "daemon not running; starting now at
+ * tcp:5037" notice, which lands on stderr, contains a digit. A pidof that
+ * genuinely found nothing (empty stdout, exit 0 on some toybox builds) but
+ * happened to trigger that notice used to read as "up" purely off the port
+ * number in adb's own chatter. `stdout` is real, captured child-process
+ * output — never adb's synthesised text for a spawn error or a timeout — so
+ * this only ever matches a pid pidof itself actually printed, anchored to
+ * the start of a line so nothing from later on that same line can smuggle a
+ * digit in ahead of it either.
  */
-async function waitForProcessUp(
-  packageName: string,
-  options: RunAdbAsyncOptions,
-  timeoutMs = LAUNCH_PID_POLL_TIMEOUT_MS,
-  intervalMs = LAUNCH_PID_POLL_INTERVAL_MS,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await isProcessUp(packageName, options)) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
-  }
+async function currentPidOf(packageName: string, options: RunAdbAsyncOptions): Promise<string | null> {
+  const result = await runAdbAsync(["shell", "pidof", packageName], options);
+  if (!result.ok) return null;
+  return result.stdout?.match(/^\s*(\d+)/m)?.[1] ?? null;
 }
 
 export interface LaunchResult extends AdbResult {
@@ -655,14 +665,60 @@ export interface LaunchOptions extends RunAdbAsyncOptions {
   pidPollIntervalMs?: number;
 }
 
+interface PidOutcome {
+  /** True once a pid is seen that is not `beforePid` — a genuinely new (or newly-appeared) process. */
+  up: boolean;
+  /** True when the poll gave up with the *same* pid it started with still answering — force-stop never actually ended it. */
+  samePidSurvived: boolean;
+  /** The pid last observed, whichever branch above is true — for the "force-stop did not end pid N" message. */
+  lastPid: string | null;
+}
+
+/**
+ * Polls `pidof` until `packageName` answers with a pid other than
+ * `beforePid`, or `timeoutMs` runs out — the one honest signal a launch
+ * actually worked, since GRA-233 exists precisely because the launcher's
+ * own stdout is not one on every API level.
+ *
+ * GRA-233 QA F14: `beforePid` is what turns this from "is *a* process up"
+ * into "did *this* restart actually happen". `restartAppAsync` force-stops
+ * before it launches, but a force-stop that silently no-ops (adb reports
+ * exit 0, nothing torn down — seen against a real device) leaves the old
+ * process answering `pidof` the whole time; judging success by "some pid
+ * answers" read that surviving old process as a successful restart.
+ * `launchAppAsync` has no old process to distinguish from (it only ever
+ * runs once `checkInstalledApp` has already confirmed nothing is running),
+ * so it passes `null` and this degrades to exactly the old "any pid at all"
+ * check.
+ */
+async function waitForPidChange(
+  packageName: string,
+  options: RunAdbAsyncOptions,
+  beforePid: string | null,
+  timeoutMs = LAUNCH_PID_POLL_TIMEOUT_MS,
+  intervalMs = LAUNCH_PID_POLL_INTERVAL_MS,
+): Promise<PidOutcome> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const pid = await currentPidOf(packageName, options);
+    if (pid && pid !== beforePid) return { up: true, samePidSurvived: false, lastPid: pid };
+    if (Date.now() >= deadline) {
+      return { up: false, samePidSurvived: pid !== null && pid === beforePid, lastPid: pid };
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+}
+
 /**
  * The actual "make `packageName` come up" step, shared by `restartAppAsync`
  * (after its own force-stop) and `launchAppAsync` (which has none) — the one
  * place this ticket's fix lives, so the two callers, and the timeline UI's
  * restart button behind `restartAppAsync`, cannot drift apart on how success
- * is judged.
+ * is judged. `beforePid` is `restartAppAsync`'s pid-before-force-stop
+ * (GRA-233 QA F14); `launchAppAsync` always passes `null`, since it has no
+ * "before" process to protect against.
  */
-async function launchApp(packageName: string, options: LaunchOptions): Promise<LaunchResult> {
+async function launchApp(packageName: string, options: LaunchOptions, beforePid: string | null = null): Promise<LaunchResult> {
   const activity = await resolveLauncherActivity(packageName, options);
 
   let launchOutput: AdbResult;
@@ -687,19 +743,31 @@ async function launchApp(packageName: string, options: LaunchOptions): Promise<L
     );
   }
 
-  // The one check that matters: is the process actually up, never mind what
-  // the launcher printed. A launch call that itself failed to run (adb
+  // The one check that matters: is a genuinely new process up, never mind
+  // what the launcher printed. A launch call that itself failed to run (adb
   // error) still gets this poll — an unrelated process already running
   // under this package name, or a slow-but-successful launch whose adb
   // invocation merely timed out, are both real "yes" answers this would
   // otherwise miss.
-  const up = await waitForProcessUp(packageName, options, options.pidPollTimeoutMs, options.pidPollIntervalMs);
-  if (up) {
+  const outcome = await waitForPidChange(
+    packageName,
+    options,
+    beforePid,
+    options.pidPollTimeoutMs,
+    options.pidPollIntervalMs,
+  );
+  if (outcome.up) {
     return { ok: true, output: `${packageName} is running`, launchState, totalTimeMs };
   }
   return {
     ok: false,
-    output: launchOutput.output || `No launcher activity found for ${packageName}.`,
+    // GRA-233 QA F14: named distinctly from "never came up at all" — the
+    // old process answering the whole time is a different failure (the
+    // force-stop itself never worked) from a launch that genuinely never
+    // landed, and the two point at different fixes.
+    output: outcome.samePidSurvived
+      ? `force-stop did not end pid ${outcome.lastPid}`
+      : launchOutput.output || `No launcher activity found for ${packageName}.`,
     launchState,
     totalTimeMs,
   };
@@ -720,9 +788,12 @@ async function launchApp(packageName: string, options: LaunchOptions): Promise<L
  * half-dead process that no longer answers the socket.
  */
 export async function restartAppAsync(packageName: string, options: LaunchOptions = {}): Promise<LaunchResult> {
+  // GRA-233 QA F14: captured before force-stop runs at all, so [launchApp]
+  // can tell "a fresh process came up" apart from "the old one never left".
+  const beforePid = await currentPidOf(packageName, options);
   const stopped = await runAdbAsync(["shell", "am", "force-stop", packageName], options);
   if (!stopped.ok) return { ...stopped, launchState: null, totalTimeMs: null };
-  return launchApp(packageName, options);
+  return launchApp(packageName, options, beforePid);
 }
 
 /**

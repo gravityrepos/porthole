@@ -674,12 +674,26 @@ describe("findTraceProcessor", () => {
  */
 describe("checkTracePath / nearestTraceCandidate (GRA-234)", () => {
   let dir: string;
+  const savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "porthole-traces-"));
+    // GRA-234 QA F17: nearestTraceCandidate now falls back to
+    // `<projectRoot>/.porthole/traces` when the requested path's own
+    // directory has nothing to offer. Pinning PORTHOLE_PROJECT_ROOT to this
+    // test's own throwaway `dir` (whose own `.porthole/traces` subdirectory
+    // is never created below, so the fallback search finds nothing there
+    // either) keeps every "no candidate"/"this exact candidate" assertion
+    // in this file deterministic — without it, the fallback would read
+    // *this developer's own* `.porthole/traces` (this repo's own real
+    // capture output, gitignored but often present in a working checkout),
+    // silently flipping any of them.
+    process.env.PORTHOLE_PROJECT_ROOT = dir;
   });
 
   afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+    else process.env.PORTHOLE_PROJECT_ROOT = savedProjectRoot;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -776,6 +790,63 @@ describe("checkTracePath / nearestTraceCandidate (GRA-234)", () => {
     } finally {
       chmodSync(file, 0o644);
     }
+  });
+
+  it("GRA-234 QA F17: falls back to <projectRoot>/.porthole/traces when the requested path's own directory has nothing to offer", () => {
+    // The requested path's own directory (a throwaway temp dir, separate
+    // from `dir`/PORTHOLE_PROJECT_ROOT) is empty — nothing for the direct
+    // search to find at all.
+    const requestedDir = mkdtempSync(join(tmpdir(), "porthole-elsewhere-"));
+    try {
+      const tracesDir = join(dir, ".porthole", "traces");
+      mkdirSync(tracesDir, { recursive: true });
+      const sibling = join(tracesDir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+      writeFileSync(sibling, "");
+      // A decoy that should lose the prefix match, same as the direct-search test.
+      writeFileSync(join(tracesDir, "porthole-ring-auto-2026-09-01T00-00-00.pftrace"), "");
+
+      const missing = join(requestedDir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+      const result = checkTracePath(missing);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(`Did you mean ${sibling}`);
+    } finally {
+      rmSync(requestedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("GRA-234 QA F17: the direct search still wins when the requested directory itself has a candidate — no fallback needed", () => {
+    const tracesDir = join(dir, ".porthole", "traces");
+    mkdirSync(tracesDir, { recursive: true });
+    writeFileSync(join(tracesDir, "porthole-ring-2026-09-19T00-00-00.pftrace"), "");
+
+    const localSibling = join(dir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+    writeFileSync(localSibling, "");
+    const missing = join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`Did you mean ${localSibling}`);
+  });
+
+  it("GRA-234 QA F18: the basename-prefix match is case-insensitive, same as the .pftrace filter beside it", async () => {
+    // A mutant that compares case-sensitively scores this candidate 0 (the
+    // very first character disagrees) — same as the totally-unrelated
+    // decoy below, so both would fall through to the mtime tiebreak
+    // together. Writing the decoy AFTER (so it is the newer file) means a
+    // case-sensitive mutant picks the decoy, not this candidate, making the
+    // two outcomes actually distinguishable rather than both landing on
+    // the sole file present.
+    const upperCaseSibling = join(dir, "PORTHOLE-ring-2026-09-19T11-59-00.PFTRACE");
+    writeFileSync(upperCaseSibling, "");
+    await new Promise((r) => setTimeout(r, 20));
+    const decoy = join(dir, "zzz-totally-unrelated.pftrace");
+    writeFileSync(decoy, "");
+
+    const missing = join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`Did you mean ${upperCaseSibling}`);
+    expect(result.message).not.toContain(decoy);
   });
 });
 

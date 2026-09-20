@@ -1459,6 +1459,23 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
   );
 
+  /**
+   * GRA-233 QA F16: `am start -W`'s `launchState`/`totalTimeMs` used to live
+   * only in `porthole_connect`'s payload — invisible at GRA-68's new default
+   * `detail: "summary"`, which returns no payload at all. Spliced into the
+   * summary sentence itself instead, so it is there whether or not a caller
+   * asked for `detail: "normal"`/`"full"`. `" (cold, 812 ms)"` when both
+   * fields came back (the resolved-activity path), `" (cold)"`/`" (812 ms)"`
+   * with only one, `""` when neither did (the monkey fallback, or a call
+   * that never reached `am start -W` at all) — never a parenthesised gap.
+   */
+  function launchDetail(result: { launchState: string | null; totalTimeMs: number | null }): string {
+    const parts: string[] = [];
+    if (result.launchState) parts.push(result.launchState.toLowerCase());
+    if (result.totalTimeMs !== null) parts.push(`${result.totalTimeMs} ms`);
+    return parts.length ? ` (${parts.join(", ")})` : "";
+  }
+
   server.registerTool(
     "porthole_connect",
     {
@@ -1620,8 +1637,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // can use them without a second round trip.
         return result.ok
           ? ok(
-              `Restarted ${targetPackage} on ${chosenSerial}. Expect a new session on the next ` +
-                "porthole_status call.",
+              `Restarted ${targetPackage} on ${chosenSerial}${launchDetail(result)}. Expect a new session ` +
+                "on the next porthole_status call.",
               {
                 serial: chosenSerial,
                 forward,
@@ -1650,15 +1667,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             serial: chosenSerial,
           });
           return result.ok
-            ? ok(`Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ${chosenSerial}.`, {
-                serial: chosenSerial,
-                forward,
-                packageName: targetPackage,
-                ...info,
-                launched: true,
-                launchState: result.launchState,
-                totalTimeMs: result.totalTimeMs,
-              })
+            ? ok(
+                `Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ` +
+                  `${chosenSerial}${launchDetail(result)}.`,
+                {
+                  serial: chosenSerial,
+                  forward,
+                  packageName: targetPackage,
+                  ...info,
+                  launched: true,
+                  launchState: result.launchState,
+                  totalTimeMs: result.totalTimeMs,
+                },
+              )
             : ok(`Could not launch ${targetPackage}: ${result.output}`, {
                 serial: chosenSerial,
                 forward,

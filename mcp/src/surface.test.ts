@@ -1636,7 +1636,17 @@ describe("porthole_connect", () => {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
       },
-      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { stdout: "12345\n" },
+      // GRA-233 QA F14: sequenced — checkInstalledApp's own "is it running"
+      // check, then restartAppAsync's pid-before-force-stop capture (same
+      // pid, 12345, is fine for both of those), then the post-relaunch poll
+      // reading a genuinely DIFFERENT pid once the restart has actually
+      // landed. A single fixed pid here would read as the old process
+      // surviving force-stop, not as a successful restart.
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { stdout: "12345\n" },
+        { stdout: "12345\n" },
+        { stdout: "67890\n" },
+      ],
       [fakeAdbArgsKey(["-s", "A1", "shell", "am", "force-stop", "com.example.shop"])]: {},
       [fakeAdbArgsKey([
         "-s",
@@ -1667,6 +1677,56 @@ describe("porthole_connect", () => {
       const monkeyIndex = tags.findIndex((c) => c.includes("monkey"));
       expect(stopIndex).toBeGreaterThanOrEqual(0);
       expect(monkeyIndex).toBeGreaterThan(stopIndex);
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("GRA-233 QA F16: launchState/totalTimeMs are visible in the summary sentence itself — matters now that detail: \"summary\" (GRA-68's default) returns no payload at all", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
+      },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { stdout: "12345\n" },
+        { stdout: "12345\n" },
+        { stdout: "67890\n" },
+      ],
+      [fakeAdbArgsKey(["-s", "A1", "shell", "am", "force-stop", "com.example.shop"])]: {},
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "shell",
+        "cmd",
+        "package",
+        "resolve-activity",
+        "--brief",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "com.example.shop",
+      ])]: { stdout: "com.example.shop/.MainActivity\n" },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "am", "start", "-W", "-n", "com.example.shop/.MainActivity"])]: {
+        stdout:
+          "Starting: Intent { cmp=com.example.shop/.MainActivity }\nStatus: ok\nLaunchState: COLD\n" +
+          "Activity: com.example.shop/.MainActivity\nTotalTime: 812\nComplete\n",
+      },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      // No `detail` argument at all — GRA-68's default, "summary", which
+      // returns no JSON payload block whatsoever. If launchState/totalTimeMs
+      // only lived in the payload, this call would have no way to see them.
+      const result = await rig.client.callTool("porthole_connect", {
+        packageName: "com.example.shop",
+        restart: true,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("Restarted com.example.shop on A1 (cold, 812 ms).");
+      // The resolve-activity path ran, not the monkey fallback.
+      expect(adb.calls().some((c) => c.includes("monkey"))).toBe(false);
     } finally {
       await closeAll(rig, adb);
     }

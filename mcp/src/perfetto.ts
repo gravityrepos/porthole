@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants, existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
+import { resolveProjectRoot } from "./adb.js";
 import type { Finding } from "./trace.js";
 
 /**
@@ -1454,21 +1455,23 @@ function candidateSuffix(tracePath: string): string {
 }
 
 /**
- * The closest thing to `tracePath` actually sitting in its own directory —
- * typically `.porthole/traces`, where both `capture_system_trace` and
- * `system_trace_snapshot` write. Prefers a file whose basename shares the
- * longest leading run of characters with the one asked for, which is enough
- * to catch a stale or mistyped timestamp in either tool's own naming family
- * (`porthole-<stamp>.pftrace`, `porthole-ring-<stamp>.pftrace`,
- * `porthole-ring-auto-<stamp>.pftrace`) without matching two files from
- * different, unrelated captures just because both end in `.pftrace`. With
+ * The closest `.pftrace` to `target` (a basename, not a path) sitting
+ * directly in `dir`. Prefers a file whose basename shares the longest
+ * leading run of characters with the one asked for, which is enough to
+ * catch a stale or mistyped timestamp in either `capture_system_trace`'s or
+ * `system_trace_snapshot`'s own naming family (`porthole-<stamp>.pftrace`,
+ * `porthole-ring-<stamp>.pftrace`, `porthole-ring-auto-<stamp>.pftrace`)
+ * without matching two files from different, unrelated captures just
+ * because both end in `.pftrace`. GRA-234 QA F18: the comparison is
+ * case-insensitive, same as the `.pftrace` filter just below it — a
+ * mismatched case on either side used to leave a same-prefix candidate
+ * unscored and fall all the way through to the mtime tiebreak instead. With
  * nothing sharing any prefix at all, falls back to the newest `.pftrace`
  * file in the directory — still a more useful answer than naming nothing.
- * Null when the directory cannot even be listed, or holds no `.pftrace`
- * file to suggest.
+ * Null when `dir` cannot even be listed, or holds no `.pftrace` file to
+ * suggest.
  */
-export function nearestTraceCandidate(tracePath: string): string | null {
-  const dir = dirname(resolve(tracePath));
+function nearestInDir(dir: string, target: string): string | null {
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -1478,10 +1481,10 @@ export function nearestTraceCandidate(tracePath: string): string | null {
   const candidates = entries.filter((name) => name.toLowerCase().endsWith(".pftrace"));
   if (candidates.length === 0) return null;
 
-  const target = basename(tracePath);
+  const targetLower = target.toLowerCase();
   let best: { name: string; score: number } | null = null;
   for (const name of candidates) {
-    const score = commonPrefixLength(target, name);
+    const score = commonPrefixLength(targetLower, name.toLowerCase());
     if (score > 0 && (!best || score > best.score)) best = { name, score };
   }
   if (best) return join(dir, best.name);
@@ -1500,6 +1503,29 @@ export function nearestTraceCandidate(tracePath: string): string | null {
   });
   withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return join(dir, withMtime[0].name);
+}
+
+/**
+ * The closest thing to `tracePath` worth suggesting — [nearestInDir] over
+ * `tracePath`'s own directory first, and (GRA-234 QA F17) `.porthole/traces`
+ * under the project root when that directory has nothing to offer. The
+ * ticket's own words are "under `.porthole/traces/`", not "wherever the
+ * caller's path happened to point": a bare filename with no directory of
+ * its own, or an `outputDir` that is not actually where captures land,
+ * would otherwise search the wrong place (or `process.cwd()` itself) and
+ * miss two real candidates sitting in the project's default trace
+ * directory. Skips the second search entirely when the two directories are
+ * already the same, rather than scanning it twice for the same nothing.
+ */
+export function nearestTraceCandidate(tracePath: string): string | null {
+  const target = basename(tracePath);
+  const requestedDir = dirname(resolve(tracePath));
+  const direct = nearestInDir(requestedDir, target);
+  if (direct) return direct;
+
+  const fallbackDir = resolve(join(resolveProjectRoot().directory, ".porthole", "traces"));
+  if (fallbackDir === requestedDir) return null;
+  return nearestInDir(fallbackDir, target);
 }
 
 function commonPrefixLength(a: string, b: string): number {
