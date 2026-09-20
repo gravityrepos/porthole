@@ -214,6 +214,16 @@ class PortholeSocketServerBindTest {
                 "expected the abstract socket named, not a TCP port, got: ${listeningLog.msg}",
                 listeningLog.msg.contains("localabstract:porthole.$packageName"),
             )
+            // GRA-199 QA (F5): the winner names itself too, so logcat -
+            // which interleaves every process of a multi-process app under
+            // the same "Porthole" tag - can actually tell which process
+            // this line belongs to. No real /proc/self/cmdline on this host
+            // JVM, so the fallback (packageName) is what a genuine
+            // single-process app's device-side line would also show.
+            assertTrue(
+                "expected the winning process named, got: ${listeningLog.msg}",
+                listeningLog.msg.contains(packageName),
+            )
         } finally {
             server.stop()
         }
@@ -265,6 +275,18 @@ class PortholeSocketServerBindTest {
         assertFalse(
             "a same-package collision is not fixed by moving the host port, so the old remedy must not appear: $failure",
             failure.contains("port.set"),
+        )
+        // GRA-199 QA (F5): the losing process names itself and the actual,
+        // supported one-line fix - not merely the cause. PortholeInitializer
+        // is the thing to remove; Porthole.install(application) is the real,
+        // public call site to reach for instead.
+        assertTrue(
+            "expected the one-line remedy naming PortholeInitializer, got: $failure",
+            failure.contains("PortholeInitializer"),
+        )
+        assertTrue(
+            "expected the remedy to name the real public call site, got: $failure",
+            failure.contains("Porthole.install"),
         )
         assertEquals(5, server.bindAttempts)
 

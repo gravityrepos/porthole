@@ -130,6 +130,47 @@ internal data class Hello(
 internal const val PROTOCOL_VERSION = 1
 
 // ---------------------------------------------------------------------------
+// GRA-199 QA (F2): the abstract socket's name, in one place
+// ---------------------------------------------------------------------------
+
+/**
+ * `porthole.` — the prefix on the abstract-namespace socket
+ * [PortholeSocketServer] binds by default, and on the `localabstract:`
+ * forward target the Gradle plugin (`PortholeTasks.kt`'s `forwardTarget`) and
+ * the MCP server (`mcp/src/devices.ts`'s `forwardTarget`) build to reach it.
+ *
+ * QA on GRA-199's first pass found six independent copies of this string —
+ * two inside [PortholeSocketServer] alone — and nothing that would catch one
+ * of them drifting a single character: a mismatched prefix or separator
+ * still produces a syntactically valid `adb forward`, one that connects to
+ * adb without error and simply never reaches the app, which is a much
+ * quieter failure than a bind that refuses outright. Runtime call sites
+ * ([PortholeSocketServer], [live.gravitylabs.porthole.Porthole]) now all go
+ * through [portholeSocketName] instead of rebuilding the string. The other
+ * two — `PortholeTasks.kt` in the `gradle-plugin` module and `devices.ts` in
+ * `mcp/` — cannot import this constant at all (neither module depends on
+ * `runtime`, deliberately: see `AndroidWiring.kt`'s own doc comment on why
+ * AGP is kept out of this module and, symmetrically, why this module is kept
+ * out of a plain Kotlin/TS build). Each keeps its own literal, and a
+ * source-text parity test in each of those two modules reads this constant
+ * back out of this file and asserts theirs matches — the same technique
+ * `device.test.ts`'s `PROTOCOL_VERSION` check and `eventKinds.test.ts`
+ * already use for the same cross-module-drift problem.
+ */
+internal const val PORTHOLE_SOCKET_PREFIX = "porthole."
+
+/**
+ * The abstract socket's full name for [packageName] — [PORTHOLE_SOCKET_PREFIX]
+ * plus the package, unmodified. Not trimmed or otherwise sanitised: the
+ * package name is [android.content.Context.getPackageName], never user input
+ * at this layer, so there is nothing here to sanitise against — GRA-199 QA
+ * (F3) trims the applicationId earlier, at the point it is read off a Gradle
+ * `Property`/`process.env`, which is the actual source of the stray
+ * whitespace a hand-edited build script or `.mcp.json` could introduce.
+ */
+internal fun portholeSocketName(packageName: String): String = PORTHOLE_SOCKET_PREFIX + packageName
+
+// ---------------------------------------------------------------------------
 // event kinds
 // ---------------------------------------------------------------------------
 

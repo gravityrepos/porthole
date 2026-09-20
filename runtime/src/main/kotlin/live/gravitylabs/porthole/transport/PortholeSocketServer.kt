@@ -13,6 +13,7 @@ import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.PortholeJson
 import live.gravitylabs.porthole.protocol.Request
 import live.gravitylabs.porthole.protocol.Response
+import live.gravitylabs.porthole.protocol.portholeSocketName
 import live.gravitylabs.porthole.store.EventRing
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -114,7 +115,7 @@ internal class PortholeSocketServer(
         if (legacyTcp) {
             TcpBoundServer(ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK)))
         } else {
-            LocalBoundServer(LocalServerSocket("porthole.$packageName"))
+            LocalBoundServer(LocalServerSocket(portholeSocketName(packageName)))
         }
     },
 ) {
@@ -235,10 +236,28 @@ internal class PortholeSocketServer(
      * line here; [legacyTcp] never calls this, and [bindOnce] builds its own
      * copy of the same string for the real bind.
      */
-    private val socketName = "porthole.$packageName"
+    private val socketName = portholeSocketName(packageName)
 
     /** How the current [legacyTcp]/[port] combination reads in a log line. */
     private val bindDescription = if (legacyTcp) "$LOOPBACK:$port" else "localabstract:$socketName"
+
+    /**
+     * GRA-199 QA (F5): this process's own name, e.g. `com.example.shop` or
+     * `com.example.shop:work` for a non-default process — named in both the
+     * winning and the losing bind's log line so logcat, which interleaves
+     * every process's output under the same "Porthole" tag, can actually
+     * say which process is which. Read straight from `/proc/self/cmdline`
+     * rather than `Application.getProcessName()` (API 28+ only, and this
+     * class deliberately has no `Context`/`Application` — see [packageName]'s
+     * own KDoc for why it stays constructible from a plain unit test).
+     * `/proc/self/cmdline` has no procfs equivalent on the host JVM this
+     * class is tested from (macOS/Linux-without-procfs), so [runCatching]
+     * falls back to [packageName] there — a real Android device always has
+     * it, so the fallback is a JVM-test-only concern, not a device-side one.
+     */
+    private val currentProcessName: String = runCatching {
+        java.io.File("/proc/self/cmdline").readText().takeWhile { it > ' ' }.ifEmpty { packageName }
+    }.getOrDefault(packageName)
 
     private fun bindWithRetry(): BoundServer? {
         var lastError: Exception? = null
@@ -251,10 +270,18 @@ internal class PortholeSocketServer(
                 Setup.recordSocketBind(listening = true, failure = null, attempts = attempt)
                 Log.i(
                     TAG,
+                    // GRA-199 QA (F5): names the winning process, not just the
+                    // package — an app with more than one process (WorkManager's
+                    // own default process, a `:remote` service, ...) has every
+                    // process racing for the same package-keyed socket, and
+                    // logcat interleaves all of their tags under the same
+                    // "Porthole" name. Without the process name here, the winner's
+                    // own success line looks identical from every process, and
+                    // there is nothing to grep for to tell them apart.
                     if (attempt == 1) {
-                        "listening on $bindDescription"
+                        "listening on $bindDescription ($currentProcessName won the bind)"
                     } else {
-                        "listening on $bindDescription after $attempt attempts"
+                        "listening on $bindDescription after $attempt attempts ($currentProcessName won the bind)"
                     },
                 )
                 return socket
@@ -301,8 +328,28 @@ internal class PortholeSocketServer(
             // instance of THIS SAME app (two processes, or a reinstall whose
             // old process has not fully released the name) still holding it
             // once every retry above is exhausted.
+            //
+            // GRA-199 QA (F5): names this (losing) process and the one-line
+            // remedy for the actual multi-process case, rather than only the
+            // cause. PortholeInitializer installs in every process by default
+            // (androidx.startup runs per-process, automatically) — the first
+            // process to start wins this socket, every other process's own
+            // install is left with no working socket at all, silently, and
+            // this is the only log line that says so. The fix is real, not
+            // aspirational: PortholeInitializer's own KDoc already documents
+            // the manifest snippet to remove the automatic install, and
+            // Porthole.install(app) is public, so calling it by hand from
+            // only the one process that should carry it is something this
+            // README/API already supports (see README's own multi-process
+            // note) — this message is what tells someone that is the fix
+            // they need, instead of leaving them to find it by grepping the
+            // source.
             "could not bind $bindDescription for $packageName after $bindAttempts attempt(s) " +
-                "($reason: ${e.message}); another process of this same app still holds it"
+                "($reason: ${e.message}); this process ($currentProcessName) lost the race for " +
+                "$packageName's one socket to another process of the same app that started first; " +
+                "Porthole instruments one process per app — if $currentProcessName should be the one " +
+                "instrumented, remove the androidx-startup PortholeInitializer entry (see its own KDoc) " +
+                "and call Porthole.install(application) by hand from that process only"
         }
         listening = false
         listeningFailure = message
@@ -517,9 +564,31 @@ internal class LocalBoundServer(private val delegate: LocalServerSocket) : Bound
 }
 
 internal class LocalBoundClient(private val socket: LocalSocket) : BoundClient {
+    /**
+     * GRA-199 QA (F4): [socket.isConnected][LocalSocket.isConnected] is not
+     * this class's own connection state — it latches `true` the moment
+     * `accept()` hands over the socket and Android's own implementation
+     * never clears it back to `false` on [close], unlike
+     * [java.net.Socket.isClosed], which [TcpBoundClient] reads directly for
+     * exactly that reason. Reading `!socket.isConnected` here made
+     * [isClosed] permanently `false` after a real close on the abstract
+     * path, so `ClientConnection.serve()`'s `while (running && !socket.isClosed)`
+     * guard was dead weight: it could never itself end the loop, which
+     * depended entirely on `reader.readLine()` returning null or throwing.
+     * That still happens reliably once `close()` actually closes the
+     * underlying streams, so this was not a hang in practice, but the guard
+     * existed to make an already-closed connection's *next* loop check exit
+     * before attempting another blocking read at all, and on this path it
+     * never could. Tracked by hand instead: this flag is the one source of
+     * truth for "did *we* close this", set before delegating.
+     */
+    @Volatile private var closedByUs = false
     override val input: InputStream get() = socket.inputStream
     override val output: OutputStream get() = socket.outputStream
-    override val isClosed: Boolean get() = !socket.isConnected
-    override fun close() = socket.close()
+    override val isClosed: Boolean get() = closedByUs
+    override fun close() {
+        closedByUs = true
+        socket.close()
+    }
     override fun disableNagle() {}
 }

@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { DeviceClient } from "./device.js";
 import {
   checkInstalledApp,
@@ -11,6 +12,7 @@ import {
   parseDevicesOutput,
   resolveSerial,
 } from "./devices.js";
+import { stripComments } from "./testing/stripComments.js";
 import { buildFakeAdb, fakeAdbArgsKey, type FakeAdb } from "./testing/fakeAdb.js";
 import { FakeDevice, waitUntil } from "./testing/harness.js";
 
@@ -203,6 +205,63 @@ describe("forwardTarget", () => {
   it("refuses a blank applicationId the same way as a missing one", () => {
     const result = forwardTarget(8677, "   ", false);
     expect(result.ok).toBe(false);
+  });
+
+  // -- GRA-199 QA (F3): trimmed, not just checked for blankness -----------
+
+  it("trims surrounding whitespace on applicationId before building the target", () => {
+    // Not merely "does not refuse" - the built target must be byte-for-byte
+    // identical to what an untouched value would produce, so this side's
+    // target agrees with PortholeTasks.kt's own forwardTarget (which now
+    // trims too, GRA-199 QA F3) for the same nominal id.
+    expect(forwardTarget(8677, "  com.example.shop  ", false)).toEqual({
+      ok: true,
+      target: "localabstract:porthole.com.example.shop",
+    });
+    expect(forwardTarget(8677, "\tcom.example.shop\n", false)).toEqual({
+      ok: true,
+      target: "localabstract:porthole.com.example.shop",
+    });
+  });
+
+  it("whitespace-only applicationId is the same refusal as a genuinely blank one", () => {
+    const result = forwardTarget(8677, "\t\n  ", false);
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-199 QA (F2): forwardTarget's abstract-socket prefix does not drift
+// against Protocol.kt's PORTHOLE_SOCKET_PREFIX, or against PortholeTasks.kt's
+// own copy of the same string. See PORTHOLE_SOCKET_PREFIX's own KDoc in
+// Protocol.kt for the full story; ForwardTargetParityTest.kt in gradle-plugin
+// carries the matching Kotlin-side half.
+// ---------------------------------------------------------------------------
+
+describe("forwardTarget's prefix agrees with Protocol.kt's PORTHOLE_SOCKET_PREFIX", () => {
+  it("localabstract:porthole. matches Protocol.kt's own constant", () => {
+    const kotlin = readFileSync(
+      new URL(
+        "../../runtime/src/main/kotlin/live/gravitylabs/porthole/protocol/Protocol.kt",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const matches = [
+      ...stripComments(kotlin).matchAll(/internal const val PORTHOLE_SOCKET_PREFIX\s*=\s*"([^"]*)"/g),
+    ];
+    expect(
+      matches.length,
+      matches.length === 0
+        ? "PORTHOLE_SOCKET_PREFIX declaration was not found in Protocol.kt in the expected shape"
+        : `found ${matches.length} things that look like a PORTHOLE_SOCKET_PREFIX declaration in ` +
+            "Protocol.kt outside comments -- this parser cannot tell which one is real, so it refuses to guess",
+    ).toBe(1);
+    const prefix = matches[0][1];
+    expect(prefix).toBe("porthole.");
+
+    const result = forwardTarget(8677, "com.example.shop", false);
+    expect(result).toEqual({ ok: true, target: `localabstract:${prefix}com.example.shop` });
   });
 });
 
