@@ -137,4 +137,34 @@ tasks.register<Sync>("apiDocs") {
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
 
     into(layout.projectDirectory.dir("../site/api"))
+
+    // GRA-129 item 5: /api/ is ~58 Dokka pages with no canonical, so a search
+    // engine sees near-duplicate content across module/package/class pages
+    // with nothing pointing back at the one URL worth ranking. Only the
+    // directory's own index gets it — the individual declaration pages are
+    // meant to be found by search within the reference, not indexed on
+    // their own. Done as a post-processing step here rather than by hand in
+    // site/api/index.html, because Sync overwrites that file from Dokka's
+    // output on every run and a hand edit would not survive the next one.
+    // Idempotent: re-running apiDocs does not duplicate the tag.
+    //
+    // The file reference is resolved here, at configuration time, rather than
+    // inside the action: touching `layout` from within doLast captures the
+    // build script itself, which the configuration cache refuses to serialize.
+    val apiIndexHtml = layout.projectDirectory.file("../site/api/index.html")
+    doLast {
+        val indexHtml = apiIndexHtml.asFile
+        if (indexHtml.exists()) {
+            val text = indexHtml.readText()
+            if (!text.contains("rel=\"canonical\"")) {
+                val marker = "<title>porthole</title>"
+                check(text.contains(marker)) {
+                    "apiDocs: expected Dokka's $marker in site/api/index.html to anchor the " +
+                        "canonical link — Dokka's generated head may have changed shape."
+                }
+                val canonicalTag = "<link rel=\"canonical\" href=\"https://porthole.gravitylabs.live/api/\">"
+                indexHtml.writeText(text.replaceFirst(marker, "$marker\n    $canonicalTag"))
+            }
+        }
+    }
 }

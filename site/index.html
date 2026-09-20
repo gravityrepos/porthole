@@ -5,19 +5,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Porthole — a window into your running app</title>
+    <title>Porthole — Android runtime introspection for AI coding agents</title>
     <meta
       name="description"
-      content="A debug-only window into a running Android app — for the developer watching it, and the coding agent fixing it."
+      content="Android debug library and MCP server reading recompositions, frames, main-thread stalls, and in-flight work, then a Perfetto trace. Apache-2.0."
     />
     <link rel="canonical" href="https://porthole.gravitylabs.live/" />
     <!-- Absolute, because Facebook's scraper does not resolve relative ones. -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://porthole.gravitylabs.live/" />
-    <meta property="og:title" content="Porthole — a window into your running app" />
+    <meta property="og:site_name" content="Porthole" />
+    <meta property="og:title" content="Porthole — Android runtime introspection for AI coding agents" />
     <meta
       property="og:description"
-      content="A debug-only window into a running Android app — for the developer watching it, and the coding agent fixing it."
+      content="Let your coding agent see what your running Android app is actually doing — recompositions, frames, stalls — instead of explaining it by hand."
     />
     <meta property="og:image" content="https://porthole.gravitylabs.live/og.png" />
     <meta property="og:image:width" content="2400" />
@@ -28,6 +29,7 @@
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#0d1117" />
+    <meta name="color-scheme" content="dark" />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13.2' fill='none' stroke='%235ec8b0' stroke-width='3.4'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%235ec8b0'/%3E%3C/svg%3E"
@@ -35,9 +37,58 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;600;700&display=swap"
       rel="stylesheet"
     />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Porthole",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Android",
+        "softwareVersion": "0.2.2",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "codeRepository": "https://github.com/gravityrepos/porthole",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Does it end up in my release APK?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The plugin puts the runtime on debug build types and a no-op artifact with the same public API on everything else. An API parity test fails the build if an integration ever ships without its no-op."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does it cost at runtime?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Per instrumented recomposition: a timestamp, a short backwards walk over the last ~32ms of state writes, an object into a ring, and a queue offer. Event fan-out happens on a writer thread, never on the thread that emitted."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does the device need to be rooted?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Everything goes over a standard adb port forward, and the socket binds to loopback only."
+            }
+          }
+        ]
+      }
+    </script>
     <style>
       /* No script runs on this page. Everything below is markup, so it renders
          the same from a file:// path, a sanitising preview, or a strict CSP as
@@ -316,7 +367,11 @@
         color: #0f1620;
         font-family: var(--mono);
         font-size: 13px;
-        font-weight: 600;
+        /* 500, not 600: the only other user of mono 600 was this one rule,
+           so trimming the font request to five faces (GRA-128) means
+           reusing the weight .btn already requests rather than keeping a
+           whole face alive for a link that is invisible until focused. */
+        font-weight: 500;
         padding: 10px 16px;
         border-radius: 8px;
         text-decoration: none;
@@ -738,7 +793,11 @@
         color: var(--muted);
       }
       .path-links a {
-        font-weight: 500;
+        /* 600, not 500: the only other user of Space Grotesk 500 was this
+           one rule, so trimming the font request to five faces (GRA-128)
+           means reusing the weight the headings already request rather than
+           keeping a whole face alive for one footer-ish link list. */
+        font-weight: 600;
       }
 
       /* lanes */
@@ -908,6 +967,45 @@
         text-wrap: pretty;
       }
 
+      /* status — GRA-131: what is true now, not what is coming. Device
+         coverage is not a metric this project tracks, so the block is
+         deliberately narrow — the current version, where to get it, and a
+         link to the README for what is and is not supported. A grid rather
+         than a single line so a later cell (if one is ever warranted) has
+         somewhere to go without a redesign. */
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+        gap: 10px 28px;
+      }
+      .status-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .status-label {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--teal);
+      }
+      .status-cell p {
+        margin: 0;
+        font-size: 12.5px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+      .status-cell code {
+        font-family: var(--mono);
+        font-size: 0.93em;
+        color: #cfd8e5;
+      }
+      .status-more {
+        margin: 12px 0 0;
+        font-size: 11.5px;
+        color: var(--dim);
+      }
 
       /* footer */
       .foot {
@@ -1345,9 +1443,16 @@ the main thread [observed].
     </section>
 
     <section id="faq">
-      <div class="wrap">
+      <!-- GRA-131: the FAQ used to carry five items plus a "next up" line;
+           trimmed to the three real first-minute objections, the other two
+           moved to links. That alone would not fit the #faq height budget
+           (under 500px at 1280x800, under 900px at 375px) against the
+           section's default 66px top/bottom wrap padding, so this one
+           section takes a tighter pad — same pattern #install already uses
+           for the same reason. -->
+      <div class="wrap" style="padding-top: 28px; padding-bottom: 28px">
         <div style="max-width: 68ch">
-          <div class="heading" style="margin-bottom: 20px">
+          <div class="heading" style="margin-bottom: 14px">
             <span class="eyebrow">FAQ</span>
             <h2>The usual objections</h2>
           </div>
@@ -1375,27 +1480,46 @@ the main thread [observed].
                 loopback only.
               </dd>
             </div>
-            <div class="faq-item">
-              <dt>Views, or only Compose?</dt>
-              <dd>
-                Frames, main thread, navigation, http, db, work, memory, device and logcat work in
-                any app. Recompositions and state writes are Compose-specific.
-              </dd>
-            </div>
-            <div class="faq-item">
-              <dt>Will it leak a token into a trace?</dt>
-              <dd>
-                Query-string values and sensitive headers are replaced before anything leaves the
-                process, and bodies are not captured unless you ask. The sample sends three secrets
-                containing do-not-log so you can grep a capture and check.
-              </dd>
-            </div>
           </dl>
-          <p class="lede" style="margin-top: 28px; font-size: 14px">
-            What is next, and what is not yet verified, lives with the code:
-            <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+          <p class="lede" style="margin-top: 16px; font-size: 14px">
+            Views, or only Compose? See
+            <a href="https://github.com/gravityrepos/porthole/blob/main/README.md#compatibility"
+              >Compatibility</a
+            >. Will it leak a token into a trace? See
+            <a
+              href="https://github.com/gravityrepos/porthole/blob/main/README.md#payloads-what-gets-captured-and-what-does-not"
+              >Payloads</a
+            >
+            and
+            <a href="https://github.com/gravityrepos/porthole/blob/main/SECURITY.md">SECURITY.md</a>.
           </p>
         </div>
+      </div>
+    </section>
+
+    <section id="status" style="background: var(--ground-2)">
+      <div class="wrap" style="padding: 22px 24px">
+        <div class="status-grid">
+          <div class="status-cell">
+            <span class="status-label">now</span>
+            <p>
+              v0.2.2 ·
+              <a href="https://central.sonatype.com/artifact/live.gravitylabs.porthole/runtime"
+                >Maven Central</a
+              >
+              ·
+              <a href="https://www.npmjs.com/package/@gravitylabsllc/porthole">npm</a>
+              ·
+              <a href="https://plugins.gradle.org/plugin/live.gravitylabs.porthole"
+                >Gradle Plugin Portal</a
+              >
+            </p>
+          </div>
+        </div>
+        <p class="status-more">
+          What is and is not supported lives with the code:
+          <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+        </p>
       </div>
     </section>
     </main>
@@ -1411,7 +1535,12 @@ the main thread [observed].
             PORTHOLE
           </div>
           <p>Open source, Apache-2.0.</p>
-          <span class="foot-meta">v0.2.0 · Android · Jetpack Compose</span>
+          <!-- No version here (GRA-131): this string was hand-typed and had
+               drifted two releases stale with nothing to catch it, since the
+               page has no build step. The one hand-maintained version on the
+               page now lives in #status, next to the registries that explain
+               what it means; this line just says what the thing is. -->
+          <span class="foot-meta">Android · Jetpack Compose</span>
         </div>
       </div>
       <div style="border-top: 1px solid var(--line-soft)">

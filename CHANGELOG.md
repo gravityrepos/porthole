@@ -72,8 +72,42 @@ PR that makes the change, not after the fact.
   no `sharp`, no native module in the `npx` path). Never written to the
   session file: a screenshot cannot be redacted the way the app's own text
   events can (GRA-63).
+- `site/robots.txt` and `site/sitemap.xml`, so `/robots.txt` and
+  `/sitemap.xml` return real content instead of a 404. The sitemap lists the
+  landing page and the API reference directory, not the ~58 individual
+  Dokka pages under it — those are meant to be found by search inside the
+  reference, not indexed on their own (GRA-129).
+- A `<link rel="canonical">` on `site/api/index.html`, added as a
+  post-processing step of the `:runtime:apiDocs` Gradle task rather than
+  hand-edited, since `apiDocs` is a `Sync` that overwrites the file from
+  Dokka's output on every run (GRA-129).
 
 ### Changed
+
+- The landing page's `<title>`, meta description and Open Graph tags now
+  name the terms an Android developer with this problem would actually
+  search — MCP, Perfetto, recompositions, frames, main-thread stalls,
+  in-flight work — instead of describing the tool with no term a search
+  engine or an agent would match. The page now carries `SoftwareApplication`
+  and `FAQPage` JSON-LD, and the Google Fonts request was trimmed from seven
+  weights to the five the page's own CSS actually uses (GRA-128).
+- `vercel.json`'s strict Content-Security-Policy rule now matches every path
+  except `/api` (`/((?!api(?:/|$)).*)`) instead of the literal `/`, so a
+  future second landing-style page inherits the policy instead of falling
+  through to the catch-all header block, which carries no CSP at all.
+  `/api/:path*` keeps its own, looser policy; the two `source` patterns are
+  mutually exclusive by construction, so no single path can ever collect
+  both `Content-Security-Policy` headers (GRA-129).
+- The landing page's FAQ is trimmed to the three real first-minute
+  objections (release APK, runtime cost, root); the other two now link to
+  README's Compatibility and Payloads sections and to SECURITY.md instead.
+  A status block above the footer now states the current version and where
+  to get it (Maven Central, npm, Gradle Plugin Portal), with a link to the
+  README for what is and is not supported — device coverage is not a metric
+  this project tracks, so the block does not enumerate it. The footer's
+  hand-typed version string, which had drifted two releases stale, is gone;
+  the one hand-maintained version on the page now lives in the status block,
+  next to the registries that explain what it means (GRA-131).
 
 ### Fixed
 

@@ -1542,8 +1542,13 @@ aliased to short custom properties. The canvas reads those back with
 is deliberately script-free — every part of it is markup, so it renders the same
 from a `file://` path, a sanitising preview or a strict CSP as it does from a
 host. The `vercel.json` at the repo root encodes that as a rule rather than a
-habit: the policy it sends has no `script-src`, and `default-src 'none'`, so a
-script added to the page later will be blocked rather than quietly shipped.
+habit: `default-src 'none'` blocks everything by default, and the one opening
+is `script-src 'self'` — narrow enough to cover only what this origin already
+serves (Vercel's own analytics script, `/_vercel/insights/script.js`) and to
+still block any other script a later change might add. A `<script
+type="application/ld+json">` block is not affected either way: `script-src`
+governs execution, and a JSON-LD block is a data island a browser never
+executes.
 
 Deploying it takes no dashboard configuration. Import the repository, leave the
 root directory alone, and `vercel.json` does the rest — no install step, no
@@ -1559,11 +1564,19 @@ AGP needs the Android SDK, and this site has no build step at all. Regenerate
 it with `./gradlew :runtime:apiDocs`, which syncs — a declaration that goes away
 leaves the site too.
 
-They get different content security policies, which is why `vercel.json` scopes
-the strict one to `/` rather than to everything: the landing page runs no script
-and the policy says so, while the reference is a Dokka app that needs its own.
-The reference's rule is `/api/:path*` rather than `/api/(.*)`, which misses the
-directory itself and left `/api` with no policy at all.
+They get different content security policies. `vercel.json` scopes the strict
+one to `/((?!api(?:/|$)).*)` — every path except `/api` and anything under it
+— rather than to the literal string `/`, so a second landing-style page (a
+future `site/trace/index.html`, say) inherits the strict policy automatically
+instead of falling through to the catch-all header block, which carries no
+`Content-Security-Policy` at all. The reference keeps its own, looser policy
+on `/api/:path*`. The two `source` patterns are mutually exclusive by
+construction — Vercel merges the headers of every rule whose `source`
+matches a request, so a path caught by both would collect two
+`Content-Security-Policy` headers, which is worse than either policy alone.
+`/api/:path*` still misses the bare `/api` directory itself, same as before;
+the new landing-page pattern excludes that path rather than reclaiming it,
+so the directory's existing CSP gap is unchanged, not widened.
 
 `cleanUrls` is deliberately off. It strips `.html` and redirects, and the
 reference is fifty-eight pages that link to each other by `.html` — every
