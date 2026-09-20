@@ -68,6 +68,18 @@ class PortholeExtensionDefaultsTest {
     }
 
     @Test
+    fun `leaves the mcp command empty so the pinned npx launch is used`() {
+        // GRA-195: mcpCommand's whole point is to be an opt-in override —
+        // unset by default so portholeMcpConfig writes the pinned npx entry.
+        assertEquals(emptyList<String>(), extension().mcpCommand.get())
+    }
+
+    @Test
+    fun `defaults the mcp package pin to the same version portholeUi uses`() {
+        assertEquals(extension().uiPackageVersion.get(), PortholePlugin.UI_PACKAGE_VERSION)
+    }
+
+    @Test
     fun `leaves the device serial unset for the single-device case`() {
         assertFalse(extension().deviceSerial.isPresent)
     }

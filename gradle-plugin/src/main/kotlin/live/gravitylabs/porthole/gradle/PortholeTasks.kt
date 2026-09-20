@@ -213,10 +213,11 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  *  - different entry  refuse, print the difference, and wait to be told
  *
  * That last case is the one worth refusing. A porthole entry that disagrees
- * with this project was put there on purpose — a different port, a pinned
- * version, a local build — and silently correcting it would be the behaviour
+ * with this project was put there on purpose — a different port, a hand-added
+ * env var, a local build — and silently correcting it would be the behaviour
  * the original comment was guarding against. `-Pporthole.overwrite=true`
- * replaces it.
+ * replaces it. One narrow difference is exempted from the refusal rather than
+ * from the rule: see [versionOnlyDrift] and GRA-195 below.
  *
  * GRA-119: this used to write only `PORTHOLE_PORT`, leaving the MCP server to
  * infer its project root and SDK location from `process.cwd()` — set by
@@ -240,6 +241,24 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * uses it to tell its own app from another Porthole app answering on the
  * same port; omitted, not written empty, when unset, for the same reason
  * `PORTHOLE_SDK_DIR` is.
+ *
+ * GRA-195: `args` used to name the npm package with no version, so `npx`
+ * resolved `latest` at launch time — subject to the registry and the npx
+ * cache — while `portholeUi` and the runtime AAR were each pinned to the
+ * plugin's own version. Of the three halves that have to agree, two were
+ * locked to the plugin and the one carrying the tool surface floated. The
+ * entry now pins `@<packageVersion>`, the same [PortholeExtension.uiPackageVersion]
+ * `portholeUi` already uses, so all three resolve to one version by
+ * construction. [PortholeExtension.mcpCommand] opts out of the pin (and of
+ * npx) entirely, for a repo — this one's own sample included — that builds
+ * the CLI itself and wants `.mcp.json` to run that build rather than any
+ * published version of it. A follow-up sharpened the refusal itself: making
+ * every bump need `-Pporthole.overwrite=true` would leave the pin stale
+ * until someone learned the flag, which is the drift this ticket exists to
+ * remove, so [versionOnlyDrift] lets [write] rewrite an entry that differs
+ * from `wanted` *only* in the pinned version — same command, same env, same
+ * every other arg — without the flag, logging the version it moved from and
+ * to. Anything wider than that still refuses exactly as before.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -252,6 +271,14 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
     @get:Input
     @get:Optional
     abstract val applicationId: Property<String>
+
+    /** npm version to pin `args` to, unless [mcpCommand] overrides the launch entirely. */
+    @get:Input
+    abstract val packageVersion: Property<String>
+
+    /** See [PortholeExtension.mcpCommand]. Empty (the default) keeps the pinned npx launch. */
+    @get:Input
+    abstract val mcpCommand: ListProperty<String>
 
     /**
      * Deliberately not an `@OutputFile`. It lives in the source tree, not the
@@ -288,16 +315,80 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         // check" rather than as an empty string to compare against, so an
         // unset applicationId must omit the key, not write it blank.
         applicationId.orNull?.let { env["PORTHOLE_APPLICATION_ID"] = it }
-        // GRA-193: the package declares two bins, `porthole` (the CLI) and
-        // `porthole-mcp`. npx runs the one named like the package, so without
-        // a subcommand this launched the CLI's usage screen, which exited at
-        // once — an MCP client saw a server that started and ended. `mcp` is
-        // the CLI branch that boots the same server `dist/index.js` does.
+
+        val override = mcpCommand.get()
+        val command: String
+        val args: List<String>
+        if (override.isNotEmpty()) {
+            command = override.first()
+            args = override.drop(1)
+        } else {
+            command = "npx"
+            // GRA-193: the package declares two bins, `porthole` (the CLI) and
+            // `porthole-mcp`. npx runs the one named like the package, so
+            // without a subcommand this launched the CLI's usage screen,
+            // which exited at once — an MCP client saw a server that started
+            // and ended. `mcp` is the CLI branch that boots the same server
+            // `dist/index.js` does.
+            //
+            // GRA-195: pinned to packageVersion, the same version portholeUi
+            // and the runtime AAR resolve to, rather than the unqualified
+            // package name npx would resolve to `latest` at launch time.
+            args = listOf("-y", "$PORTHOLE_UI_PACKAGE@" + packageVersion.get(), "mcp")
+        }
         return linkedMapOf(
-            "command" to "npx",
-            "args" to listOf("-y", PORTHOLE_UI_PACKAGE, "mcp"),
+            "command" to command,
+            "args" to args,
             "env" to env,
         )
+    }
+
+    /**
+     * The narrow case [write] auto-rewrites without `-Pporthole.overwrite=true`
+     * (GRA-195 follow-up): [existing] and [wanted] name the same `command`,
+     * the same `env`, and every `args` element but one, and that one element
+     * differs only in the version pinned onto `PORTHOLE_UI_PACKAGE`'s `@`
+     * suffix on both sides — exactly what changes between two runs of this
+     * task across a plugin version bump and nothing else. Returns the (old,
+     * new) version pair when that holds, or null the moment anything else
+     * differs — including an [existing] entry written by [mcpCommand] (no
+     * package arg to compare at all) or one whose `args` is a different
+     * shape entirely, both of which are exactly the deliberate-divergence
+     * case the ordinary refusal exists to protect.
+     *
+     * GRA-195 QA: every `.mcp.json` written before this ticket — every
+     * consumer on 0.2.2 or earlier — has the *unpinned* form,
+     * `"@gravitylabsllc/porthole"` with no `@version` at all. [PACKAGE_ARG_PATTERN]'s
+     * `@version` suffix is optional for exactly this reason: without it, the
+     * bare name never matches, `existing` is unpinned → pinned is
+     * indistinguishable from any other "different entry", and the very first
+     * run after upgrading the plugin — the case this whole ticket is for —
+     * is refused rather than rewritten. The old half of the returned pair is
+     * `null` for that case (nothing was pinned before), which [write] reads
+     * as "added", not "moved from".
+     */
+    private fun versionOnlyDrift(existing: Map<String, Any?>, wanted: Map<String, Any?>): Pair<String?, String>? {
+        if (existing["command"] != wanted["command"] || existing["env"] != wanted["env"]) return null
+        val existingArgs = existing["args"] as? List<*> ?: return null
+        val wantedArgs = wanted["args"] as? List<*> ?: return null
+        if (existingArgs.size != wantedArgs.size) return null
+
+        var drift: Pair<String?, String>? = null
+        for (i in existingArgs.indices) {
+            val e = existingArgs[i]
+            val w = wantedArgs[i]
+            if (e == w) continue
+            // A second differing element means this is not a version-only
+            // drift; bail rather than let the later ones silently win.
+            if (drift != null) return null
+            val eMatch = (e as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
+            val wMatch = (w as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
+            // groupValues[1] is "" when the optional `@version` group did not
+            // participate — the unpinned shape — and that is the one place an
+            // empty string means "absent" rather than "pinned to nothing".
+            drift = eMatch.groupValues[1].ifEmpty { null } to wMatch.groupValues[1]
+        }
+        return drift
     }
 
     @TaskAction
@@ -331,7 +422,19 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
             return
         }
 
-        if (existing != null && overwrite.getOrElse(false) != true) {
+        // GRA-195 follow-up: a plugin bump moves packageVersion, which moves
+        // `wanted`, which turns yesterday's matching entry into today's
+        // "different entry" — the drift this ticket exists to remove, not
+        // the hand-edited-on-purpose case the refusal below exists to guard.
+        // [versionOnlyDrift] is the narrow proof that nothing else about the
+        // entry changed, so this is applied even without
+        // -Pporthole.overwrite=true; anything wider than the version suffix
+        // — a different command, a different port, a hand-added env var —
+        // still falls through to the refusal.
+        @Suppress("UNCHECKED_CAST")
+        val versionDrift = (existing as? Map<String, Any?>)?.let { versionOnlyDrift(it, wanted) }
+
+        if (existing != null && overwrite.getOrElse(false) != true && versionDrift == null) {
             logger.lifecycle("[porthole] ${file.name} already defines 'porthole', and it differs:")
             logger.lifecycle("  there: ${JsonOutput.toJson(existing)}")
             logger.lifecycle("  here:  ${JsonOutput.toJson(wanted)}")
@@ -355,6 +458,16 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
 
         val what = if (existing != null) "replaced the entry in" else "added porthole to"
         logger.lifecycle("[porthole] $what ${file.path}")
+        if (versionDrift != null) {
+            val (oldVersion, newVersion) = versionDrift
+            logger.lifecycle(
+                if (oldVersion == null) {
+                    "[porthole] npm package pin added: $newVersion"
+                } else {
+                    "[porthole] npm package pin moved from $oldVersion to $newVersion"
+                },
+            )
+        }
         if (file.resolveSibling("${file.name}.bak").isFile) {
             logger.lifecycle("[porthole] previous contents: ${file.name}.bak")
         }
@@ -653,3 +766,16 @@ internal fun adbArgs(adb: String, serial: String?, vararg rest: String): List<St
     }
     addAll(rest)
 }
+
+/**
+ * Matches an `args` element naming [PORTHOLE_UI_PACKAGE], pinned
+ * (`@gravitylabsllc/porthole@1.2.3`, capturing `1.2.3`) or bare
+ * (`@gravitylabsllc/porthole`, the unpinned shape every `.mcp.json` written
+ * before GRA-195 has — capturing group 1 does not participate, so
+ * `groupValues[1]` comes back `""`). The `@version` suffix is optional for
+ * exactly that reason: [PortholeMcpConfigTask.versionOnlyDrift] needs to
+ * recognise "was never pinned" as a version-only drift too, or upgrading the
+ * plugin past 0.2.2 would refuse its own fix on every existing consumer's
+ * first run.
+ */
+private val PACKAGE_ARG_PATTERN = Regex("^" + Regex.escape(PORTHOLE_UI_PACKAGE) + "(?:@(.+))?$")

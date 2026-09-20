@@ -33,6 +33,7 @@ class PortholePlugin : Plugin<Project> {
             useProjectDependencies.convention(false)
             uiPackageVersion.convention(UI_PACKAGE_VERSION)
             uiCommand.convention(emptyList())
+            mcpCommand.convention(emptyList())
             enabled.convention(true)
         }
 
@@ -126,6 +127,11 @@ class PortholePlugin : Plugin<Project> {
             port.set(extension.port)
             projectName.set(project.rootProject.name)
             applicationId.set(extension.applicationId)
+            // GRA-195: the version this build knows the npm package as, so the
+            // written entry cannot drift from what portholeUi and the runtime
+            // AAR resolve to.
+            packageVersion.set(extension.uiPackageVersion)
+            mcpCommand.set(extension.mcpCommand)
             // The root of the build, which is where an MCP client looks.
             configFile.set(project.rootProject.layout.projectDirectory.file(".mcp.json"))
             overwrite.set(

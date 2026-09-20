@@ -448,18 +448,34 @@ to the device.
   "mcpServers": {
     "porthole": {
       "command": "npx",
-      "args": ["-y", "@gravitylabsllc/porthole", "mcp"],
+      "args": ["-y", "@gravitylabsllc/porthole@0.2.2", "mcp"],
       "env": { "PORTHOLE_PORT": "8677" }
     }
   }
 }
 ```
 
+`0.2.2` here is whatever `porthole { uiPackageVersion }` resolves to for the
+build that wrote the file — the plugin's own version by default, so the
+number moves with whichever plugin version generated your `.mcp.json`. The
+npm package is pinned to it (same version `portholeUi` launches and the
+runtime AAR resolves to) — without the pin, `npx` resolves the unqualified
+package name to whatever the registry calls `latest` at the moment your MCP
+client starts the server, which can drift from the plugin and runtime you
+actually applied. Building the CLI yourself? `porthole { mcpCommand.set(...) }`
+replaces the `npx` launch entirely, the same way `uiCommand` does for
+`portholeUi` — this repo's own sample does exactly that, pointing at
+`mcp/dist/cli.js`.
+
 `./gradlew portholeMcpConfig` writes that entry for you. It merges rather than
 overwrites, so other servers in the file are untouched, and if a `porthole`
 entry is already there and differs it prints the difference and leaves it —
-a different entry is usually deliberate. `-Pporthole.overwrite=true` replaces
-it, and the previous file is kept as `.mcp.json.bak` either way.
+a different entry is usually deliberate. The one exception: an existing entry
+that differs *only* in the pinned version is a plugin bump, not a deliberate
+edit, so that one rewrites on its own, no flag needed, logging the version it
+moved from and to. `-Pporthole.overwrite=true` is for every other kind of
+difference — a different port, a hand-added env var, anything wider than the
+pin — and the previous file is kept as `.mcp.json.bak` either way.
 
 **Environment variables**, for anyone not going through the generated
 `.mcp.json` above:
