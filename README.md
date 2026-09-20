@@ -767,6 +767,58 @@ device said so — a query ran on the main thread, a frame missed its deadline.
 not causation; the recomposition hotspot is the only one of those, and it says
 "ordering, not proof" in its own text. There is no `cause` field.
 
+### `--systrace`: the device's view, alongside the app's own
+
+`porthole capture` records what the app itself saw; `capture_system_trace`
+and `ask_system_trace` (see [System traces](#system-traces) below) record
+what the whole device was doing. They used to never meet, which meant a CI
+regression could be described but not explained — was it thermal
+throttling, ART still compiling, or the app itself? `--systrace` closes that
+gap:
+
+```bash
+porthole capture --scenario checkout --systrace -- ./gradlew connectedRoomDebugAndroidTest
+```
+
+* `--systrace-seconds <n>` — the on-device recording's own safety ceiling,
+  1-120s (the same clamp `capture_system_trace` uses). Defaults to the max,
+  because the *real* bound is the command's own lifetime: the recording
+  starts in the background right before the command runs and is stopped the
+  moment it exits, whichever of the two ends first. It never blocks the
+  command waiting on a fixed duration.
+* `--systrace-categories <a,b>` — atrace categories, comma-separated.
+  Defaults to the same set `capture_system_trace` uses.
+
+Two files come out: `<out>` (the trace JSON, as always) and `<out>` with its
+extension swapped for `.pftrace` — `porthole-trace.json` and
+`porthole-trace.pftrace` by default. When `trace_processor_shell` can be
+found (see `capture_system_trace`'s own paragraph below for how it is
+fetched), the system trace is asked the same eight questions
+`ask_system_trace` answers, scoped to the window the capture covered, and
+the answers are merged straight into the same `findings` list `porthole
+report` already prints — each one now carrying `source: "porthole"` or
+`source: "trace"` so a reader (or another tool) can tell which side is
+making the claim. `porthole report` tags a trace-sourced finding `[trace]`
+so it reads differently at a glance from one the runtime itself observed.
+
+**No `trace_processor_shell`, no problem — mostly.** The capture and the
+`.pftrace` still happen. What does not happen is the eight questions: a
+note in the trace JSON's `systrace.notes` says so and names
+`./gradlew portholeTraceProcessor` as the fix, the same binary
+`capture_system_trace`/`ask_system_trace` need. The `.pftrace` itself is
+always readable at ui.perfetto.dev regardless.
+
+**`portholeLabels: 0` is a warning, not a footnote.** If the on-device
+recording came back with none of the runtime's own atrace sections in it —
+the app was not running with the runtime attached, or this device only
+reads the app trace tag at process start (see the restart note under
+`capture_system_trace` below) — that is a `warning`-severity finding in the
+same `findings` array, not just a sentence you have to go looking for.
+
+`compare` was never told to look at `findings` in the first place — it only
+ever diffs `metrics` — so a baseline captured without `--systrace` compares
+cleanly against a run captured with it, and the other way around too.
+
 ### Steps
 
 `Porthole.mark("checkout")` puts a label on the timeline, and findings name the

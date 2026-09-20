@@ -255,6 +255,54 @@ describe("renderReport", () => {
     expect(text).not.toContain("ambiguous");
   });
 
+  /**
+   * GRA-103: a finding `porthole capture --systrace` pulled out of the
+   * system trace is tagged `[trace]` so it reads differently from one the
+   * runtime itself observed — the same `source` distinction `/api/findings`
+   * (timeline.ts) already carries, now visible in the CLI's own report.
+   */
+  it("tags a trace-sourced finding, and leaves a porthole-sourced one alone (GRA-103)", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          {
+            id: "trace-frame-deadline",
+            severity: "error",
+            confidence: "observed",
+            title: "the frame timeline recorded 1× missed_frame",
+            source: "trace",
+          },
+          {
+            id: "main-thread-stall",
+            severity: "error",
+            confidence: "observed",
+            title: "main thread blocked for 305ms",
+            source: "porthole",
+          },
+        ],
+      }),
+    );
+    expect(text).toContain("[trace] the frame timeline recorded 1× missed_frame");
+    expect(text).toContain("main thread blocked for 305ms");
+    expect(text).not.toContain("[trace] main thread blocked for 305ms");
+  });
+
+  it("tags nothing when a finding carries no source at all — every trace written before GRA-103", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          {
+            id: "main-thread-stall",
+            severity: "error",
+            confidence: "observed",
+            title: "main thread blocked for 305ms",
+          },
+        ],
+      }),
+    );
+    expect(text).not.toContain("[trace]");
+  });
+
   it("keeps severity order and hangs the mark off the finding", () => {
     const text = renderReport(
       trace({

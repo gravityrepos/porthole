@@ -1,6 +1,8 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import { open } from "node:fs/promises";
+import { statSync } from "node:fs";
+import { runAdbAsync, type RunAdbAsyncOptions } from "./adb.js";
 
 /**
  * Recording a Perfetto trace from the device, and saying what is in it.
@@ -446,4 +448,178 @@ export function ringConfigText(plan: RingPlan): string {
     "}",
   ];
   return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
+// #capture-integration (GRA-103): `porthole capture --systrace`
+// ---------------------------------------------------------------------------
+//
+// `capture_system_trace` (index.ts) blocks for a fixed duration someone asks
+// for up front. `porthole capture --systrace` cannot do that: the command it
+// wraps is the capture window (see capture.ts's own top-of-file doc comment),
+// and its length is not known in advance. The shape that reconciles the two
+// is the same one `ring.ts` already proved out for a different reason —
+// `perfetto --background-wait` (`-D`) forks the recording, reparents it to
+// init, and returns as soon as the session is confirmed running, so the
+// caller is never blocked waiting on it. Unlike the ring, this is not a
+// `RING_BUFFER` session recording forever: it is `captureArgs`'s own
+// light-config shorthand with a `-t Ns` duration, backgrounded — a plain,
+// bounded, complete recording that just happens to start without blocking.
+// `-t` is the safety ceiling (planCapture's 1-120s clamp) for a child that
+// hangs or overruns; the *intended* stop is `stopAndPullSystraceCapture`
+// killing it the moment the child actually exits, whichever comes first.
+
+/** The on-device command for a backgrounded, `captureArgs`-shaped recording — see this section's own doc comment for why `--background-wait` rather than a blocking capture. */
+export function backgroundCaptureArgs(plan: CapturePlan): string[] {
+  return [
+    "shell",
+    "perfetto",
+    "--background-wait",
+    "-o",
+    plan.devicePath,
+    "-t",
+    `${plan.seconds}s`,
+    ...plan.apps.flatMap((app) => ["--app", app]),
+    ...plan.categories,
+  ];
+}
+
+/** `--background-wait` blocks on-device until every data source has confirmed it started — up to 30s, the same bound `ring.ts` documents for the identical flag. */
+const BACKGROUND_WAIT_TIMEOUT_MS = 30_000;
+
+/**
+ * `ps -A -o PID,ARGS`, matched against `devicePath` rather than a fixed name.
+ *
+ * `ring.ts`'s `findRunningRingPid` matches on `DEVICE_OUT_PATH`, a single
+ * constant shared by every ring session this controller ever starts, because
+ * a ring needs to be discoverable by a *different* process (after an MCP
+ * server restart) with no other identifying information. A `--systrace`
+ * capture has no such requirement — it is found, stopped and pulled by the
+ * same `capture()` call that started it — but it does need a match string
+ * that cannot collide with an unrelated perfetto invocation running at the
+ * same time, which `planCapture`'s own `devicePath` (stamped with `Date.now()`
+ * per call) already guarantees is unique.
+ */
+async function findRunningCapturePid(devicePath: string, adbOptions: RunAdbAsyncOptions): Promise<number | null> {
+  const result = await runAdbAsync(["shell", "ps", "-A", "-o", "PID,ARGS"], adbOptions);
+  if (!result.ok) return null;
+  for (const line of result.output.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const [, pidText, args] = match;
+    if (args.includes("perfetto") && args.includes(devicePath)) {
+      const pid = Number(pidText);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+  }
+  return null;
+}
+
+export interface SystraceCaptureHandle {
+  plan: CapturePlan;
+  pid: number;
+}
+
+export type SystraceStartResult =
+  | { ok: true; handle: SystraceCaptureHandle }
+  | { ok: false; message: string };
+
+/**
+ * Starts the backgrounded, on-device recording `capture()` scopes to a child
+ * command's lifetime. Bounded by `plan.seconds` — see this section's own doc
+ * comment — but meant to be stopped sooner, by [stopAndPullSystraceCapture],
+ * once the command it is watching actually exits.
+ *
+ * Failure here is never fatal to `porthole capture` as a whole: the caller's
+ * own porthole-sourced trace still gets written either way, with a note
+ * saying the system trace could not be started (capture.ts's own `#systrace`
+ * section is what decides that; this function only reports what happened).
+ */
+export async function startSystraceCapture(
+  plan: CapturePlan,
+  adbOptions: RunAdbAsyncOptions,
+): Promise<SystraceStartResult> {
+  const started = await runAdbAsync(backgroundCaptureArgs(plan), {
+    ...adbOptions,
+    timeoutMs: BACKGROUND_WAIT_TIMEOUT_MS,
+  });
+  if (!started.ok) {
+    return { ok: false, message: `could not start the on-device capture: ${started.output}` };
+  }
+
+  const pid = await findRunningCapturePid(plan.devicePath, adbOptions);
+  if (pid === null) {
+    return {
+      ok: false,
+      message:
+        `perfetto --background-wait reported success, but no running session could be found ` +
+        `afterward: ${started.output}`,
+    };
+  }
+  return { ok: true, handle: { plan, pid } };
+}
+
+/** How long `stopAndPullSystraceCapture` polls for the backgrounded process to actually exit after `kill -TERM`, before pulling regardless — perfetto needs a moment to flush the file on the way out. */
+const STOP_POLL_TIMEOUT_MS = 5_000;
+const STOP_POLL_INTERVAL_MS = 150;
+
+/**
+ * Whether the backgrounded process is still there, by re-scanning `ps` for
+ * `devicePath` — the same mechanism [findRunningCapturePid] uses to find it
+ * in the first place, deliberately, rather than `kill -0 pid`.
+ *
+ * Found against a real emulator, not assumed: `perfetto --background-wait`'s
+ * child runs in the `u:r:perfetto:s0` SELinux domain, not `u:r:shell:s0`,
+ * and `kill -0 <its pid>` from an `adb shell` (`u:r:shell:s0`, same uid —
+ * 2000/shell either side) came back `Permission denied` *even while the
+ * process was genuinely still running* — confirmed by cross-checking `ps`
+ * at the same instant. `kill -TERM` against the same pid, moments earlier,
+ * had succeeded (SELinux evidently draws the line at the liveness probe,
+ * not the signal this function actually needs to send). Reading that denial
+ * as "the process is gone" is exactly backwards: it made every real
+ * `stopAndPullSystraceCapture` call return instantly, pull whatever 0-byte
+ * or half-written file happened to be on disk at that moment, and then
+ * `rm -f` it out from under the recording that was still running — the
+ * `.pftrace` this ticket's own AC asks for came back empty every time,
+ * silently, because the poll that was supposed to wait for the flush never
+ * actually waited. `ps` needs no such permission — it is exactly what
+ * `findRunningCapturePid` already uses to find the pid before this function
+ * is ever called, over the one channel this session's own SELinux policy
+ * does not gate.
+ */
+async function waitForCaptureToExit(devicePath: string, adbOptions: RunAdbAsyncOptions): Promise<void> {
+  const deadline = Date.now() + STOP_POLL_TIMEOUT_MS;
+  for (;;) {
+    const pid = await findRunningCapturePid(devicePath, adbOptions);
+    if (pid === null) return;
+    if (Date.now() >= deadline) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, STOP_POLL_INTERVAL_MS));
+  }
+}
+
+export type SystraceStopResult = { ok: true; bytes: number } | { ok: false; message: string };
+
+/**
+ * Stops a capture [startSystraceCapture] started and pulls it to `localPath`.
+ *
+ * `kill -TERM` is best-effort and deliberately harmless against a session
+ * that already finished on its own once `plan.seconds` elapsed — the same
+ * idiom `ring.ts`'s own `stop()` uses for the identical reason. The device's
+ * trace directory is not this tool's to fill, so the on-device file is
+ * removed regardless of whether the pull succeeded, matching
+ * `capture_system_trace`'s own "tidy up regardless" pull in index.ts.
+ */
+export async function stopAndPullSystraceCapture(
+  handle: SystraceCaptureHandle,
+  localPath: string,
+  adbOptions: RunAdbAsyncOptions,
+): Promise<SystraceStopResult> {
+  await runAdbAsync(["shell", `kill -TERM ${handle.pid}`], adbOptions);
+  await waitForCaptureToExit(handle.plan.devicePath, adbOptions);
+
+  const pulled = await runAdbAsync(["pull", handle.plan.devicePath, localPath], adbOptions);
+  await runAdbAsync(["shell", "rm", "-f", handle.plan.devicePath], adbOptions);
+  if (!pulled.ok) return { ok: false, message: `recorded, but could not pull it: ${pulled.output}` };
+
+  return { ok: true, bytes: statSync(localPath).size };
 }

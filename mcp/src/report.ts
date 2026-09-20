@@ -124,7 +124,13 @@ export function renderReport(trace: Trace, options: RenderReportOptions = {}): s
   // marked run, where it drops an ERROR below two WARNINGs and defeats the one
   // job of a prioritised list. The mark rides along on the line instead.
   for (const finding of trace.findings) {
-    lines.push(`  ${colorSeverity(finding.severity, color)}  ${finding.title}`);
+    // GRA-103: a finding `porthole capture --systrace` pulled out of the
+    // system trace, not out of the device's own event stream, is tagged so a
+    // reader can tell which tool is making the claim — the same distinction
+    // `/api/findings` (timeline.ts) already carries as `source`, now visible
+    // in the CLI's own report too.
+    const tag = finding.source === "trace" ? "[trace] " : "";
+    lines.push(`  ${colorSeverity(finding.severity, color)}  ${tag}${finding.title}`);
     if (finding.during) lines.push(`           during "${finding.during}"`);
     if (finding.detail) lines.push(`           ${finding.detail}`);
     // GRA-201: printed only once resolved — an unresolved `where` is a fact
