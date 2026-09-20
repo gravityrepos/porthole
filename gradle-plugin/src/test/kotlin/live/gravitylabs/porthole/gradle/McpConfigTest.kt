@@ -183,46 +183,61 @@ class McpConfigTest : StubAdbFunctionalTest() {
     /**
      * GRA-195 AC: "a re-run after a plugin bump rewrites the pinned version
      * in an existing porthole entry (it replaces the whole entry today, so
-     * it should)". `existing != wanted` once the pin is part of `wanted`, so
-     * an unattended second run still refuses and prints the difference (the
-     * next test pins that half) — `-Pporthole.overwrite=true` is what turns
-     * "refuse" into "replace", and `servers["porthole"] = wanted` (see
-     * [PortholeMcpConfigTask.write]) replaces the map wholesale rather than
-     * merging old and new keys, so the stale 1.0.0 pin cannot survive
-     * alongside the new command. Registering the task fresh with a different
+     * it should)" — sharpened by a follow-up review: making that require
+     * `-Pporthole.overwrite=true` would leave the pin stale on every plugin
+     * bump until someone learns the flag, which is the exact drift GRA-195
+     * exists to remove. [PortholeMcpConfigTask.versionOnlyDrift] is the
+     * narrow proof that lets [PortholeMcpConfigTask.write] apply this one
+     * *without* the flag: command, env and every arg but the version match,
+     * so nothing about this rewrite is a judgment call the way a genuinely
+     * different entry would be. Registering the task fresh with a different
      * packageVersion between the two runs, rather than mutating one
      * in-process task, is deliberate: it is what a real plugin version bump
      * looks like from `.mcp.json`'s point of view — a different build,
-     * pointed at the same file.
+     * pointed at the same file. Mutation: in `PortholeMcpConfigTask.write`,
+     * drop `&& versionDrift == null` from the refusal's guard condition and
+     * this fails (the second run refuses instead of rewriting).
      */
     @Test
-    fun `re-running after a version bump rewrites the pinned version in an existing entry`() {
+    fun `re-running after a version bump rewrites the pinned version without -Pporthole overwrite`() {
         scratch(registerTask(packageVersion = "1.0.0"))
         val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
         assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
         assertEquals(listOf("-y", "@gravitylabsllc/porthole@1.0.0", "mcp"), readPortholeEntry()["args"])
 
-        scratch(registerTask(packageVersion = "2.0.0", overwrite = true))
+        scratch(registerTask(packageVersion = "2.0.0"))
         val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
         assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
         assertEquals(listOf("-y", "@gravitylabsllc/porthole@2.0.0", "mcp"), readPortholeEntry()["args"])
+        assertTrue(
+            "expected the one-line pin-moved notice, got:\n${second.output}",
+            second.output.contains("npm package pin moved from 1.0.0 to 2.0.0"),
+        )
+        assertTrue(
+            "expected the previous contents backed up, same as any other rewrite",
+            File(projectDir.root, ".mcp.json.bak").isFile,
+        )
     }
 
     /**
-     * The other half of the AC above: without `-Pporthole.overwrite=true` (or,
-     * in this direct-registration test, the task's `overwrite` input) a
-     * version bump is exactly the "different entry" case the class doc calls
-     * out as deliberate-until-told-otherwise, same as a hand-edited entry.
-     * Proves the version pin actually participates in that comparison,
-     * rather than being excluded from it the way, say, a comment would be.
+     * The narrow half of the follow-up: pairing the version bump with an
+     * unrelated change — here, a different port, which lands in `env` — must
+     * NOT be auto-rewritten. Only a difference confined to the pinned
+     * version's own `@` suffix is safe to apply unattended;
+     * [PortholeMcpConfigTask.versionOnlyDrift] returns null the moment
+     * anything else differs, so this still falls through to the ordinary
+     * refusal, same as any hand-edited entry. (Renamed from "a version bump
+     * alone does not silently rewrite an existing entry", which the
+     * follow-up above made false — a version bump *alone* now does
+     * rewrite.)
      */
     @Test
-    fun `a version bump alone does not silently rewrite an existing entry`() {
-        scratch(registerTask(packageVersion = "1.0.0"))
+    fun `an entry differing in more than the version pin is still refused`() {
+        scratch(registerTask(port = 8677, packageVersion = "1.0.0"))
         val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
         assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
 
-        scratch(registerTask(packageVersion = "2.0.0"))
+        scratch(registerTask(port = 9000, packageVersion = "2.0.0"))
         val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
         assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
         assertTrue(
@@ -230,10 +245,31 @@ class McpConfigTest : StubAdbFunctionalTest() {
             second.output.contains("already defines 'porthole', and it differs"),
         )
         assertEquals(
-            "the stale pin must survive until told to overwrite",
+            "the stale entry must survive until told to overwrite",
             listOf("-y", "@gravitylabsllc/porthole@1.0.0", "mcp"),
             readPortholeEntry()["args"],
         )
+    }
+
+    /**
+     * `-Pporthole.overwrite=true` remains the escape hatch for the case the
+     * test above proves is otherwise refused — a difference wider than the
+     * version pin. Without this, the previous test alone would leave the
+     * `overwrite` input effectively untested outside the narrow auto-rewrite
+     * path.
+     */
+    @Test
+    fun `-Pporthole overwrite still replaces an entry that differs in more than the version pin`() {
+        scratch(registerTask(port = 8677, packageVersion = "1.0.0"))
+        val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
+
+        scratch(registerTask(port = 9000, packageVersion = "2.0.0", overwrite = true))
+        val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
+
+        assertEquals("9000", readEnvBlock()["PORTHOLE_PORT"])
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@2.0.0", "mcp"), readPortholeEntry()["args"])
     }
 
     /**

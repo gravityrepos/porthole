@@ -24,10 +24,14 @@ PR that makes the change, not after the fact.
   the runtime AAR is pinned to, instead of leaving it unversioned for `npx`
   to resolve to whatever the registry called `latest` at launch time
   (subject to the npx cache besides). All three now resolve to one version
-  by construction. A new `mcpCommand` extension property, mirroring
-  `uiCommand`, opts a build that produces its own CLI out of the pin
-  entirely and points `.mcp.json` at that local build instead — this repo's
-  own sample now uses it (GRA-195).
+  by construction, and a plugin bump carries its new pin into an existing
+  `.mcp.json` entry on the next run with no flag needed — the rewrite is
+  narrowed to entries that differ *only* in the pinned version, so any other
+  hand-made difference is still refused and printed the way it always was.
+  A new `mcpCommand` extension property, mirroring `uiCommand`, opts a build
+  that produces its own CLI out of the pin entirely and points `.mcp.json`
+  at that local build instead — this repo's own sample now uses it
+  (GRA-195).
 
 ## [0.2.2] - 2026-09-16
 

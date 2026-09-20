@@ -213,10 +213,11 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  *  - different entry  refuse, print the difference, and wait to be told
  *
  * That last case is the one worth refusing. A porthole entry that disagrees
- * with this project was put there on purpose — a different port, a pinned
- * version, a local build — and silently correcting it would be the behaviour
+ * with this project was put there on purpose — a different port, a hand-added
+ * env var, a local build — and silently correcting it would be the behaviour
  * the original comment was guarding against. `-Pporthole.overwrite=true`
- * replaces it.
+ * replaces it. One narrow difference is exempted from the refusal rather than
+ * from the rule: see [versionOnlyDrift] and GRA-195 below.
  *
  * GRA-119: this used to write only `PORTHOLE_PORT`, leaving the MCP server to
  * infer its project root and SDK location from `process.cwd()` — set by
@@ -251,7 +252,13 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * construction. [PortholeExtension.mcpCommand] opts out of the pin (and of
  * npx) entirely, for a repo — this one's own sample included — that builds
  * the CLI itself and wants `.mcp.json` to run that build rather than any
- * published version of it.
+ * published version of it. A follow-up sharpened the refusal itself: making
+ * every bump need `-Pporthole.overwrite=true` would leave the pin stale
+ * until someone learned the flag, which is the drift this ticket exists to
+ * remove, so [versionOnlyDrift] lets [write] rewrite an entry that differs
+ * from `wanted` *only* in the pinned version — same command, same env, same
+ * every other arg — without the flag, logging the version it moved from and
+ * to. Anything wider than that still refuses exactly as before.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -336,6 +343,40 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         )
     }
 
+    /**
+     * The narrow case [write] auto-rewrites without `-Pporthole.overwrite=true`
+     * (GRA-195 follow-up): [existing] and [wanted] name the same `command`,
+     * the same `env`, and every `args` element but one, and that one element
+     * differs only in the version pinned onto `PORTHOLE_UI_PACKAGE`'s `@`
+     * suffix on both sides — exactly what changes between two runs of this
+     * task across a plugin version bump and nothing else. Returns the (old,
+     * new) version pair when that holds, or null the moment anything else
+     * differs — including an [existing] entry written by [mcpCommand] (no
+     * `@version` arg to compare) or one whose `args` is a different shape
+     * entirely, both of which are exactly the deliberate-divergence case the
+     * ordinary refusal exists to protect.
+     */
+    private fun versionOnlyDrift(existing: Map<String, Any?>, wanted: Map<String, Any?>): Pair<String, String>? {
+        if (existing["command"] != wanted["command"] || existing["env"] != wanted["env"]) return null
+        val existingArgs = existing["args"] as? List<*> ?: return null
+        val wantedArgs = wanted["args"] as? List<*> ?: return null
+        if (existingArgs.size != wantedArgs.size) return null
+
+        var drift: Pair<String, String>? = null
+        for (i in existingArgs.indices) {
+            val e = existingArgs[i]
+            val w = wantedArgs[i]
+            if (e == w) continue
+            // A second differing element means this is not a version-only
+            // drift; bail rather than let the later ones silently win.
+            if (drift != null) return null
+            val eMatch = (e as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
+            val wMatch = (w as? String)?.let(PACKAGE_ARG_PATTERN::find) ?: return null
+            drift = eMatch.groupValues[1] to wMatch.groupValues[1]
+        }
+        return drift
+    }
+
     @TaskAction
     fun write() {
         val file = configFile.get().asFile
@@ -367,7 +408,19 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
             return
         }
 
-        if (existing != null && overwrite.getOrElse(false) != true) {
+        // GRA-195 follow-up: a plugin bump moves packageVersion, which moves
+        // `wanted`, which turns yesterday's matching entry into today's
+        // "different entry" — the drift this ticket exists to remove, not
+        // the hand-edited-on-purpose case the refusal below exists to guard.
+        // [versionOnlyDrift] is the narrow proof that nothing else about the
+        // entry changed, so this is applied even without
+        // -Pporthole.overwrite=true; anything wider than the version suffix
+        // — a different command, a different port, a hand-added env var —
+        // still falls through to the refusal.
+        @Suppress("UNCHECKED_CAST")
+        val versionDrift = (existing as? Map<String, Any?>)?.let { versionOnlyDrift(it, wanted) }
+
+        if (existing != null && overwrite.getOrElse(false) != true && versionDrift == null) {
             logger.lifecycle("[porthole] ${file.name} already defines 'porthole', and it differs:")
             logger.lifecycle("  there: ${JsonOutput.toJson(existing)}")
             logger.lifecycle("  here:  ${JsonOutput.toJson(wanted)}")
@@ -391,6 +444,11 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
 
         val what = if (existing != null) "replaced the entry in" else "added porthole to"
         logger.lifecycle("[porthole] $what ${file.path}")
+        if (versionDrift != null) {
+            logger.lifecycle(
+                "[porthole] npm package pin moved from ${versionDrift.first} to ${versionDrift.second}",
+            )
+        }
         if (file.resolveSibling("${file.name}.bak").isFile) {
             logger.lifecycle("[porthole] previous contents: ${file.name}.bak")
         }
@@ -689,3 +747,6 @@ internal fun adbArgs(adb: String, serial: String?, vararg rest: String): List<St
     }
     addAll(rest)
 }
+
+/** Matches a pinned `args` element (`@gravitylabsllc/porthole@1.2.3`), capturing the version. */
+private val PACKAGE_ARG_PATTERN = Regex("^" + Regex.escape(PORTHOLE_UI_PACKAGE) + "@(.+)$")
