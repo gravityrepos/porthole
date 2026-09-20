@@ -448,18 +448,31 @@ to the device.
   "mcpServers": {
     "porthole": {
       "command": "npx",
-      "args": ["-y", "@gravitylabsllc/porthole", "mcp"],
+      "args": ["-y", "@gravitylabsllc/porthole@0.2.0", "mcp"],
       "env": { "PORTHOLE_PORT": "8677" }
     }
   }
 }
 ```
 
+The npm package is pinned to the exact version this plugin was built at
+(`porthole { uiPackageVersion }`, same version `portholeUi` launches and the
+runtime AAR resolves to) — without it, `npx` resolves the unqualified
+package name to whatever the registry calls `latest` at the moment your MCP
+client starts the server, which can drift from the plugin and runtime you
+actually applied. Building the CLI yourself? `porthole { mcpCommand.set(...) }`
+replaces the `npx` launch entirely, the same way `uiCommand` does for
+`portholeUi` — this repo's own sample does exactly that, pointing at
+`mcp/dist/cli.js`.
+
 `./gradlew portholeMcpConfig` writes that entry for you. It merges rather than
 overwrites, so other servers in the file are untouched, and if a `porthole`
 entry is already there and differs it prints the difference and leaves it —
-a different entry is usually deliberate. `-Pporthole.overwrite=true` replaces
-it, and the previous file is kept as `.mcp.json.bak` either way.
+a different entry is usually deliberate, and that includes a version pin left
+behind by an older build of the plugin, so bumping the plugin needs
+`-Pporthole.overwrite=true` to carry the new pin into an existing entry.
+`-Pporthole.overwrite=true` replaces it, and the previous file is kept as
+`.mcp.json.bak` either way.
 
 **Environment variables**, for anyone not going through the generated
 `.mcp.json` above:

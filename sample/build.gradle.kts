@@ -49,6 +49,10 @@ porthole {
     // Same reason: this repo builds the CLI too, so point `portholeUi` at the
     // local build instead of fetching the published package.
     uiCommand.set(listOf("node", rootProject.file("mcp/dist/cli.js").absolutePath, "ui"))
+    // GRA-195: without this, portholeMcpConfig would still write a pinned
+    // *registry* version into .mcp.json, the one thing in this sample that
+    // would point away from the checkout instead of at it.
+    mcpCommand.set(listOf("node", rootProject.file("mcp/dist/cli.js").absolutePath, "mcp"))
 }
 
 dependencies {

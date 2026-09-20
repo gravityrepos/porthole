@@ -240,6 +240,18 @@ abstract class PortholeDisconnectTask : DefaultTask() {
  * uses it to tell its own app from another Porthole app answering on the
  * same port; omitted, not written empty, when unset, for the same reason
  * `PORTHOLE_SDK_DIR` is.
+ *
+ * GRA-195: `args` used to name the npm package with no version, so `npx`
+ * resolved `latest` at launch time — subject to the registry and the npx
+ * cache — while `portholeUi` and the runtime AAR were each pinned to the
+ * plugin's own version. Of the three halves that have to agree, two were
+ * locked to the plugin and the one carrying the tool surface floated. The
+ * entry now pins `@<packageVersion>`, the same [PortholeExtension.uiPackageVersion]
+ * `portholeUi` already uses, so all three resolve to one version by
+ * construction. [PortholeExtension.mcpCommand] opts out of the pin (and of
+ * npx) entirely, for a repo — this one's own sample included — that builds
+ * the CLI itself and wants `.mcp.json` to run that build rather than any
+ * published version of it.
  */
 abstract class PortholeMcpConfigTask : DefaultTask() {
 
@@ -252,6 +264,14 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
     @get:Input
     @get:Optional
     abstract val applicationId: Property<String>
+
+    /** npm version to pin `args` to, unless [mcpCommand] overrides the launch entirely. */
+    @get:Input
+    abstract val packageVersion: Property<String>
+
+    /** See [PortholeExtension.mcpCommand]. Empty (the default) keeps the pinned npx launch. */
+    @get:Input
+    abstract val mcpCommand: ListProperty<String>
 
     /**
      * Deliberately not an `@OutputFile`. It lives in the source tree, not the
@@ -288,14 +308,30 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         // check" rather than as an empty string to compare against, so an
         // unset applicationId must omit the key, not write it blank.
         applicationId.orNull?.let { env["PORTHOLE_APPLICATION_ID"] = it }
-        // GRA-193: the package declares two bins, `porthole` (the CLI) and
-        // `porthole-mcp`. npx runs the one named like the package, so without
-        // a subcommand this launched the CLI's usage screen, which exited at
-        // once — an MCP client saw a server that started and ended. `mcp` is
-        // the CLI branch that boots the same server `dist/index.js` does.
+
+        val override = mcpCommand.get()
+        val command: String
+        val args: List<String>
+        if (override.isNotEmpty()) {
+            command = override.first()
+            args = override.drop(1)
+        } else {
+            command = "npx"
+            // GRA-193: the package declares two bins, `porthole` (the CLI) and
+            // `porthole-mcp`. npx runs the one named like the package, so
+            // without a subcommand this launched the CLI's usage screen,
+            // which exited at once — an MCP client saw a server that started
+            // and ended. `mcp` is the CLI branch that boots the same server
+            // `dist/index.js` does.
+            //
+            // GRA-195: pinned to packageVersion, the same version portholeUi
+            // and the runtime AAR resolve to, rather than the unqualified
+            // package name npx would resolve to `latest` at launch time.
+            args = listOf("-y", "$PORTHOLE_UI_PACKAGE@" + packageVersion.get(), "mcp")
+        }
         return linkedMapOf(
-            "command" to "npx",
-            "args" to listOf("-y", PORTHOLE_UI_PACKAGE, "mcp"),
+            "command" to command,
+            "args" to args,
             "env" to env,
         )
     }

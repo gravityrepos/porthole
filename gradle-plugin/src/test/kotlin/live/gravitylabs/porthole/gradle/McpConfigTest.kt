@@ -42,15 +42,24 @@ import java.util.Properties
  */
 class McpConfigTest : StubAdbFunctionalTest() {
 
-    private fun registerTask(port: Int = 8677, applicationId: String? = null): String =
+    private fun registerTask(
+        port: Int = 8677,
+        applicationId: String? = null,
+        packageVersion: String = "0.2.2",
+        mcpCommand: List<String>? = null,
+        overwrite: Boolean = false,
+    ): String =
         """
         import live.gravitylabs.porthole.gradle.PortholeMcpConfigTask
 
         tasks.register<PortholeMcpConfigTask>("portholeMcpConfig") {
             port.set($port)
             projectName.set("scratch")
+            packageVersion.set("$packageVersion")
             configFile.set(layout.projectDirectory.file(".mcp.json"))
             ${if (applicationId != null) "applicationId.set(\"$applicationId\")" else ""}
+            ${if (mcpCommand != null) "mcpCommand.set(listOf(${mcpCommand.joinToString(", ") { "\"$it\"" }}))" else ""}
+            ${if (overwrite) "overwrite.set(true)" else ""}
         }
         """
 
@@ -129,17 +138,123 @@ class McpConfigTest : StubAdbFunctionalTest() {
      * ended. `porthole mcp` is the CLI branch that boots the same server
      * `dist/index.js` does. Pinned in order, as the literal package name a
      * consumer's client will actually run, not the constant the task reads.
+     *
+     * GRA-195: also pinned to a version, in the same literal-string style —
+     * see `pins the npm package to the configured uiPackageVersion` below for
+     * the test that is specifically about the pin surviving a version change.
      */
     @Test
     fun `launches the CLI's mcp subcommand, not its usage screen`() {
-        scratch(registerTask())
+        scratch(registerTask(packageVersion = "0.2.2"))
 
         val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val porthole = readPortholeEntry()
         assertEquals("npx", porthole["command"])
-        assertEquals(listOf("-y", "@gravitylabsllc/porthole", "mcp"), porthole["args"])
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@0.2.2", "mcp"), porthole["args"])
+    }
+
+    /**
+     * GRA-195. `portholeUi` pins the timeline it launches to
+     * [PortholeExtension.uiPackageVersion], and `AndroidWiring.dependency`
+     * pins the runtime AAR to the plugin's own version — but until this
+     * ticket, this task's `args` named the npm package with no version at
+     * all, so `npx` resolved `latest` at launch time, subject to the
+     * registry and the npx cache. Of the three halves that must agree, two
+     * were locked and the one carrying the tool surface floated. This is the
+     * regression test named directly in the ticket's acceptance criteria:
+     * `.mcp.json` written by plugin version X must carry
+     * `@gravitylabsllc/porthole@X`. Mutation: drop the `"@" + packageVersion.get()`
+     * suffix in `PortholeMcpConfigTask.entry` back to the bare package name
+     * and this fails.
+     */
+    @Test
+    fun `pins the npm package to the configured uiPackageVersion`() {
+        scratch(registerTask(packageVersion = "1.2.3"))
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val porthole = readPortholeEntry()
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@1.2.3", "mcp"), porthole["args"])
+    }
+
+    /**
+     * GRA-195 AC: "a re-run after a plugin bump rewrites the pinned version
+     * in an existing porthole entry (it replaces the whole entry today, so
+     * it should)". `existing != wanted` once the pin is part of `wanted`, so
+     * an unattended second run still refuses and prints the difference (the
+     * next test pins that half) — `-Pporthole.overwrite=true` is what turns
+     * "refuse" into "replace", and `servers["porthole"] = wanted` (see
+     * [PortholeMcpConfigTask.write]) replaces the map wholesale rather than
+     * merging old and new keys, so the stale 1.0.0 pin cannot survive
+     * alongside the new command. Registering the task fresh with a different
+     * packageVersion between the two runs, rather than mutating one
+     * in-process task, is deliberate: it is what a real plugin version bump
+     * looks like from `.mcp.json`'s point of view — a different build,
+     * pointed at the same file.
+     */
+    @Test
+    fun `re-running after a version bump rewrites the pinned version in an existing entry`() {
+        scratch(registerTask(packageVersion = "1.0.0"))
+        val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@1.0.0", "mcp"), readPortholeEntry()["args"])
+
+        scratch(registerTask(packageVersion = "2.0.0", overwrite = true))
+        val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
+        assertEquals(listOf("-y", "@gravitylabsllc/porthole@2.0.0", "mcp"), readPortholeEntry()["args"])
+    }
+
+    /**
+     * The other half of the AC above: without `-Pporthole.overwrite=true` (or,
+     * in this direct-registration test, the task's `overwrite` input) a
+     * version bump is exactly the "different entry" case the class doc calls
+     * out as deliberate-until-told-otherwise, same as a hand-edited entry.
+     * Proves the version pin actually participates in that comparison,
+     * rather than being excluded from it the way, say, a comment would be.
+     */
+    @Test
+    fun `a version bump alone does not silently rewrite an existing entry`() {
+        scratch(registerTask(packageVersion = "1.0.0"))
+        val first = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, first.task(":portholeMcpConfig")?.outcome)
+
+        scratch(registerTask(packageVersion = "2.0.0"))
+        val second = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, second.task(":portholeMcpConfig")?.outcome)
+        assertTrue(
+            "expected the refusal message, got:\n${second.output}",
+            second.output.contains("already defines 'porthole', and it differs"),
+        )
+        assertEquals(
+            "the stale pin must survive until told to overwrite",
+            listOf("-y", "@gravitylabsllc/porthole@1.0.0", "mcp"),
+            readPortholeEntry()["args"],
+        )
+    }
+
+    /**
+     * GRA-195's `mcpCommand` override (analogous to [PortholeExtension.uiCommand]):
+     * for a repo that builds the CLI itself, `.mcp.json` should run that
+     * local build rather than any pinned registry version — the sample's own
+     * motivating case, since everything else in its `porthole {}` block is
+     * already local. Mutation: in `PortholeMcpConfigTask.entry`, replace the
+     * `if (override.isNotEmpty())` branch with the unconditional npx/pinned
+     * path and this fails.
+     */
+    @Test
+    fun `mcpCommand replaces the pinned npx launch entirely`() {
+        scratch(registerTask(mcpCommand = listOf("node", "../porthole/mcp/dist/cli.js", "mcp")))
+
+        val result = buildWithEnv(noSdkEnv, "portholeMcpConfig")
+        assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
+
+        val porthole = readPortholeEntry()
+        assertEquals("node", porthole["command"])
+        assertEquals(listOf("../porthole/mcp/dist/cli.js", "mcp"), porthole["args"])
     }
 
     @Test

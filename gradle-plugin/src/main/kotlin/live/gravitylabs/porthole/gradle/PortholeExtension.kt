@@ -53,6 +53,23 @@ abstract class PortholeExtension {
     abstract val uiCommand: ListProperty<String>
 
     /**
+     * Replaces the `command`/`args` that `portholeMcpConfig` writes into
+     * `.mcp.json`'s `porthole` entry, the same way [uiCommand] replaces what
+     * `portholeUi` launches.
+     *
+     * Unset (the default), the entry runs the published npm package, pinned
+     * to [uiPackageVersion] (GRA-195). For a repo that builds the CLI itself —
+     * this repo's own sample is one — that pin still names a version on the
+     * registry, not the local build sitting right there, so an agent talking
+     * to `.mcp.json` would drift from the checkout the same way GRA-195's bug
+     * report describes. Point this at the local build instead:
+     * ```kotlin
+     * mcpCommand.set(listOf("node", "../porthole/mcp/dist/cli.js", "mcp"))
+     * ```
+     */
+    abstract val mcpCommand: ListProperty<String>
+
+    /**
      * How many events the in-process ring on the device holds before the
      * oldest ones are overwritten — see `EventRing.kt`. Sized in **events**,
      * not seconds: the ring is a fixed-size array, not a time-bounded buffer,
