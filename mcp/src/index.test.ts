@@ -2846,6 +2846,7 @@ describe("GRA-234: ask_system_trace on a trace path that does not exist", () => 
         from: 0,
         to: 1_000,
         traceProcessor,
+        detail: "normal",
       });
 
       expect(result.isError).toBeFalsy();
@@ -2889,11 +2890,16 @@ describe("GRA-234: ask_system_trace on a trace path that does not exist", () => 
     // buildRig's wait-for-hello, and a hello handler that never resolves,
     // with the socket nudged to connect and waited on, holds "handshaking"
     // open for the length of this test.
-    const rig = await buildRig({ connectDevice: false, handlers: { hello: () => new Promise(() => {}) } });
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
     rig.device.start();
     await waitUntil(() => rig.device.state === "handshaking");
     try {
-      const result = await rig.client.callTool("ask_system_trace", { trace: path.join(tmpdir(), "does-not-exist.pftrace") });
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: path.join(tmpdir(), "does-not-exist.pftrace"),
+      });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("still waiting on its first check-in");
       expect(result.text).not.toContain("No such trace file");
@@ -3419,7 +3425,11 @@ describe("GRA-72: accessibility", () => {
     };
   }
 
-  const densityEvent = { event: "device", t: 0, data: { kind: "profile", density: String(DENSITY) } };
+  const densityEvent = {
+    event: "device",
+    t: 0,
+    data: { kind: "profile", density: String(DENSITY) },
+  };
 
   afterEach(() => resetAccessibilityCaptureForTests());
 
@@ -3427,7 +3437,7 @@ describe("GRA-72: accessibility", () => {
     const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
     try {
       await rig.pushEvents([densityEvent]);
-      const result = await rig.client.callTool("accessibility", {});
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
       const finding = findings.find((f) => f.id === "a11y-missing-label");
@@ -3446,7 +3456,7 @@ describe("GRA-72: accessibility", () => {
     const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
     try {
       await rig.pushEvents([densityEvent]);
-      const result = await rig.client.callTool("accessibility", {});
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
       const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
       const finding = findings.find((f) => f.id === "a11y-touch-target-small");
       expect(finding).toBeDefined();
@@ -3464,10 +3474,14 @@ describe("GRA-72: accessibility", () => {
     const rig = await buildRig({ handlers: { semantics_tree: cleanSemanticsTree } });
     try {
       await rig.pushEvents([densityEvent]);
-      const result = await rig.client.callTool("accessibility", {});
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("nothing found, 1 node(s) checked");
-      const payload = result.json as { findings: unknown[]; nodesChecked: number; coverage: string[] };
+      const payload = result.json as {
+        findings: unknown[];
+        nodesChecked: number;
+        coverage: string[];
+      };
       expect(payload.findings).toEqual([]);
       expect(payload.nodesChecked).toBe(1);
       expect(payload.coverage.length).toBeGreaterThan(0);
@@ -3480,12 +3494,13 @@ describe("GRA-72: accessibility", () => {
     const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
     try {
       await rig.pushEvents([densityEvent]);
-      const a11y = await rig.client.callTool("accessibility", {});
-      const findings = (a11y.json as { findings: Array<{ evidence?: Record<string, unknown> }> }).findings;
+      const a11y = await rig.client.callTool("accessibility", { detail: "normal" });
+      const findings = (a11y.json as { findings: Array<{ evidence?: Record<string, unknown> }> })
+        .findings;
       const stableId = findings[0]?.evidence?.stableId as string;
       expect(stableId).toBeTruthy();
 
-      const tree = await rig.client.callTool("semantics_tree", {});
+      const tree = await rig.client.callTool("semantics_tree", { detail: "normal" });
       const raw = tree.json as { root: Record<string, unknown> };
       const found = findByStableId(raw.root, stableId);
       expect(found, `stableId ${stableId} did not resolve through semantics_tree`).toBeDefined();
@@ -3519,11 +3534,15 @@ describe("GRA-72: accessibility", () => {
 
       // A capture, from the pre-existing semantics_tree tool -- GRA-72's own
       // decision that either tool feeds the same cache.
-      await rig.client.callTool("semantics_tree", {});
+      await rig.client.callTool("semantics_tree", { detail: "normal" });
       expect(semanticsCalls).toBe(1);
 
       const before = semanticsCalls;
-      const result = await rig.client.callTool("findings", { from: 0, to: 10_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 10_000,
+      });
       // No fresh RPC paid for by findings itself -- the whole point of
       // GRA-72's fold-in decision.
       expect(semanticsCalls).toBe(before);
@@ -3542,8 +3561,12 @@ describe("GRA-72: accessibility", () => {
 
       // A capture at CAPTURED_AT (5000) -- but findings then asks about a
       // window that does not cover it.
-      await rig.client.callTool("accessibility", {});
-      const result = await rig.client.callTool("findings", { from: 0, to: 1_000 });
+      await rig.client.callTool("accessibility", { detail: "normal" });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 1_000,
+      });
       const findings = (result.json as { findings: Array<{ id: string }> }).findings;
       expect(findings.some((f) => f.id.startsWith("a11y-"))).toBe(false);
     } finally {
@@ -3563,7 +3586,7 @@ describe("GRA-72: accessibility", () => {
     });
     try {
       await rig.pushEvents([{ event: "recompose", t: 1_000, data: {} }]);
-      await rig.client.callTool("findings", { from: 0, to: 2_000 });
+      await rig.client.callTool("findings", { detail: "normal", from: 0, to: 2_000 });
       expect(semanticsCalls).toBe(0);
     } finally {
       await rig.close();
