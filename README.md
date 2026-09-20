@@ -1352,12 +1352,27 @@ next to `frames`' `firstDraw` one, since a warm or hot launch has no
 first-draw frame of its own to key off — that flag is spent once, by the
 process's very first window.
 
-`findings` turns a slow one into a `startup-slow` entry naming the phase with
-the widest gap, and — the cheapest and most valuable part of this — cross-references
-any `db-on-main-thread` or `main-thread-stall` finding that fell inside the
-startup window, which is where the fix usually is. The threshold is
-classification-specific and not invented for this project: 5s cold, 2s warm,
-1.5s hot, the same lines [Android vitals calls "excessive"](https://developer.android.com/topic/performance/vitals/launch-time).
+`findings` judges every launch in the window on its own, not only the
+newest one — StartupCollector emits one `startup` event per launch, not one
+per session, so a slow cold launch's own finding must not vanish the moment
+a later, fast relaunch's event becomes the last one in the buffer. A cold
+launch's `totalMs` — fork to first frame — gets a `startup-slow` entry past
+Android vitals' own 5s "excessive" cold-startup line, naming the phase with
+the widest gap and — the cheapest and most valuable part of this —
+cross-referencing any `db-on-main-thread` or `main-thread-stall` finding
+that fell inside that specific launch's own window, which is where the fix
+usually is.
+
+Warm and hot launches get no `startup-slow` today, deliberately. Each
+`startup` event carries `originKind` — `fork` for the one cold launch,
+`activity` for every relaunch after it — and a warm or hot launch's origin
+is the relaunched Activity's own `onCreate`/`onStart`, which is already
+inside the work the system did to bring the app back, not the launch
+request `am start -W` and Android vitals both measure from. Applying
+vitals' 2s/1.5s lines to that shorter span would be comparing two different
+things as if they were one — see the note on `am start -W` below for by how
+much. Warm and hot events are still there, raw, via `timeline`; there is
+just no threshold for that span this project is willing to invent yet.
 
 **No app code is required — reportFullyDrawn included.** androidx.activity
 1.7 gave `ComponentActivity` a `fullyDrawnReporter`, and `ComponentActivity`'s
@@ -1371,14 +1386,33 @@ nothing outside the app a way to observe a plain `Activity.reportFullyDrawn()`
 call at all — no listener for it, and the system's own logcat line naming it
 is written by `system_server` under a different uid than the app's own,
 which `logs`' own restriction (below) already rules out reading. Skip both
-and `findings` says once, as a note, that it was never observed — an honest
-"we don't know," not a claim that the app is slow to draw.
+and `findings` says once, as a note, that the app's **cold** launch never
+reported itself fully drawn — an honest "we don't know," not a claim that
+the app is slow to draw. Judged against the cold launch only: a warm or hot
+event's own ending frame, not a timer, is what closes it, so there is no
+grace window in which a later relaunch could fairly be told apart from one
+that simply hasn't reported yet.
 
 **The number is for finding the phase, not for quoting.** A debug build's
 startup is not a user's: no R8, JIT compilation instead of a warm AOT
 profile, and dexopt in a state release never ships in. `findings`' own tool
 description says this plainly, because the agent reading it is who ends up
 quoting the number.
+
+**`am start -W`'s own TotalTime is not this collector's `totalMs`, and the
+gap is the point, not a bug.** `am start -W` starts timing at the launch
+request itself — before the process even forks — and stops once the system
+has seen the first frame; Porthole's origin is the fork (cold) or the
+relaunched Activity's own first lifecycle callback (warm/hot), so its total
+is always the smaller of the two, by however long the system's own
+process-creation and window-setup work took. Emulator numbers, illustration
+only — an emulator is a fixture, not hardware, the same distinction
+`docs/verified.md` draws — from one cold launch: `am start -W` reported
+`TotalTime: 3941` against this collector's `totalMs: 1949`; the same app's
+next launch, hot, reported `TotalTime: 207` against `totalMs: 3`. The
+hardware reconciliation GRA-60's own acceptance criteria ask for — the same
+pairing, on a physical device, with the gap accounted for — has not been run
+yet.
 
 Needs API 24 for `Process.getStartUptimeMillis()` — this module's `minSdk` is
 26, so that is never actually a gate in practice. A process only ever runs
