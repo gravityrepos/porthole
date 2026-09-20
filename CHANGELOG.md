@@ -43,15 +43,28 @@ PR that makes the change, not after the fact.
   server, that streams findings as they occur and prints one line — severity,
   title, the window on the device uptime clock, and the resolved `where`
   when `PORTHOLE_PROJECT_ROOT` is set — the instant one crosses a severity
-  threshold (`--severity error` by default). `--until-first` exits 1 with
-  the finding already on stdout; `--json` prints one finding object per
-  line for a hook to parse, with every diagnostic on stderr only; `--timeout
-  <seconds>` gives up with exit 3 rather than waiting forever. Never exits
-  merely because the app disconnects — it reconnects on its own, the same as
-  `porthole ui`. Shares `watermark.ts`'s on-disk `lastReportedErrorT` with
+  threshold (`--severity error` by default). Point findings (a stall, a
+  failed call, a main-thread query) print on every genuinely new
+  occurrence; `frames-dropped`/`recompose-hotspot`, whose `count` is a
+  running tally over one still-open episode rather than discrete
+  occurrences, reprint at most once every 10 seconds while that episode
+  continues, instead of flooding a line per tick. `--until-first` exits 1
+  with the finding already on stdout; `--json` prints one finding object
+  per line for a hook to parse, with every diagnostic on stderr only;
+  `--timeout <seconds>` gives up with exit 3 rather than waiting forever;
+  exit 2 also covers an internal defect in the evaluation loop itself,
+  never exit 1, so a hook never reads a crash as a finding it can quote.
+  Never exits merely because the app disconnects — it reconnects on its
+  own, the same as `porthole ui`. Routes its `adb forward` through the same
+  GRA-199 `forwardTarget()` (`--application-id`/`--legacy-tcp-port`,
+  `PORTHOLE_APPLICATION_ID`/`PORTHOLE_LEGACY_TCP_PORT`) `porthole
+  ui`/`porthole capture` already use, refusing rather than guessing a
+  socket name. Shares `watermark.ts`'s on-disk `lastReportedErrorT` with
   the MCP surface's own "since your last call" banner, keyed by the same
-  session identity, so a `watch` and an agent on one session never
-  double-report the same error (GRA-56).
+  session identity, so a `watch` and an agent on one session do not
+  double-report the same error once each has seen the other's write — not
+  full mutual exclusion: two live processes that both decide inside the
+  same ~200ms poll interval can still both report an error once (GRA-56).
 - `system_trace_start`/`system_trace_snapshot`/`system_trace_stop`: a
   detached Perfetto session that records continuously into a fixed-size
   ring buffer, so a system trace of a problem that already happened can be

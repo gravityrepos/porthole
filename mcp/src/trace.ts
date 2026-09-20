@@ -272,7 +272,12 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
     ),
 
     "recompose.total": recompose.length,
-    "recompose.peakPerFrame": perFrame.size ? Math.max(...perFrame.values()) : 0,
+    // Not `Math.max(...perFrame.values())` — the same spread-into-a-call
+    // hazard `minMax` below exists to avoid (GRA-56 QA, W3): a long enough
+    // run buckets into more than engine's argument-count ceiling of 16ms
+    // frame slots. `minMax` is a function declaration, hoisted, so it is
+    // reachable from here despite being defined later in this file.
+    "recompose.peakPerFrame": perFrame.size ? minMax([...perFrame.values()]).max : 0,
 
     "memory.peakHeapMb": memory.reduce((peak, e) => Math.max(peak, num(e.data.heapUsedMb)), 0),
     "memory.peakRamMb": memory.reduce((peak, e) => Math.max(peak, num(e.data.totalRamMb)), 0),
@@ -286,6 +291,31 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
 }
 
 /**
+ * The min and max of a list of numbers, in one pass — never
+ * `Math.min(...values)`/`Math.max(...values)`. Spreading into `Math.min`/
+ * `Math.max` passes every element as its own call argument, and V8 throws
+ * `RangeError: Maximum call stack size exceeded` somewhere past roughly
+ * 100k–125k of them (the exact ceiling is an engine implementation detail,
+ * not a documented contract) — a real ceiling `porthole watch` (GRA-56 QA,
+ * W3) can actually reach on a long-running session, where `eventWindow`
+ * below used to be called with however many events a lane accumulated over
+ * the whole process's life. `findingsOf`'s only callers with a bound this
+ * small in practice are one capture or one `findings` window; `watch` has
+ * neither, which is why this fix belongs here rather than only in the
+ * caller.
+ */
+function minMax(values: number[]): { min: number; max: number } {
+  let min = values[0];
+  let max = values[0];
+  for (let i = 1; i < values.length; i++) {
+    const value = values[i];
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return { min, max };
+}
+
+/**
  * The envelope from the earliest to the latest of a set of real, timestamped
  * events — for a finding that aggregates several occurrences (a run of
  * blocking GCs, every `trimMemory` call) rather than naming one. Unlike a
@@ -296,16 +326,16 @@ export function metricsOf(events: DeviceEvent[]): Record<string, number> {
  */
 function eventWindow(events: DeviceEvent[]): { from: number; to: number } | undefined {
   if (events.length === 0) return undefined;
-  const ts = events.map((e) => e.t);
-  return { from: Math.min(...ts), to: Math.max(...ts) };
+  const { min, max } = minMax(events.map((e) => e.t));
+  return { from: min, to: max };
 }
 
 /** `eventWindow`'s counterpart for a list of spans rather than raw events. */
 function spanWindow(spans: Span[]): { from: number; to: number } | undefined {
   if (spans.length === 0) return undefined;
-  const starts = spans.map((s) => (s.open ? s.startedAt : (s.startedAt ?? s.endedAt)));
-  const ends = spans.map((s) => (s.open ? s.startedAt : s.endedAt));
-  return { from: Math.min(...starts), to: Math.max(...ends) };
+  const starts = minMax(spans.map((s) => (s.open ? s.startedAt : (s.startedAt ?? s.endedAt))));
+  const ends = minMax(spans.map((s) => (s.open ? s.startedAt : s.endedAt)));
+  return { from: starts.min, to: ends.max };
 }
 
 /** The mark in force at a moment, or undefined if the run was not marked. */

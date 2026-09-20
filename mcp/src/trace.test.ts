@@ -1045,6 +1045,30 @@ describe("GRA-113: every finding carries a window, taken from the events that pr
     expect(finding?.window).toEqual({ from: 50, to: 700 });
   });
 
+  /**
+   * GRA-56 QA (W3): `eventWindow` (blocking-gc, trim-memory) and
+   * `spanWindow` (work-retried) used to compute their `{from, to}` with
+   * `Math.min(...ts)`/`Math.max(...ts)` — spreading every element into the
+   * call as its own argument, which V8 throws `RangeError: Maximum call
+   * stack size exceeded` on somewhere past roughly 100k-125k of them. QA
+   * measured `porthole watch` (which recomputes `findingsOf` over its own
+   * accumulated history) actually reaching that ceiling on a long-running
+   * session; a caller-side bound (`watch.ts`'s `trimEventWindow`) is the
+   * primary fix for that specific growth, but `findingsOf` itself must not
+   * be a landmine for any other caller (`porthole capture` over a very
+   * long recording, say) that hands it a large array. 200k is comfortably
+   * past the ceiling; a loop-based min/max (`minMax`) has none.
+   */
+  it("does not throw computing a window from far more events than Math.min/Math.max can take as spread arguments", () => {
+    const events = Array.from({ length: 200_000 }, (_, i) => event("gc", i, { blocking: 1, pausedMs: 1 }));
+    let findings: ReturnType<typeof find> = [];
+    expect(() => {
+      findings = find(events);
+    }).not.toThrow();
+    const finding = findings.find((f) => f.id === "blocking-gc");
+    expect(finding?.window).toEqual({ from: 0, to: 199_999 });
+  });
+
   it("places recompose-hotspot across only the hottest component's own recompositions, not every recompose in the run", () => {
     const events = [
       ...Array.from({ length: 150 }, (_, i) => event("recompose", i, { name: "Cart.ItemRow" })),

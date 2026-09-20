@@ -58,17 +58,31 @@ import { Watermark } from "./watermark.js";
  * mention the same low-priority finding once; both agree, to the millisecond,
  * about every `error`.
  *
- * **Why the shared field alone, not a full replay of `errorBanner()`'s own
- * algorithm.** `errorBanner()` (index.ts) always advances `lastReportedErrorT`
- * to "the newest event examined," even when nothing was wrong, because its
- * caller already has a live ring to answer "newest" from. `watch` only
- * advances the mark when it actually prints something, to the finding's own
- * window — a narrower, more conservative advance that can occasionally leave
- * a later banner re-scanning a span `watch` already looked at and found
- * nothing further in, but can never cause either side to swallow a real
- * error the other has not yet said out loud. Given the choice between "an
- * occasional harmless re-scan" and "a dropped error," the former is what
- * this file chooses.
+ * **The mark records "newest event examined," matching `errorBanner()`
+ * exactly — not a per-finding anchor (GRA-56 QA, W2).** An earlier version
+ * of this file advanced `lastReportedErrorT` to the *finding's own*
+ * `window.to` instead, reasoning that a narrower advance could only ever
+ * leave a later banner re-scanning a harmless already-quiet span. That
+ * reasoning missed that several error findings pin `window` to one *fixed*
+ * contributing event rather than the newest — `findingsOf` (trace.ts)
+ * anchors `http-failed` to the *first* failed call and `main-thread-stall`/
+ * `db-on-main-thread` to the *worst* one so far, so a second, distinct, but
+ * less severe occurrence raises `count` without moving `window` at all. The
+ * shared mark, already advanced past that fixed window by the first print,
+ * then silently swallowed every occurrence after it — a `watch` left
+ * running went permanently quiet after one HTTP failure. Anchoring on
+ * `newest` (the latest event this evaluation has actually looked at) and
+ * advancing it every time this process looks — whether or not it found
+ * anything, exactly like `errorBanner()` — fixes that: the question the
+ * mark answers is "has anyone examined the stream up to here," which does
+ * not depend on which finding's own window happened to move.
+ *
+ * **Not full mutual exclusion.** `watermark.ts`'s own module comment (W1)
+ * says this precisely: refresh-then-decide-then-write is three steps, not
+ * one atomic operation, so a `watch` and the MCP surface's banner that both
+ * make that decision inside the same ~200ms poll interval can still both
+ * report the same error once. Neither repeats it afterward, once each has
+ * seen the other's write.
  */
 
 // ---------------------------------------------------------------------------
@@ -80,6 +94,40 @@ const SEVERITY_VALUES = ["error", "warning", "note"] as const;
 /** Lower ranks first, same as `trace.ts`'s own `findings.sort` — `error` is worst. */
 const SEVERITY_RANK: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
 
+/**
+ * GRA-56 QA (F25): the two `findingsOf` (trace.ts) ids whose `count` is a
+ * running tally over one continuous, still-open window rather than a
+ * count of discrete occurrences. `frames-dropped` sums `missedFrames`
+ * across every `frame` event in view; `recompose-hotspot` sums a
+ * component's own recompositions — both climb roughly every tick for as
+ * long as the episode (jank, a recomposition storm) keeps going, and the
+ * plain "count grew since last print" rule every other finding uses would
+ * print a fresh line on essentially every 200ms tick: QA measured one
+ * jank episode producing 17 lines, counts walking 32 -> 209, "about a line
+ * a second for as long as the jank lasts" — a flood for a `--json` hook to
+ * parse, not a list of seventeen separate problems.
+ *
+ * Point findings — a stall, a failed call, a query on the main thread —
+ * are the opposite on purpose and are unaffected: `findingsOf` anchors
+ * each of those on one specific contributing event (the worst stall, the
+ * first failure), so "count grew" means a genuinely new, distinct
+ * occurrence happened, and every one of those still gets its own line
+ * (see the W2 fix above `runWatch`'s own module comment).
+ */
+const AGGREGATE_FINDING_IDS = new Set(["frames-dropped", "recompose-hotspot"]);
+
+/**
+ * The throttle F25 asks to pick one of two shapes for ("re-print at most
+ * once per 10s per finding id, or when the count at least doubles") —
+ * decided as the time-based one: simpler to reason about and to test
+ * deterministically, and it is the shape QA's own report already measures
+ * against ("about a line a second... at most once per 10s"). On the
+ * device uptime clock every window and every printed line already speaks
+ * in, not wall-clock time, so a synthetic history (a test, or a session
+ * replayed faster than it was recorded) throttles correctly too.
+ */
+const AGGREGATE_REPRINT_MS = 10_000;
+
 export interface WatchOptions {
   port: number;
   serial?: string;
@@ -89,6 +137,10 @@ export interface WatchOptions {
   /** Milliseconds. `undefined` means "no timeout — run until SIGINT or (with --until-first) a finding." */
   timeoutMs?: number;
   forward: boolean;
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_APPLICATION_ID`. */
+  applicationId?: string;
+  /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_LEGACY_TCP_PORT` being set. */
+  legacyTcpPort: boolean;
 }
 
 export const WATCH_USAGE = `
@@ -96,23 +148,38 @@ porthole watch — block until something breaks, and say so
 
   porthole watch [options]
 
-  --severity <level>   error (default), warning, or note — report at or above this
-  --until-first         exit the instant a qualifying finding appears
-  --json                one finding object per line on stdout; diagnostics go to stderr
-  --timeout <seconds>   give up after this long (exit 3) instead of waiting forever
-  --port <n>            device port (default 8677)
-  --serial <id>         adb device serial, when more than one is attached
-  --no-forward          skip 'adb forward'; use it if the bridge is already up
+  --severity <level>     error (default), warning, or note — report at or above this
+  --until-first           exit the instant a qualifying finding appears
+  --json                  one finding object per line on stdout; diagnostics go to stderr
+  --timeout <seconds>     give up after this long (exit 3) instead of waiting forever
+  --port <n>              host port the forward listens on, not a port the device opens (default 8677)
+  --serial <id>           adb device serial, when more than one is attached
+  --application-id <id>   the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
+  --legacy-tcp-port       forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)
+  --no-forward            skip 'adb forward'; use it if the bridge is already up
 
 Connects like any other client — its own socket to the device, independent of
 whatever MCP server may also be attached — and streams findings as they occur,
 one line each. Never exits merely because the app disconnects: it waits and
 reconnects on its own, the same as 'porthole ui'.
 
+GRA-199: the device side listens on an abstract socket named for the app
+(localabstract:porthole.<applicationId>), not a shared TCP port — --port is
+the *host* port adb forwards to it. Without --application-id (or
+PORTHOLE_APPLICATION_ID) and without --legacy-tcp-port (or
+PORTHOLE_LEGACY_TCP_PORT), --forward refuses rather than guessing a socket
+name; pass --no-forward if the bridge is already up some other way.
+
+A stall, a failed call, a query on the main thread — each occurrence gets
+its own line. frames-dropped and recompose-hotspot are different: their
+count is a running tally over one still-open episode, not a count of
+discrete events, so while one is ongoing this reprints at most once every
+10 seconds rather than on every tick.
+
 Exit codes:
   0   clean stop (SIGINT)
   1   a qualifying finding was found (--until-first only)
-  2   bad arguments, or nothing to connect to
+  2   bad arguments, or an internal error stopped the watch
   3   --timeout elapsed with nothing (yet) to report
 `;
 
@@ -140,6 +207,8 @@ export function parseWatch(argv: string[]): WatchOptions {
     untilFirst: false,
     json: false,
     forward: true,
+    applicationId: process.env.PORTHOLE_APPLICATION_ID || undefined,
+    legacyTcpPort: Boolean(process.env.PORTHOLE_LEGACY_TCP_PORT),
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -181,6 +250,15 @@ export function parseWatch(argv: string[]): WatchOptions {
         process.exit(2);
       }
       options.serial = value;
+    } else if (arg === "--application-id") {
+      const value = requiredValue(argv[++i], "--application-id");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.applicationId = value;
+    } else if (arg === "--legacy-tcp-port") {
+      options.legacyTcpPort = true;
     } else if (arg === "--no-forward") {
       options.forward = false;
     } else if (arg === "--help" || arg === "-h") {
@@ -202,7 +280,10 @@ export function parseWatch(argv: string[]): WatchOptions {
  * Decided (GRA-56 open question 3), and pinned by `watch.test.ts`:
  *   0 — clean stop (SIGINT)
  *   1 — `--until-first` found a qualifying finding
- *   2 — bad arguments (`parseWatch` above) — nothing ever connects
+ *   2 — bad arguments (`parseWatch` above), so nothing ever connects; or
+ *       `evaluate()` itself threw (GRA-56 QA, W3) — an internal defect, not
+ *       a finding, so it must never read as WATCH_EXIT.FOUND to a hook
+ *       checking `$?`
  *   3 — `--timeout` elapsed before 1 or 0 happened
  * A disconnect is never in this list on purpose: `DeviceClient` reconnects
  * on its own, and `watch` treats that exactly as `porthole ui` does — a
@@ -226,11 +307,6 @@ function windowText(finding: Finding, fallbackT: number): string {
   if (finding.window) return `t=${finding.window.from}..${finding.window.to}`;
   if (finding.spanning) return `t=${fallbackT} (spanning — see detail)`;
   return `t=${fallbackT}`;
-}
-
-/** The single `t` this finding is "reported at," for the shared watermark — the end of its window when it has one, else the newest event examined. */
-function anchorT(finding: Finding, fallbackT: number): number {
-  return finding.window?.to ?? fallbackT;
 }
 
 /**
@@ -258,6 +334,48 @@ function formatLine(finding: Finding, fallbackT: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// bounded history — GRA-56 QA, W3
+// ---------------------------------------------------------------------------
+
+/**
+ * How much history `evaluate()` keeps. A watch left running for hours must
+ * not grow its own event buffer, or the cost of recomputing findings over
+ * it, without bound — QA measured 14ms/tick at 1 hour of unbounded growth
+ * and 107ms/tick, 189MB, at 10 hours, and `findingsOf`'s own `eventWindow`
+ * (trace.ts) throws a `RangeError` somewhere past ~110k accumulated events
+ * regardless of the recompute cost, from spreading a whole lane's
+ * timestamps into `Math.min`/`Math.max` (fixed separately, but a buffer
+ * this large is also simply more than a live watch has any use for).
+ *
+ * 10 minutes: `findingsOf` needs an occurrence's `_start` event still in
+ * view to report it as a hang at all (`stillOpenFinding`, trace.ts) — the
+ * reason this file keeps full history within its window rather than
+ * `errorBanner()`'s own newest-slice-only delta — and nothing this project
+ * calls a stall, a blocking GC, or a hung call is worth still narrating ten
+ * minutes after the fact on a *live* watch; `porthole save`/`porthole
+ * report` exist for a longer look back after something happened.
+ */
+export const WATCH_EVENT_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Drops events older than `windowMs` before `newest`, in place — a
+ * `splice`, not a rebuild, since `evaluate()` calls this every tick and a
+ * fresh array every 200ms is its own avoidable churn. Exported so
+ * `watch.test.ts` can pin the bound directly and fast, rather than only
+ * reachable by pushing hours of real events through a real `runWatch()`.
+ */
+export function trimEventWindow(
+  events: DeviceEvent[],
+  newest: number,
+  windowMs: number = WATCH_EVENT_WINDOW_MS,
+): void {
+  const cutoff = newest - windowMs;
+  let dropTo = 0;
+  while (dropTo < events.length && events[dropTo].t < cutoff) dropTo++;
+  if (dropTo > 0) events.splice(0, dropTo);
+}
+
+// ---------------------------------------------------------------------------
 // the watch itself
 // ---------------------------------------------------------------------------
 
@@ -275,6 +393,8 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
   const events: DeviceEvent[] = [];
   /** Local, per-process dedup across every severity this run cares about: id -> highest `count` already printed. Reset whenever the device's identity changes (a genuinely new process, not a transient reconnect) — see the "hello" listener below. */
   const reported = new Map<string, number>();
+  /** GRA-56 QA (F25): id -> the `t` (device uptime) an `AGGREGATE_FINDING_IDS` member was last actually printed at — checked against `AGGREGATE_REPRINT_MS` before a reprint, updated only when a print actually happens (never on a throttled skip, so a growing count still gets picked up the moment the window opens rather than needing its own further growth to be noticed). Reset alongside `reported` on a new identity. */
+  const lastAggregatePrintAt = new Map<string, number>();
 
   const watermark = new Watermark();
   /** `undefined` — not yet resolved for the current identity. `null` — resolved, and there is nowhere to persist to (sessions off, or the directory could not be created): the shared watermark degrades to in-memory-only, same as `Watermark` itself already does for a null directory. */
@@ -310,6 +430,7 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
     identityKey = key;
     events.length = 0;
     reported.clear();
+    lastAggregatePrintAt.clear();
     watermarkDir = undefined;
   });
 
@@ -386,9 +507,10 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
   let evaluating = false;
 
   /**
-   * Recomputes findings over everything seen so far and prints whatever is
-   * new. Full-history, like `porthole capture`'s own final report — not
-   * `errorBanner()`'s windowed delta — because a "still open" finding (the
+   * Recomputes findings over the retained history (bounded — see
+   * `WATCH_EVENT_WINDOW_MS`/`trimEventWindow` above, GRA-56 QA W3) and
+   * prints whatever is new. Full-history *within that window*, not
+   * `errorBanner()`'s newest-slice-only delta — a "still open" finding (the
    * hung call `--until-first` most wants to catch) is only visible when its
    * `_start` event is still in view; windowing to just the newest slice
    * would silently stop reporting a hang that started before the window
@@ -402,6 +524,7 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
     try {
       if (events.length === 0) return;
       const newest = events[events.length - 1].t;
+      trimEventWindow(events, newest);
       const marks: Trace["marks"] = events
         .filter((e) => e.event === "mark")
         .map((e) => ({ at: e.t, label: String(e.data.label ?? ""), detail: e.data.detail ? String(e.data.detail) : undefined }));
@@ -413,6 +536,16 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
       });
       const findings = findingsOf(events, marks, profile.refreshHz, profile.assumed);
 
+      // GRA-56 QA, W2: decided at most once per tick, lazily (only once an
+      // error-severity finding actually needs an answer) — never once per
+      // finding. Deciding it fresh for each finding in the same tick would
+      // have the first print's own `recordReportedErrorT(newest)` close the
+      // gate before the second finding in that same loop ever asked. `null`
+      // means "not decided yet this tick"; once decided it applies to every
+      // error-severity finding for the rest of this tick, and is what gets
+      // written once, after the loop, if it was ever consulted at all.
+      let errorGateOpen: boolean | null = null;
+
       for (const finding of findings) {
         if (settled) return;
         if (!severityQualifies(finding.severity)) continue;
@@ -421,13 +554,43 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
         const prior = reported.get(finding.id);
         if (prior !== undefined && count <= prior) continue; // nothing new about this one since last time
 
+        // GRA-56 QA (F25): checked — and only advanced — here, before the
+        // error-severity branch below ever touches the shared watermark
+        // (a throttled skip must never advance anything shared) and before
+        // `reported` is updated (so a still-growing count is picked up the
+        // instant the throttle window reopens, rather than needing to grow
+        // again first to pass the check above on some later tick).
+        if (AGGREGATE_FINDING_IDS.has(finding.id)) {
+          const lastAt = lastAggregatePrintAt.get(finding.id);
+          if (lastAt !== undefined && newest - lastAt < AGGREGATE_REPRINT_MS) continue;
+          lastAggregatePrintAt.set(finding.id, newest);
+        }
+
         if (finding.severity === "error") {
           await ensureWatermark();
-          const t = anchorT(finding, newest);
-          const last = watermark.get().lastReportedErrorT;
+          if (errorGateOpen === null) {
+            // Refreshed explicitly, not left to whatever `ensureWatermark`
+            // last loaded: that only opens the watermark once per session
+            // identity, but another live process (the MCP surface's own
+            // banner, another `watch`) can write to it on every tick of
+            // its own — see watermark.ts's module comment (W1).
+            await watermark.refresh();
+            const last = watermark.get().lastReportedErrorT;
+            errorGateOpen = last === null || newest > last;
+            // Written here, immediately — not deferred to after the loop.
+            // `--until-first` returns from inside this very loop the
+            // instant it prints (below), which would skip a write placed
+            // after the loop entirely: `finish()` calls `device.stop()`
+            // and resolves the caller's `await runWatch(...)` before this
+            // function ever reaches a line past that `return`. Advances
+            // whenever this tick actually looked, whether or not it found
+            // (or was allowed to print) anything — `errorBanner()`'s own
+            // rule (index.ts), so a quiet stretch does not get re-examined
+            // from the same old boundary by whichever side looks next.
+            await watermark.recordReportedErrorT(newest);
+          }
           reported.set(finding.id, count);
-          if (last !== null && t <= last) continue; // another client on this session already reported it
-          await watermark.recordReportedErrorT(t);
+          if (!errorGateOpen) continue; // another client already examined up through `newest`
         } else {
           reported.set(finding.id, count);
         }
@@ -438,6 +601,18 @@ export async function runWatch(options: WatchOptions, signal?: AbortSignal): Pro
           return;
         }
       }
+    } catch (error) {
+      // An internal defect (a `findingsOf`/`resolveProfile` throw, most
+      // plausibly), not "found a finding" — WATCH_EXIT.FOUND (1) would be
+      // indistinguishable from success to a hook checking `$?` (GRA-56 QA,
+      // W3). Reported on stderr like every other diagnostic; exits under
+      // the same code as "bad arguments, or nothing to connect to" — from
+      // the harness's point of view, an internal error and never having
+      // answered the question at all are the same kind of failure, and
+      // this ticket's own exit-code table (WATCH_EXIT, above) has no
+      // reason to invent a fifth code for the same fact.
+      process.stderr.write(`porthole watch: internal error: ${(error as Error).stack ?? String(error)}\n`);
+      finish(WATCH_EXIT.BAD_ARGS);
     } finally {
       evaluating = false;
     }
