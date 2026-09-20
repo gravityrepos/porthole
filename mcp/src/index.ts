@@ -1728,8 +1728,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "moment; `thread_states` and `cpu` are a property of the whole window instead and never " +
         "carry one. `cpu` also never asserts causation — it says where the main thread ran and " +
         "who else wanted the same cores during a window something else already flagged, not why " +
-        "that window was slow, and it stays silent unless the placement was a material share of " +
-        "the window, not a passing moment.\n\n" +
+        "that window was slow — and it stays silent unless running time on a little core, or at a " +
+        "throttled frequency (a different bar for a little core than a big one), cleared 5% of " +
+        "the window's own duration, not a fixed number of milliseconds regardless of how long the " +
+        "window was.\n\n" +
         "Needs `trace_processor_shell`, which is not bundled — it is a large platform-specific " +
         "binary — but is fetched on request: `./gradlew portholeTraceProcessor` downloads the " +
         "pinned release, checks its SHA-256 and caches it where this tool looks.",

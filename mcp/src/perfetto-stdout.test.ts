@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -12,6 +12,7 @@ import {
   matchBatch,
   parseRows,
   QUESTIONS,
+  runScript,
   type Rows,
 } from "./perfetto.js";
 
@@ -214,7 +215,10 @@ describe("parseRows + interpret, on GRA-61's new questions (hand-written, see PR
   });
 
   it("reads cpu.csv's little-core placement and names the busiest other process on the same cores", () => {
-    const findings = interpret({ cpu: rows("cpu") });
+    // 180ms of main-thread running time in a 1s window (18%) — comfortably
+    // past WINDOW_FRACTION (5%), the same way askTrace would derive it from
+    // fromNs/toNs (GRA-61 QA 61-B).
+    const findings = interpret({ cpu: rows("cpu") }, undefined, 1_000);
     const placement = findings.find((f) => f.id === "trace-cpu-placement");
     expect(placement).toBeDefined();
     expect(placement?.confidence).toBe("correlated");
@@ -231,7 +235,7 @@ describe("parseRows + interpret, on GRA-61's new questions (hand-written, see PR
       monitor_contention: rows("monitor_contention"),
       cpu: rows("cpu"),
     };
-    const findings = interpret(all, (bootNs) => bootNs / 1e6);
+    const findings = interpret(all, (bootNs) => bootNs / 1e6, 1_000);
     expect(findings.length).toBeGreaterThan(0);
     for (const f of findings) {
       const hasWindow = f.window !== undefined;
@@ -362,31 +366,111 @@ describe("matchBatch, on the five real fixtures concatenated in question order",
  * This is BRIEFING's recurring lesson applied to `askTrace` itself: a
  * self-written fixture tests the format assumed, not the one that arrives, so
  * this runs the real wiring against the real pinned binary and a real
- * capture rather than another hand-built stand-in. It is gated on both being
- * present and skips cleanly otherwise — this machine has both today
- * (`findTraceProcessor()` finds the plugin's cached v58.2, and a real
- * 10.96MB capture sits in `.porthole/traces/` from a prior device session),
- * but neither is guaranteed on a fresh checkout or CI runner.
+ * capture rather than another hand-built stand-in. Gated on both being
+ * present and skips cleanly otherwise — neither is guaranteed on a fresh
+ * checkout or CI runner.
+ *
+ * GRA-61 QA (61-E): this used to name one specific capture by filename
+ * (`porthole-1789157802606.pftrace`), which stopped existing — `.porthole/`
+ * is gitignored and per-checkout, so a capture from one session is never
+ * guaranteed to survive into the next, and this test then skipped silently
+ * rather than failing loudly. `newestPftrace` discovers whatever is actually
+ * there instead of assuming a name, and the test discovers a real process to
+ * scope to from the trace itself (`system_server`, present on every Android
+ * capture this project has seen, hardware or emulator) rather than assuming
+ * `com.example.shop` is the one installed on whatever device or emulator
+ * produced the newest capture.
  */
+function newestPftrace(): string | null {
+  const dir = join(process.cwd(), ".porthole", "traces");
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((f) => f.endsWith(".pftrace"));
+  } catch {
+    return null;
+  }
+  if (names.length === 0) return null;
+  const newest = names
+    .map((name) => ({ name, mtimeMs: statSync(join(dir, name)).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+  return join(dir, newest.name);
+}
+
 describe("askTrace, end to end against the real binary and a real capture", () => {
   const binary = findTraceProcessor();
-  const trace = join(process.cwd(), ".porthole", "traces", "porthole-1789157802606.pftrace");
-  const ready = binary !== null && existsSync(trace);
+  const trace = newestPftrace();
+  const ready = binary !== null && trace !== null;
+
+  /**
+   * The trace's own bounds and one process name known to exist in it,
+   * queried directly rather than assumed — the same two facts the old,
+   * now-stale hardcoded test read off a specific capture by hand.
+   * `system_server` not existing in a trace this project actually captured
+   * would be stranger than the trace itself, so that case is left to fail
+   * loudly (an empty destructure) rather than silently skipping — unlike a
+   * missing trace or binary entirely, which is the ordinary, expected case
+   * on a fresh checkout.
+   */
+  async function discover(): Promise<{ fromNs: number; toNs: number; packageName: string }> {
+    const bounds = await runScript(
+      binary as string,
+      ["query", "-f", "-", trace as string],
+      "SELECT MIN(ts) AS a, MAX(ts) AS b FROM slice;",
+      30_000,
+    );
+    const [boundsRow] = parseRows(bounds.stdout);
+    const proc = await runScript(
+      binary as string,
+      ["query", "-f", "-", trace as string],
+      "SELECT name FROM process WHERE name = 'system_server' LIMIT 1;",
+      30_000,
+    );
+    const [procRow] = parseRows(proc.stdout);
+    return {
+      fromNs: Number(boundsRow["a"]),
+      toNs: Number(boundsRow["b"]),
+      packageName: String(procRow["name"]),
+    };
+  }
 
   it.skipIf(!ready)("answers every question in one call against a real trace", async () => {
-    // The window and package below are this specific capture's own bounds
-    // and its one app process (`com.example.shop`, upid 53) — found by
-    // querying the trace directly with `SELECT MIN(ts), MAX(ts) FROM slice`
-    // and `SELECT name FROM process`, not guessed.
+    const { fromNs, toNs, packageName } = await discover();
+    const result = await askTrace({ binary: binary as string, trace: trace as string, packageName, fromNs, toNs });
+    expect(result.unanswered).toEqual([]);
+  });
+
+  /**
+   * GRA-61 QA (61-E)'s own request: run the three new questions against
+   * whatever real capture is actually here and confirm none of them errors
+   * against a real trace_processor load of a real file — compiling against
+   * an empty trace (the describe block below) is not the same proof.
+   *
+   * What this found, against the two real emulator captures available when
+   * this was last run (GRA-61's own final report has the details): `startup`
+   * ran clean and empty — neither capture recorded an app launch, so
+   * `android_startups` has nothing to say, which is a correct answer, not a
+   * failure. `monitor_contention` returned 20 real rows against
+   * `system_server`, comm-truncated thread names and all (`"eduling.default"`
+   * from a `...JobScheduling.default` thread — the same truncation
+   * `monitor_contention.csv`'s hand-written fixture stands in for). `cpu`
+   * returned one `main_thread` row and ten `other` rows — but with
+   * `cluster_type`, `avg_freq` and `max_freq` all NULL, because this
+   * emulator exposes no `cpu_frequency_counters` or cluster-capacity data at
+   * all, which `interpret()`'s own null-handling (61-A) reads correctly as
+   * "no gate can fire" rather than a crash or a fabricated 0Hz reading.
+   */
+  it.skipIf(!ready)("GRA-61's three new questions answer without error against this real trace", async () => {
+    const { fromNs, toNs, packageName } = await discover();
     const result = await askTrace({
       binary: binary as string,
-      trace,
-      packageName: "com.example.shop",
-      fromNs: 542738294836466,
-      toNs: 542749153837178,
+      trace: trace as string,
+      packageName,
+      fromNs,
+      toNs,
+      ask: ["startup", "monitor_contention", "cpu"],
     });
     expect(result.unanswered).toEqual([]);
-    expect(result.findings.length).toBeGreaterThan(0);
+    expect(result.asked).toHaveLength(3);
   });
 });
 

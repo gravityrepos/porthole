@@ -241,7 +241,18 @@ export const QUESTIONS: Question[] = [
           main_by_cpu AS (
             SELECT mrf.cpu AS core, cm.cluster_type AS cluster_type,
                    SUM(mrf.dur) AS dur,
-                   SUM(mrf.dur * COALESCE(mrf.freq, 0)) / NULLIF(SUM(mrf.dur), 0) AS avg_freq,
+                   -- 61-A: an interval with no frequency sample in force at its
+                   -- start is unknown, not 0Hz. CASE with no ELSE is NULL when
+                   -- unmatched, and SUM ignores NULL inputs, so an unsampled
+                   -- interval's dur drops out of both the numerator and the
+                   -- denominator together rather than surviving in the
+                   -- denominator against a zeroed numerator (which is what
+                   -- COALESCE(mrf.freq, 0) did, and how a 200ms interval with
+                   -- no sample read as "0% of max frequency" instead of unknown).
+                   -- A core with zero sampled intervals gets NULL/NULL — SQL
+                   -- NULL, same as the pre-existing all-null case.
+                   SUM(CASE WHEN mrf.freq IS NOT NULL THEN mrf.dur * mrf.freq END)
+                     / NULLIF(SUM(CASE WHEN mrf.freq IS NOT NULL THEN mrf.dur END), 0) AS avg_freq,
                    mf.max_freq AS max_freq
             FROM main_running_freq AS mrf
             LEFT JOIN android_cpu_cluster_mapping AS cm ON cm.ucpu = mrf.ucpu
@@ -355,7 +366,7 @@ const describeStartupReason = (reason: string): string => STARTUP_REASONS[reason
 /**
  * Gates for `trace-cpu-placement` (GRA-61 questions 8+9, merged).
  *
- * All three are deliberately conservative — the acceptance criterion this
+ * All four are deliberately conservative — the acceptance criterion this
  * exists to satisfy is silence on a trace from an idle device on a desk,
  * plugged into power, not sensitivity on a busy one. Tuned against
  * hand-built fixture rows (see `perfetto.test.ts`'s "trace-cpu-placement"
@@ -364,17 +375,31 @@ const describeStartupReason = (reason: string): string => STARTUP_REASONS[reason
  * GRA-61's own final report), so treat them as a starting point a real
  * capture may need to move.
  */
+// The primary "was this material" gate: an absolute floor is a fixed budget
+// that means something different in a 2s window than a 60s one (QA's own
+// reproduction: 40ms of little-core housekeeping is nothing in a 10s
+// window, but the same 40ms was originally read as "material" regardless of
+// how long the window was). Running time has to clear this share of the
+// window it was asked about before anything else is even considered.
+const WINDOW_FRACTION = 0.05;
+// Kept as a secondary minimum once WINDOW_FRACTION is met, not the primary
+// gate any more: a tiny window (a jank finding's own few hundred ms, say)
+// can clear 5% with well under a millisecond of running time, which is
+// still noise no matter what fraction of the window it is.
+const MATERIAL_RUNNING_MS = 15;
 // A core is "little" enough of the story to mention once the main thread
 // spent at least this share of its running time in this window there.
 const LITTLE_CORE_FRACTION = 0.3;
 // Running, duration-weighted, at or below this fraction of a core's own max
-// frequency counts as throttled enough to mention.
-const LOW_FREQ_FRACTION = 0.6;
-// Below this much total running time in the window, the main thread barely
-// ran at all — on any core, at any frequency — and neither gate above should
-// fire no matter what fraction they compute, because a fraction of
-// near-nothing is not a material share of anything.
-const MATERIAL_RUNNING_MS = 15;
+// frequency counts as throttled enough to mention — little and non-little
+// cores get different thresholds because they run at different fractions of
+// their own max under perfectly ordinary load. A big/medium core's governor
+// routinely sits around 50-60% of max under moderate, healthy work, so 0.6
+// there would flag normal operation; a little core, already the low-power
+// tier, has much less headroom below its own max before it is genuinely
+// throttled rather than just not maxed out.
+const LOW_FREQ_FRACTION_LITTLE = 0.6;
+const LOW_FREQ_FRACTION_BIG = 0.4;
 
 /**
  * boot-clock ns → device uptime ms, the direction `moment.ts`'s `fromBootMs`
@@ -423,8 +448,18 @@ function place(window: Finding["window"]): Pick<Finding, "window" | "spanning"> 
  * that has not wired up a converter (an older test fixture, `interpret`
  * exercised directly) gets an honest "cannot be placed", never a silently
  * missing field.
+ *
+ * `windowMs` — the width, in milliseconds, of the window `askTrace` was
+ * actually asked about (`(toNs - fromNs) / 1e6`) — is likewise optional, and
+ * feeds only `trace-cpu-placement`'s own gate (WINDOW_FRACTION). Omitted, on
+ * the same "cannot be placed, so say nothing" principle as `toUptimeMs`: a
+ * caller that cannot say how big the window was cannot say whether running
+ * time was a material share of it, so that finding never fires rather than
+ * guessing. `askTrace` always has this number and always passes it; only a
+ * caller exercising `interpret` directly (every test in this file that
+ * predates GRA-61's QA fixes) can omit it.
  */
-export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs): Finding[] {
+export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs, windowMs?: number): Finding[] {
   const findings: Finding[] = [];
 
   // --- what the frame timeline says --------------------------------------
@@ -634,32 +669,64 @@ export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs): Finding[] {
   // GRA-61 questions 8+9, merged. Gated hard on purpose: an idle device on a
   // desk, plugged into power, still schedules the main thread onto a little
   // core briefly now and then, and reporting that as a finding would make
-  // this noisy on the one trace it most needs to stay silent on. `interpret`
-  // has no window duration to compute a true fraction-of-the-window against
-  // (GRA-61 chose not to thread one through just for this), so the gate uses
-  // an absolute floor on running time instead of a fraction of elapsed wall
-  // time: below MATERIAL_RUNNING_MS the main thread barely ran in this window
-  // at all, on any core, at any frequency, and nothing here is worth saying.
+  // this noisy on the one trace it most needs to stay silent on.
   const cpu = rows.cpu ?? [];
   if (cpu.length > 0) {
     const mainRows = cpu.filter((r) => String(r.kind) === "main_thread");
     const otherRows = cpu.filter((r) => String(r.kind) === "other");
     const totalMs = ms(mainRows.reduce((sum, r) => sum + n(r.dur), 0));
-    const littleMs = ms(
-      mainRows.filter((r) => String(r.cluster_type) === "little").reduce((sum, r) => sum + n(r.dur), 0),
-    );
+    const littleRows = mainRows.filter((r) => String(r.cluster_type) === "little");
+    const nonLittleRows = mainRows.filter((r) => String(r.cluster_type) !== "little");
+    const littleMs = ms(littleRows.reduce((sum, r) => sum + n(r.dur), 0));
     const littleFraction = totalMs > 0 ? littleMs / totalMs : 0;
-    const freqNum = mainRows.reduce((sum, r) => sum + n(r.dur) * n(r.avg_freq), 0);
-    const freqDenom = mainRows.reduce((sum, r) => sum + n(r.dur) * n(r.max_freq), 0);
-    const freqFraction = freqDenom > 0 ? freqNum / freqDenom : null;
+
+    // 61-A: a row with no frequency sample for its whole core-group
+    // (`avg_freq` NULL — the SQL's own answer to "no sample was in force")
+    // is unknown, not 0Hz. Folding it into the weighted average via `n()`,
+    // which reads a missing value as 0, is what collapsed a 200ms reading
+    // with no data at all into "ran at 0% of max frequency": the row's dur
+    // still counted in the denominator against a numerator of zero. The fix
+    // is exclusion, not substitution — a row with nothing to say about
+    // frequency says nothing, in either the numerator or the denominator.
+    const freqFractionOf = (group: Array<Record<string, unknown>>): number | null => {
+      const sampled = group.filter((r) => r.avg_freq !== null && r.avg_freq !== undefined);
+      if (sampled.length === 0) return null;
+      const num = sampled.reduce((sum, r) => sum + n(r.dur) * n(r.avg_freq), 0);
+      const denom = sampled.reduce((sum, r) => sum + n(r.dur) * n(r.max_freq), 0);
+      return denom > 0 ? num / denom : null;
+    };
+    // 61-C: separate thresholds per core class, computed from each class's
+    // own rows rather than one blended average across both — a main thread
+    // split between a fast big core and a throttled little core would
+    // otherwise average to a number that describes neither.
+    const littleFreqFraction = freqFractionOf(littleRows);
+    const nonLittleFreqFraction = freqFractionOf(nonLittleRows);
+    const littleLowFreq = littleFreqFraction !== null && littleFreqFraction <= LOW_FREQ_FRACTION_LITTLE;
+    const nonLittleLowFreq = nonLittleFreqFraction !== null && nonLittleFreqFraction <= LOW_FREQ_FRACTION_BIG;
 
     const onLittleCore = littleFraction >= LITTLE_CORE_FRACTION;
-    const atLowFreq = freqFraction !== null && freqFraction <= LOW_FREQ_FRACTION;
-    const material = totalMs >= MATERIAL_RUNNING_MS;
+    const atLowFreq = littleLowFreq || nonLittleLowFreq;
+
+    // 61-B: materiality is a share of the *window*, not an absolute number
+    // of milliseconds — 40ms reads very differently in a 2s window than a
+    // 60s one, and the absolute floor this replaced could not tell the two
+    // apart. `windowMs` omitted (a caller exercising `interpret` directly,
+    // without going through `askTrace`) means this cannot be assessed, so it
+    // is treated the same as failing it: this finding stays silent rather
+    // than falling back to a guess. MATERIAL_RUNNING_MS survives as a
+    // secondary floor once the fraction is cleared, for the degenerate case
+    // of a window small enough that a few hundred microseconds clears 5%.
+    const windowFraction = windowMs !== undefined && windowMs > 0 ? totalMs / windowMs : null;
+    const material =
+      windowFraction !== null && windowFraction >= WINDOW_FRACTION && totalMs >= MATERIAL_RUNNING_MS;
 
     if (material && (onLittleCore || atLowFreq)) {
-      const freqPct = freqFraction === null ? null : Math.round(freqFraction * 100);
+      const pct = (fraction: number | null) => (fraction === null ? null : Math.round(fraction * 100));
       const littlePct = Math.round(littleFraction * 100);
+      // Whichever frequency reading actually triggered the gate is the one
+      // worth naming; a fraction that never crossed its own threshold is not
+      // why this finding exists, whatever number it happens to hold.
+      const freqPct = nonLittleLowFreq ? pct(nonLittleFreqFraction) : littleLowFreq ? pct(littleFreqFraction) : null;
       const title =
         onLittleCore && atLowFreq
           ? `the main thread ran on a little core for ${littleMs}ms of this window, averaging ${freqPct}% of max frequency`
@@ -691,7 +758,9 @@ export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs): Finding[] {
           totalMs,
           littleMs,
           littleFraction,
-          freqFraction,
+          littleFreqFraction,
+          nonLittleFreqFraction,
+          windowFraction,
           otherTotalMs,
           worstOtherProcess: worstOther ? String(worstOther.process_name ?? "") : undefined,
         },
@@ -1410,7 +1479,10 @@ export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
   );
 
   return {
-    findings: interpret(rows, options.toUptimeMs),
+    // 61-B: askTrace is the one caller that always knows the window it
+    // queried — the whole reason `trace-cpu-placement`'s own materiality
+    // gate can be a share of it rather than an absolute floor.
+    findings: interpret(rows, options.toUptimeMs, (options.toNs - options.fromNs) / 1e6),
     unanswered: [...unknownReasons, ...unanswered],
     asked: selected.map((q) => q.asks),
     skipped,
