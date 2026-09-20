@@ -38,6 +38,8 @@ dist/save.js
 dist/save.js.map
 dist/sessions.js
 dist/sessions.js.map
+dist/startup.js
+dist/startup.js.map
 dist/system.js
 dist/system.js.map
 dist/systrace.js
@@ -61,6 +63,7 @@ src/perfetto.ts
 src/report.ts
 src/save.ts
 src/sessions.ts
+src/startup.ts
 src/system.ts
 src/systrace.ts
 src/timeline.ts
