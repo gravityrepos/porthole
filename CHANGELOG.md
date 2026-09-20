@@ -265,6 +265,32 @@ PR that makes the change, not after the fact.
   the system's own launch work, and Android vitals' warm/hot thresholds are
   measured from the launch request itself — a materially different span, not
   a smaller number for the same one (GRA-60).
+- Whole-tree recomposition counting: `recompositions` now sees every
+  recompose scope Compose invalidates, not only the ones wrapped in
+  `PortholeScreen`/`Modifier.portholeNode`, via
+  `androidx.compose.runtime.tooling.CompositionObserver` attached from an
+  `ActivityLifecycleCallbacks` decor-view walk with no app code — the
+  GRA-70 spike shipped. Each node's `source` says `wrapped` or `observer`;
+  a wrapped call site is merged with its own observer entry rather than
+  double-counted (best-effort at the composition-pass level, exact for the
+  common case — see `CompositionTreeCollector`'s own doc comment for what
+  that does and does not guarantee). `triggeredBy` is causal
+  (`attribution: "observer"`) when the observer supplies the actual
+  invalidating state objects, falling back to the original ~32ms temporal
+  correlation (`attribution: "temporal"`) whenever it can't — including
+  automatically on a pre-1.6 Compose, where the runtime now starts, logs
+  once, and reports wrapped call sites exactly as it did before this
+  ticket rather than failing. Names for an observer-only node — real
+  composable names instead of a stable `<uninstrumented:...>` placeholder —
+  are opt-in behind `porthole { composableNames.set(true) }` (default
+  false): resolving them needs Compose's own
+  `collectParameterInformation()`, the same mechanism the Layout Inspector
+  uses, which sets `forceRecomposeScopes = true` for the whole app and so
+  measurably changes how it recomposes — the report's own `notes` say so
+  whenever it is on. `setup` carries a new `compose_tree` entry either way.
+  README's recompositions caveat is rewritten, not softened; the full
+  mechanism, measurements and version constraints are in
+  `docs/spikes/GRA-70-recomposition-counts.md` (GRA-235).
 
 ### Changed
 

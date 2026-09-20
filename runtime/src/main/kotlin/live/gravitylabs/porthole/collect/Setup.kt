@@ -120,6 +120,35 @@ internal object Setup {
         )
     }
 
+    // -- whole-tree recomposition counting (GRA-235) -------------------------
+    //
+    // Not a classpath question in the INTEGRATIONS sense: androidx.compose.runtime
+    // is always on the classpath here (this module depends on it directly), what
+    // varies is the *version* the app resolves — CompositionObserver needs
+    // Compose >= 1.6. Recorded unconditionally by Porthole.install(), same
+    // reasoning as strict mode: the entry exists even when whole-tree
+    // counting never had a chance to attach, so its absence never has to be
+    // read as "porthole forgot to check."
+
+    @Volatile private var composeTreeAvailable: Boolean? = null
+    @Volatile private var composeTreeNote: String? = null
+
+    /** Called once by `Porthole.install()`, whether or not `CompositionObserver` attached. */
+    fun recordComposeTree(available: Boolean, note: String?) {
+        composeTreeAvailable = available
+        composeTreeNote = note
+    }
+
+    private fun composeTreeEntry(): SetupEntry? {
+        val available = composeTreeAvailable ?: return null
+        return SetupEntry(
+            name = "compose_tree",
+            onClasspath = true,
+            instrumented = available,
+            hint = composeTreeNote,
+        )
+    }
+
     // -- the OkHttp listener getting silently replaced (GRA-66 F10) ---------
     //
     // Not a classpath question either: OkHttp is on the classpath and
@@ -172,6 +201,7 @@ internal object Setup {
     fun report(): List<SetupEntry> = buildList {
         socketEntry()?.let(::add)
         strictModeEntry()?.let(::add)
+        composeTreeEntry()?.let(::add)
         listenerReplacedEntry()?.let(::add)
         addAll(integrationEntries())
     }

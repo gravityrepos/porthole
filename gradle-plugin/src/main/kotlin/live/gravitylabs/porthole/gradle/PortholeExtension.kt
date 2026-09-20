@@ -119,6 +119,35 @@ abstract class PortholeExtension {
     abstract val strictMode: Property<Boolean>
 
     /**
+     * Resolves real composable names for GRA-235's whole-tree recomposition
+     * counting, instead of the placeholder `<uninstrumented:...>` ids a
+     * `recompositions` report otherwise gives an unwrapped scope. Off by
+     * default, and this is the flag to reach for before turning it on: naming
+     * a scope needs Compose's own `collectParameterInformation()` — what the
+     * Layout Inspector uses — which sets `forceRecomposeScopes = true` for
+     * the whole app, meaning Compose allocates a recompose scope for *every*
+     * composable rather than only the ones that need one. That changes the
+     * shape of the program being measured, not only what the report can
+     * print about it: a build with this on recomposes differently than the
+     * same build with it off, and the `recompositions` report says so in its
+     * own `notes`. Turn it off to measure the app as it ships; turn it on
+     * when the placeholder ids aren't enough to find the composable you're
+     * looking for.
+     *
+     * Counting itself needs no such trade — every recompose scope in the tree
+     * is counted whether this is on or off, at the cost the GRA-70 spike
+     * measured (`docs/spikes/GRA-70-recomposition-counts.md`) as
+     * indistinguishable from zero. Only *names* cost this.
+     *
+     * Requires Compose >= 1.6 for whole-tree counting to attach at all
+     * (`androidx.compose.runtime.tooling.CompositionObserver`); on an older
+     * Compose this flag does nothing; the runtime degrades to counting
+     * `PortholeScreen`/`Modifier.portholeNode` call sites only, as it did
+     * before GRA-235.
+     */
+    abstract val composableNames: Property<Boolean>
+
+    /**
      * Application id to record in the connection file and in `.mcp.json`'s
      * `PORTHOLE_APPLICATION_ID`. No longer only cosmetic (GRA-197): the MCP
      * server compares it against the connected app's own `hello.packageName`

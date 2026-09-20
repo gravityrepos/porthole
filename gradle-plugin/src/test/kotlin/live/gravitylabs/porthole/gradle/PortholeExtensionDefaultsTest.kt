@@ -90,6 +90,11 @@ class PortholeExtensionDefaultsTest {
     }
 
     @Test
+    fun `defaults composableNames to off (GRA-235) - it forces a recompose scope onto every composable`() {
+        assertFalse(extension().composableNames.get())
+    }
+
+    @Test
     fun `lets a build override every default`() {
         val project = ProjectBuilder.builder().build()
         project.plugins.apply("live.gravitylabs.porthole")
@@ -100,11 +105,13 @@ class PortholeExtensionDefaultsTest {
         porthole.debugBuildTypes.set(listOf("debug", "staging"))
         porthole.deviceSerial.set("emulator-5554")
         porthole.strictMode.set(true)
+        porthole.composableNames.set(true)
 
         assertEquals(9000, porthole.port.get())
         assertEquals(8192, porthole.ringCapacity.get())
         assertEquals(listOf("debug", "staging"), porthole.debugBuildTypes.get())
         assertEquals("emulator-5554", porthole.deviceSerial.get())
         assertTrue(porthole.strictMode.get())
+        assertTrue(porthole.composableNames.get())
     }
 }

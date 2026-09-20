@@ -20,6 +20,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import live.gravitylabs.porthole.collect.CompositionTreeCollector
 import live.gravitylabs.porthole.collect.FrameCollector
 import live.gravitylabs.porthole.collect.InflightCollector
 import live.gravitylabs.porthole.collect.LogCollector
@@ -102,6 +103,8 @@ object Porthole {
         val ring: EventRing,
         val snapshots: SnapshotWatcher,
         val recompositions: RecompositionCollector,
+        /** GRA-235: whole-tree recomposition counting. See its own doc comment. */
+        val compositionTree: CompositionTreeCollector,
         val semantics: SemanticsCollector,
         val state: StateCollector,
         val inflight: InflightCollector,
@@ -160,7 +163,11 @@ object Porthole {
             val startup = StartupCollector(ring)
             val appPackages = appPackagesOf(app)
             val snapshots = SnapshotWatcher(ring, appPackages)
-            val recompositions = RecompositionCollector(ring, snapshots)
+            val composableNames = composableNamesFromResources(app)
+            val compositionTree = CompositionTreeCollector(snapshots, composableNames)
+            val recompositions = RecompositionCollector(ring, snapshots, composableNamesEnabled = composableNames)
+            recompositions.wholeTreeAvailable = compositionTree.available
+            recompositions.observerNames = compositionTree
             val semantics = SemanticsCollector()
             val state = StateCollector(snapshots)
             val inflight = InflightCollector(ring)
@@ -259,6 +266,34 @@ object Porthole {
                 null
             }
 
+            // GRA-235: whole-tree recomposition counting. Unlike strictMode this
+            // is not opt-in at the attach level — CompositionTreeCollector.install
+            // itself already declines when CompositionObserver isn't on the
+            // classpath (Compose < 1.6) — only naming (composableNames, read
+            // above) is opt-in. Setup is told either way for the same reason
+            // strict mode is: the entry exists even when it never had a chance to
+            // attach.
+            if (compositionTree.install(app, recompositions)) {
+                collectors += "compose_tree"
+                Setup.recordComposeTree(
+                    available = true,
+                    note = if (composableNames) {
+                        "composableNames is on: recompose scopes get real names, at the cost of " +
+                            "forceRecomposeScopes — see the recompositions report's own notes."
+                    } else {
+                        null
+                    },
+                )
+            } else {
+                Setup.recordComposeTree(
+                    available = false,
+                    note = "this build's Compose runtime is below 1.6, or " +
+                        "androidx.compose.runtime.tooling.CompositionObserver was otherwise " +
+                        "unavailable — recompositions falls back to PortholeScreen/Modifier.portholeNode " +
+                        "counts only, as it did before GRA-235.",
+                )
+            }
+
             // Snapshotted rather than handed over live: Session used to receive
             // this same mutable list and rely on every append above already
             // having happened by the time anything read `collectors` back, which
@@ -301,6 +336,7 @@ object Porthole {
                 ring = ring,
                 snapshots = snapshots,
                 recompositions = recompositions,
+                compositionTree = compositionTree,
                 semantics = semantics,
                 state = state,
                 inflight = inflight,
@@ -357,6 +393,7 @@ object Porthole {
             s.watchdog.stop()
             s.strictMode?.stop()
             s.recompositions.stop()
+            s.compositionTree.stop(s.app)
             s.nav?.unregister()
             s.workManager?.stop()
             session = null
@@ -497,7 +534,16 @@ object Porthole {
     internal fun inflight(): InflightCollector? = session?.inflight
 
     internal fun onRecompose(nodeId: String, name: String, screen: String?, pass: Int) {
-        session?.recompositions?.onRecompose(nodeId, name, screen, pass)
+        val s = session ?: return
+        // GRA-235: causal attribution for a wrapped call site, when the
+        // observer has a pass open — otherwise unchanged (null falls back to
+        // RecompositionCollector's own temporal correlation). Order matters:
+        // read the pass's triggers before notifying it fired, since
+        // notifyWrappedFired is what onEndComposition uses to decide how many
+        // map entries this pass's wrapped fires account for.
+        val causalTriggers = s.compositionTree.currentPassTriggers()
+        s.compositionTree.notifyWrappedFired()
+        s.recompositions.onRecompose(nodeId, name, screen, pass, causalTriggers)
     }
 
     // -- rpc ---------------------------------------------------------------
@@ -813,6 +859,21 @@ object Porthole {
         if (id != 0) context.resources.getBoolean(id) else false
     }.getOrDefault(false)
 
+    /**
+     * The Gradle plugin's `composableNames` DSL setting (GRA-235), written
+     * the same way as `strictMode`: a generated `bool` resource
+     * ([RES_COMPOSABLE_NAMES]), absent (reads `false`) for a build predating
+     * this flag or never setting it — the same off-by-default a stale plugin
+     * jar has to fall back to, since turning this on changes how the app
+     * under test recomposes (`forceRecomposeScopes`) and that has to be a
+     * deliberate choice. See [live.gravitylabs.porthole.collect.CompositionTreeCollector]'s
+     * own doc comment for what it costs.
+     */
+    private fun composableNamesFromResources(context: Context): Boolean = runCatching {
+        val id = context.resources.getIdentifier(RES_COMPOSABLE_NAMES, "bool", context.packageName)
+        if (id != 0) context.resources.getBoolean(id) else false
+    }.getOrDefault(false)
+
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
@@ -862,6 +923,7 @@ object Porthole {
     private const val RES_RING_CAPACITY = "porthole_ring_capacity"
     private const val RES_STRICT_MODE = "porthole_strict_mode"
     private const val RES_LEGACY_TCP_PORT = "porthole_legacy_tcp_port"
+    private const val RES_COMPOSABLE_NAMES = "porthole_composable_names"
 }
 
 /**

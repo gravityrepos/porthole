@@ -45,6 +45,11 @@ dependencies {
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.util)
+    // GRA-235: resolves composable names for whole-tree recomposition
+    // counting when `composableNames` is on. See CompositionTreeCollector's
+    // own doc comment and the libs.versions.toml entry for why this is
+    // implementation, not compileOnly.
+    implementation(libs.compose.ui.tooling.data)
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
