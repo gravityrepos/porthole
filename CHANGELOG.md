@@ -303,6 +303,15 @@ PR that makes the change, not after the fact.
   that produces its own CLI out of the pin entirely and points `.mcp.json`
   at that local build instead — this repo's own sample now uses it
   (GRA-195).
+- The sample hard-crashed the moment "Add" was pressed on an API 28+ device
+  with the platform's default network security policy, which refuses
+  cleartext even to loopback: `CartApi`'s in-process `MockWebServer` is
+  plain `http://localhost`, so OkHttp threw `UnknownServiceException`
+  (`CLEARTEXT communication to localhost not permitted`) on the first
+  request, main thread, no catch. A debug-only `network_security_config.xml`
+  now permits cleartext for `localhost`/`127.0.0.1` only, wired in via
+  `sample/src/debug/AndroidManifest.xml` so release carries no
+  `networkSecurityConfig` and is unaffected (GRA-236).
 
 ## [0.2.2] - 2026-09-16
 
