@@ -127,6 +127,13 @@ export function renderReport(trace: Trace, options: RenderReportOptions = {}): s
     lines.push(`  ${colorSeverity(finding.severity, color)}  ${finding.title}`);
     if (finding.during) lines.push(`           during "${finding.during}"`);
     if (finding.detail) lines.push(`           ${finding.detail}`);
+    // GRA-201: printed only once resolved — an unresolved `where` is a fact
+    // for an agent's structured payload to act on, not a line worth adding
+    // to a report a person reads top to bottom for what is wrong.
+    if (finding.where?.resolved) {
+      const at = finding.where.line ? `${finding.where.path}:${finding.where.line}` : finding.where.path;
+      lines.push(`           at ${at}`);
+    }
   }
 
   const quiet = CHECKED.filter((lane) =>
