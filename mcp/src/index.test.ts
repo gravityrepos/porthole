@@ -2815,6 +2815,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         generatedAt: "2026-09-20T04:10:00.000Z",
         gitHead: "a1b2c3d",
         kotlinVersion: "2.1.0",
+        strongSkippingInBuild: "unknown",
         stale: true,
         staleNote: "report from 2026-09-20T04:10:00.000Z at git a1b2c3d, sources have changed since — not used for a reason.",
       });

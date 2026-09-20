@@ -227,6 +227,12 @@ class PortholePlugin : Plugin<Project> {
             variant.set(resolvedVariant)
             moduleName.set(project.name)
             kotlinVersion.set(PORTHOLE_KOTLIN_VERSION)
+            // A safety-net default: overwritten below, inside
+            // taskGraph.whenReady, on every real run this task actually
+            // executes on (the same "in the graph" gate the DSL/caching
+            // side of this already depends on) — never left at this value
+            // except in a state where the task would not have run anyway.
+            strongSkippingInBuild.convention("unknown")
             moduleRoot.set(project.layout.projectDirectory)
             // The whole module's src/ tree — see PortholeComposeReportTask's
             // own KDoc ("Staleness") for why this is deliberately coarser
@@ -264,9 +270,26 @@ class PortholePlugin : Plugin<Project> {
         project.gradle.taskGraph.whenReady(object : Action<TaskExecutionGraph> {
             override fun execute(graph: TaskExecutionGraph) {
                 if (!graph.hasTask(reportTask.get())) return
+
+                // The property/Kotlin-version fallback first, an explicit
+                // composeCompiler{} DSL setting overriding it second — see
+                // strongSkippingFromPropertyOrKotlinVersion's and
+                // explicitStrongSkippingSetting's own KDoc for why that
+                // order, and why the second needs the compose-compiler
+                // plugin applied to even ask.
+                var strongSkipping = strongSkippingFromPropertyOrKotlinVersion(project, PORTHOLE_KOTLIN_VERSION)
                 project.plugins.withId("org.jetbrains.kotlin.plugin.compose") {
                     ComposeCompilerWiring.configure(project)
+                    ComposeCompilerWiring.explicitStrongSkippingSetting(project)?.let { strongSkipping = it }
                 }
+                reportTask.get().strongSkippingInBuild.set(
+                    when (strongSkipping) {
+                        true -> "true"
+                        false -> "false"
+                        null -> "unknown"
+                    },
+                )
+
                 // `upToDateWhen { false }` + `cacheIf { false }`, not
                 // `doNotTrackState`: see AndroidWiring's own former comment
                 // (now folded in here) — `doNotTrackState` made the Kotlin

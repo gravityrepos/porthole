@@ -158,6 +158,19 @@ export interface ComposeReportFile {
   kotlinVersion: string;
   gitHead: string | null;
   sourceFingerprint: string;
+  /**
+   * Whether the *consuming module's real build* — never this report's own
+   * compile, which `ComposeCompilerWiring.configure` (Gradle side) always
+   * forces strong skipping off for — has it on. `"unknown"` when the
+   * Gradle-side detection (a `gradle.properties` flag, an explicit
+   * `composeCompiler { enableStrongSkippingMode }`, or the Kotlin compiler
+   * version's own default) could not determine it. This is what
+   * [explainNotSkippable] uses to decide whether the "restartable but not
+   * skippable" claim needs a caveat: it is always literally true of *this
+   * report's own compile*, but not necessarily of the app as it actually
+   * ships — see that function's own doc comment.
+   */
+  strongSkippingInBuild: boolean | "unknown";
   composables: ComposeReportComposable[];
   classes: ComposeReportClass[];
 }
@@ -247,6 +260,7 @@ function loadReport(reportPath: string): ComposeReportFile | null {
     kotlinVersion: typeof r.kotlinVersion === "string" ? r.kotlinVersion : "",
     gitHead: typeof r.gitHead === "string" ? r.gitHead : null,
     sourceFingerprint: r.sourceFingerprint,
+    strongSkippingInBuild: typeof r.strongSkippingInBuild === "boolean" ? r.strongSkippingInBuild : "unknown",
     composables: r.composables as ComposeReportComposable[],
     classes: r.classes as ComposeReportClass[],
   };
@@ -757,7 +771,32 @@ export function explainNotSkippable(join: ComposeJoin & { matched: true }): stri
   return (
     `\`${enclosingFunction}\` is restartable but not skippable: parameter ` +
     `\`${unstable.name}: ${unstable.type}\` is unstable.` +
-    remedyFor(unstable.type, report)
+    remedyFor(unstable.type, report) +
+    strongSkippingCaveat(report, unstable)
+  );
+}
+
+/**
+ * The coordinator's own follow-up to GRA-69: "restartable but not
+ * skippable" is always literally true of *this report's own compile* —
+ * `ComposeCompilerWiring.configure` (Gradle side) always forces strong
+ * skipping off to produce it — but is not necessarily true of the app as it
+ * actually runs. Kotlin 2.1's own default is strong skipping *on*, under
+ * which this exact composable would still be marked skippable by the
+ * compiler, just via an identity comparison rather than a structural one —
+ * an agent reading only the finding (never the README) would otherwise
+ * take "not skippable" as describing the running app, which it does not
+ * quite. Silent when the consuming module's own build could not be
+ * determined (`"unknown"`) or is itself off (the claim is then unqualified
+ * and accurate as written) — appended only when the build genuinely has it
+ * on, the one case where staying silent would be the misleading choice.
+ */
+function strongSkippingCaveat(report: ComposeReportFile, unstable: ComposeReportParameter): string {
+  if (report.strongSkippingInBuild !== true) return "";
+  return (
+    ` Compiled with strong skipping off for this report; your build has it on, so this composable ` +
+    `is skipped only when the caller passes the same \`${unstable.type}\` instance — a new instance ` +
+    "per recomposition still recomposes it."
   );
 }
 

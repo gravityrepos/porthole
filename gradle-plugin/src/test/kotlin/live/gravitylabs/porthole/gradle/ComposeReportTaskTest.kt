@@ -3,8 +3,10 @@
 package live.gravitylabs.porthole.gradle
 
 import org.gradle.api.GradleException
+import org.gradle.testfixtures.ProjectBuilder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
@@ -84,6 +86,63 @@ class KotlinCompileTaskNameTest {
 // ComposeReportTask.kt's own KDoc on TASK_NAME, and
 // ComposeReportAbbreviationTest for the graph-based mechanism that replaced
 // it.
+
+/**
+ * [strongSkippingFromPropertyOrKotlinVersion] — the property/Kotlin-version
+ * half of "does the consuming module's real build have strong skipping on"
+ * (the coordinator's follow-up to GRA-69: the finding's own text needs this,
+ * since the report itself is *always* compiled with it forced off, and that
+ * fact is not literally true of the running app whenever the module's own
+ * build leaves the modern default in place).
+ */
+class StrongSkippingFromPropertyOrKotlinVersionTest {
+
+    private fun project() = ProjectBuilder.builder().build()
+
+    @Test
+    fun `an explicit gradle-properties flag wins, true`() {
+        val project = project()
+        project.extensions.extraProperties.set("android.experimental.enableStrongSkipping", "true")
+        assertEquals(true, strongSkippingFromPropertyOrKotlinVersion(project, "1.9.0"))
+    }
+
+    @Test
+    fun `an explicit gradle-properties flag wins, false`() {
+        val project = project()
+        project.extensions.extraProperties.set("android.experimental.enableStrongSkipping", "false")
+        assertEquals(false, strongSkippingFromPropertyOrKotlinVersion(project, "2.1.0"))
+    }
+
+    @Test
+    fun `Kotlin 2 point x defaults to on, with no property set`() {
+        val project = project()
+        assertEquals(true, strongSkippingFromPropertyOrKotlinVersion(project, "2.1.0"))
+        assertEquals(true, strongSkippingFromPropertyOrKotlinVersion(project, "2.0.0"))
+    }
+
+    @Test
+    fun `Kotlin below 2 point 0 defaults to off, with no property set`() {
+        val project = project()
+        // Mutation quoted: changing `major == 2 && minor >= 0` (equivalently
+        // `major >= 2`) to `major >= 1` is the one-line change that makes
+        // this assertion fail — Kotlin 1.9's own standalone compose
+        // compiler defaulted strong skipping OFF, opt-in only.
+        assertEquals(false, strongSkippingFromPropertyOrKotlinVersion(project, "1.9.20"))
+    }
+
+    @Test
+    fun `an unparseable Kotlin version is unknown, not a guess`() {
+        val project = project()
+        assertNull(strongSkippingFromPropertyOrKotlinVersion(project, "not-a-version"))
+    }
+
+    @Test
+    fun `a property value that is not literally true or false falls through to the Kotlin-version default`() {
+        val project = project()
+        project.extensions.extraProperties.set("android.experimental.enableStrongSkipping", "yes")
+        assertEquals(true, strongSkippingFromPropertyOrKotlinVersion(project, "2.1.0"))
+    }
+}
 
 class SourceFingerprintTest {
 

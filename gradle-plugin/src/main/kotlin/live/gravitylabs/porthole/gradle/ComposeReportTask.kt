@@ -76,6 +76,45 @@ internal fun resolveComposeReportVariant(variants: List<String>, requestedVarian
 internal fun kotlinCompileTaskName(variant: String): String = "compile" + variant.replaceFirstChar { it.uppercase() } + "Kotlin"
 
 /**
+ * Whether the *consuming module's real build* — never this task's own
+ * forced-off diagnostic recompile — has strong skipping on, from the two
+ * signals that need no Compose-compiler-plugin type at all (the third,
+ * `composeCompiler { enableStrongSkippingMode }` explicitly set on the
+ * consuming module, is [ComposeCompilerWiring.explicitStrongSkippingSetting]
+ * — AGP/Compose-compiler-plugin isolated, same reasoning as everything else
+ * that object holds, and checked by the caller *after* this one so an
+ * explicit DSL setting always wins):
+ *
+ *  1. `android.experimental.enableStrongSkipping` in `gradle.properties` —
+ *     the older, AGP-level opt-in flag, still the one place a project can
+ *     name this without touching a build script at all, and (via Gradle's
+ *     own project-property inheritance) visible from a subproject even when
+ *     only the *root* `gradle.properties` sets it.
+ *  2. The Kotlin compiler version's own default: the Kotlin-plugin-hosted
+ *     compose compiler defaults strong skipping to *on* from Kotlin 2.0
+ *     onward (confirmed against the real 2.1.0 plugin — see
+ *     `ComposeCompilerWiring.configure`'s own KDoc); the older, standalone
+ *     `androidx.compose.compiler` Gradle plugin defaulted it *off*
+ *     (opt-in only) below that.
+ *
+ * `null` ("unknown" once this reaches the report's own JSON) only when
+ * [kotlinVersion] itself does not parse as a leading `MAJOR.MINOR` pair —
+ * should not happen in practice (it is read from the same catalog entry
+ * this plugin's own build depends on), but never assumed rather than
+ * checked.
+ */
+internal fun strongSkippingFromPropertyOrKotlinVersion(project: Project, kotlinVersion: String): Boolean? {
+    val fromProperty = (project.findProperty("android.experimental.enableStrongSkipping") as? String)
+        ?.toBooleanStrictOrNull()
+    if (fromProperty != null) return fromProperty
+
+    val parts = kotlinVersion.split(".")
+    val major = parts.getOrNull(0)?.toIntOrNull() ?: return null
+    val minor = parts.getOrNull(1)?.toIntOrNull() ?: return null
+    return major > 2 || (major == 2 && minor >= 0)
+}
+
+/**
  * Parses the compose compiler's own reports (`composeCompiler {
  * reportsDestination }`, pointed here by [ComposeCompilerWiring] — see that
  * object's KDoc for exactly when and why, including why it forces classic
@@ -159,6 +198,22 @@ abstract class PortholeComposeReportTask : DefaultTask() {
     @get:Input
     abstract val kotlinVersion: Property<String>
 
+    /**
+     * `"true"`, `"false"`, or `"unknown"` — whether the *consuming module's
+     * real build* has strong skipping on, from
+     * [strongSkippingFromPropertyOrKotlinVersion] and
+     * [ComposeCompilerWiring.explicitStrongSkippingSetting] (set by
+     * `PortholePlugin.registerComposeReportTask`, which is the one place
+     * both are in scope). Stored as a plain `String` rather than a nullable
+     * `Property<Boolean>` — Gradle's own `Property<Boolean>` cannot
+     * represent "no value" distinctly from "never configured" in a way this
+     * task's own tests can rely on either way, and a three-way string is
+     * simpler than a `Property<Boolean>` plus a separate `@Optional` flag
+     * for the same three states.
+     */
+    @get:Input
+    abstract val strongSkippingInBuild: Property<String>
+
     /** Every `.kt` file under the module's `src/` — see the class KDoc for why this is deliberately coarser than "this variant's own source sets". */
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
@@ -215,6 +270,13 @@ abstract class PortholeComposeReportTask : DefaultTask() {
             "kotlinVersion" to kotlinVersion.get(),
             "gitHead" to gitHead,
             "sourceFingerprint" to sourceFingerprint(kotlinSources.files, root),
+            // `true`/`false` as real JSON booleans when known, the string
+            // `"unknown"` otherwise — see strongSkippingInBuild's own KDoc.
+            "strongSkippingInBuild" to when (strongSkippingInBuild.get()) {
+                "true" -> true
+                "false" -> false
+                else -> "unknown"
+            },
             "composables" to parsed.composables.map { c ->
                 linkedMapOf(
                     "name" to c.name,
