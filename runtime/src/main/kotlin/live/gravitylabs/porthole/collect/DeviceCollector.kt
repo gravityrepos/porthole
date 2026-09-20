@@ -195,14 +195,24 @@ internal class DeviceCollector(private val ring: EventRing) {
                     mapOf(
                         "phase" to "create",
                         "activity" to activity.javaClass.simpleName,
-                        // True for both halves of a configuration-driven
-                        // recreate (a rotation, say) — false for a fresh
-                        // process handed a saved instance state back
-                        // (`am kill` + relaunch), which is exactly the
-                        // "rotation vs process restore" distinction this
-                        // event exists to carry: the same `savedInstanceState
-                        // != null` is true in both cases, so it alone cannot
-                        // tell them apart, but this flag can.
+                        // Confirmed on a real device (GRA-73 emulator
+                        // pass): `isChangingConfigurations()` on the *new*
+                        // instance is false here regardless of why this
+                        // onCreate ran — a fresh Activity's own
+                        // `mChangingConfigurations` starts false and the
+                        // framework never sets it during onCreate, only
+                        // during the *old* instance's onDestroy. Carried
+                        // anyway, both for symmetry with the destroy event
+                        // below and because a reader should not have to
+                        // take that on faith. The actual "rotation vs
+                        // process restore" tell is presence: a rotation's
+                        // create is always preceded, in this same session,
+                        // by a destroy event for the same activity with
+                        // isChangingConfigurations true; a process restore
+                        // (savedInstanceState != null here) has no such
+                        // destroy at all, because the old process — and
+                        // its own onDestroy call — never happened in this
+                        // one.
                         "isChangingConfigurations" to activity.isChangingConfigurations.toString(),
                         "savedInstanceState" to (state != null).toString(),
                     ),
@@ -215,6 +225,13 @@ internal class DeviceCollector(private val ring: EventRing) {
                     mapOf(
                         "phase" to "destroy",
                         "activity" to activity.javaClass.simpleName,
+                        // True exactly when this destroy is the first half
+                        // of a configuration-driven recreate (a rotation,
+                        // say) — see onActivityCreated's own comment for
+                        // why the paired create never carries the same
+                        // true value, and why presence of this event at
+                        // all (not this flag alone) is what actually
+                        // separates a rotation from a process restore.
                         "isChangingConfigurations" to activity.isChangingConfigurations.toString(),
                     ),
                 )

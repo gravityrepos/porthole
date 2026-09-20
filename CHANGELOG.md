@@ -294,10 +294,12 @@ PR that makes the change, not after the fact.
   transition the instant it happens, with `getThermalHeadroom` (API 30+, a
   10-second forecast) riding along where the platform supports it; every
   Activity's `onCreate`/`onDestroy` now carries `isChangingConfigurations`
-  and whether a saved instance state came back, telling a rotation (both
-  halves fire, marked as a configuration change) apart from a process-death
-  restore (`onCreate` alone, with saved state, not marked as one); and the
-  app's current permission grant set — one `checkSelfPermission` pass over
+  and whether a saved instance state came back — confirmed on a real device,
+  that flag is only ever true on the *destroy* half of a configuration-driven
+  recreate (a rotation, say), never on the incoming `onCreate`, so a rotation
+  is told apart from a process-death restore by whether a same-Activity
+  destroy immediately precedes the create, not by the create's own flag; and
+  the app's current permission grant set — one `checkSelfPermission` pass over
   exactly the permissions the manifest declared — is reported at install and
   again on every foreground transition, so a permission revoked while the
   app was backgrounded shows up the next time it matters. All three ride the

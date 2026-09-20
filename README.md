@@ -2063,15 +2063,20 @@ finding's own wording says so: it reports what coincided, not what caused
 what.
 
 **Activity lifecycle.** Every Activity's `onCreate`/`onDestroy` is reported
-with `isChangingConfigurations` and whether a saved instance state came back
-— which is what tells a rotation (both halves fire, marked as a configuration
-change) apart from a process-death restore (`onCreate` alone, with a saved
-state, `isChangingConfigurations` false, because there was no in-process
-`onDestroy` to mark — the old process is already gone). Wired into the same
-`Application.ActivityLifecycleCallbacks` [`StartupCollector`](#startup) and
-this collector's own foreground/background tracking already register —
-exactly one registration for the whole app, not a second, competing observer
-that would double-count the same callbacks.
+with `isChangingConfigurations` and whether a saved instance state came back.
+Confirmed on a real device: `isChangingConfigurations` is only ever true on
+the *destroy* event — the framework sets it on the outgoing instance during a
+configuration-driven recreate (a rotation, say) and never on the incoming
+one's own `onCreate`, whatever caused it to run. So the tell for "rotation vs
+process restore" is not that flag on `create` at all — it is whether a
+`destroy` event for the same Activity, `isChangingConfigurations` true,
+immediately precedes it in the same session. A rotation always has one; a
+process-death restore (`onCreate` alone, with a saved state) never does,
+because the old process — and its own `onDestroy` call — is already gone.
+Wired into the same `Application.ActivityLifecycleCallbacks`
+[`StartupCollector`](#startup) and this collector's own foreground/background
+tracking already register — exactly one registration for the whole app, not a
+second, competing observer that would double-count the same callbacks.
 
 **Permissions.** The current grant set — one `checkSelfPermission` pass over
 exactly the permissions the manifest declared, read from `PackageManager`
