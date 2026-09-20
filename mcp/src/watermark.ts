@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Finding } from "./trace.js";
 
@@ -27,12 +27,34 @@ import type { Finding } from "./trace.js";
  * process ever sees" — `open()` below reloads from a different session
  * directory's `watermark.json` the moment the identity changes, the same
  * shape `SessionWriter.open()` already uses and for the same reason
- * (`sessions.ts`'s module doc comment). Two MCP servers attached to one app
- * at once is explicitly not designed for: both would open the same
- * `watermark.json`, and whichever writes last wins — no locking, no merge.
- * That is a deliberate simplification, not an oversight; solving concurrent
- * writers here would be buying a problem nobody has yet to solve one nobody
- * asked for.
+ * (`sessions.ts`'s module doc comment).
+ *
+ * **Two live processes sharing one session (GRA-56 QA, W1): supported, to
+ * within one poll interval — not full mutual exclusion.** `open()` used to
+ * read the file exactly once per directory (a no-op on every later call for
+ * the same, already-open directory), so a second writer's update was
+ * invisible to this instance for the rest of its life — `get()` served a
+ * cache from whenever `open()` first ran, "whichever writes last wins" in
+ * the least useful sense: not "the most recent value wins," but "the value
+ * this instance loaded once, however stale, keeps winning against its own
+ * reads." `refresh()` below fixes that half: `open()` on an unchanged
+ * directory now stats `watermark.json` and re-reads it when its mtime moved
+ * since this instance last loaded it, and every write (`recordExamined`,
+ * `recordReportedErrorT`, `recordDigest`, `reset`) refreshes first too, so a
+ * decision is never made against a value staler than one on-disk write.
+ * `persist()` writes through a temp file and `rename()`s it into place —
+ * atomic on every OS this ships for — so a concurrent `refresh()` always
+ * sees either the old, complete file or the new, complete one, never a
+ * torn write from one that raced it.
+ *
+ * What this does **not** provide is a lock: two processes that both decide,
+ * in the same poll interval, that a given `t` is unreported can both still
+ * report it — refresh-then-decide-then-write is three steps, not one
+ * atomic compare-and-swap, and nothing here blocks a second writer between
+ * them. `watch`'s own README section says this precisely (a `watch` and the
+ * MCP surface's banner "can both report the same error within one poll
+ * interval; neither will keep repeating it once each has seen the other's
+ * write") rather than promising exclusion this module cannot give.
  *
  * Written through to `<session dir>/watermark.json`, beside `events.ndjson`,
  * on every update — this is what "survives an MCP server restart, sitting
@@ -113,12 +135,66 @@ export class Watermark {
   private state: WatermarkState = emptyState();
   /** Chains writes the same way `SessionWriter.flushing` does, so two updates racing (a tool call and the banner it triggers, say) never interleave two `writeFile` calls on the same file. */
   private writing: Promise<void> = Promise.resolve();
+  /** The on-disk mtime (ms) `this.state` was last loaded from — `null` when never loaded (no directory, or the file did not exist yet at the last look). What `refresh()` compares a fresh `stat()` against; see this file's own module comment (W1) for why this exists at all. */
+  private loadedMtimeMs: number | null = null;
 
-  /** Switches to `dir`'s watermark, loading it if present. `null` means "no session — track in memory for this process's life and never persist," matching `PORTHOLE_SESSIONS=0` or a device that has not sent a `hello` yet. */
+  /**
+   * Switches to `dir`'s watermark, loading it if present. `null` means "no
+   * session — track in memory for this process's life and never persist,"
+   * matching `PORTHOLE_SESSIONS=0` or a device that has not sent a `hello`
+   * yet.
+   *
+   * GRA-56 QA (W1): an unchanged `dir` used to return immediately, forever,
+   * for the life of the instance — the exact bug this ticket's own module
+   * comment now documents. It now delegates to `refresh()` instead of
+   * skipping straight to a no-op, so a caller that (like every one today)
+   * opens once per identity and reads many times still picks up a write
+   * another live process made in between.
+   */
   async open(dir: string | null): Promise<void> {
-    if (dir === this.dir) return;
+    if (dir === this.dir) {
+      await this.refresh();
+      return;
+    }
     this.dir = dir;
-    this.state = dir ? ((await loadState(dir)) ?? emptyState()) : emptyState();
+    this.loadedMtimeMs = null;
+    // Cleared unconditionally on a real switch, not just for `dir === null`:
+    // `refresh()` below only ever assigns `this.state` when it actually
+    // finds a file to load — a new directory with no watermark.json yet
+    // (an ordinary case, not an error; see `refresh()`'s own comment) would
+    // otherwise silently keep serving the *previous* directory's state,
+    // which is exactly the cross-session leak this method exists to avoid.
+    this.state = emptyState();
+    if (!dir) return;
+    await this.refresh(/* force */ true);
+  }
+
+  /**
+   * Re-reads `watermark.json` when its on-disk mtime is newer than what
+   * `this.state` was last loaded from — a `stat()` always, a `readFile()`
+   * only when something has actually changed since. `force` skips the mtime
+   * comparison (used by `open()` on a directory switch, where there is
+   * nothing yet to compare against) and by every write method below, so a
+   * decision that turns into a write is never made against a value staler
+   * than the latest on-disk one. A missing file (nobody has written this
+   * session's watermark yet) leaves `this.state` exactly as it was —
+   * `emptyState()` on a first open, or this instance's own prior value —
+   * there being nothing to refresh from is not the same as the value being
+   * gone.
+   */
+  async refresh(force = false): Promise<void> {
+    if (!this.dir) return;
+    const dir = this.dir;
+    let stats: { mtimeMs: number };
+    try {
+      stats = await stat(watermarkPath(dir));
+    } catch {
+      return;
+    }
+    if (!force && this.loadedMtimeMs !== null && stats.mtimeMs <= this.loadedMtimeMs) return;
+    const loaded = await loadState(dir);
+    if (loaded) this.state = loaded;
+    this.loadedMtimeMs = stats.mtimeMs;
   }
 
   get(): WatermarkState {
@@ -129,15 +205,17 @@ export class Watermark {
     return this.dir;
   }
 
-  /** Advances the high-water mark of what has been examined. A no-op (no write) when `t` does not move it forward — `lastExaminedT` only ever grows. */
+  /** Advances the high-water mark of what has been examined. A no-op (no write) when `t` does not move it forward — `lastExaminedT` only ever grows. Refreshes first (W1) so the monotonic guard compares against the latest on-disk value, not a copy from whenever this instance last looked. */
   async recordExamined(t: number): Promise<void> {
+    await this.refresh();
     if (this.state.lastExaminedT !== null && t <= this.state.lastExaminedT) return;
     this.state = { ...this.state, lastExaminedT: t };
     await this.persist();
   }
 
-  /** Advances the banner's own high-water mark. Same monotonic guard as `recordExamined` — this is the mechanism behind "the banner never repeats an event." */
+  /** Advances the banner's own high-water mark. Same monotonic guard as `recordExamined`, same refresh-first reasoning — this is the mechanism behind "the banner never repeats an event," now including one it never wrote itself but another live process (an MCP server, a `watch`) already reported. */
   async recordReportedErrorT(t: number): Promise<void> {
+    await this.refresh();
     if (this.state.lastReportedErrorT !== null && t <= this.state.lastReportedErrorT) return;
     this.state = { ...this.state, lastReportedErrorT: t };
     await this.persist();
@@ -145,6 +223,7 @@ export class Watermark {
 
   /** Replaces the findings digest wholesale — there is only ever one, the most recent. */
   async recordDigest(digest: FindingsDigest): Promise<void> {
+    await this.refresh();
     this.state = { ...this.state, digest };
     await this.persist();
   }
@@ -155,11 +234,32 @@ export class Watermark {
     await this.persist();
   }
 
+  /**
+   * Writes through a temp file and `rename()`s it into place — atomic on
+   * every OS this ships for (POSIX `rename(2)`; Windows' `MoveFileEx` with
+   * the same all-or-nothing guarantee, which is what Node's `fs.rename`
+   * uses there) — so a concurrent `refresh()` in another process always
+   * sees either the complete old file or the complete new one, never a
+   * partial write interleaved with its own read (GRA-56 QA, W1). The temp
+   * name includes this process's pid: two processes writing at once must
+   * not `rename()` over each other's still-in-flight temp file.
+   */
   private persist(): Promise<void> {
     if (!this.dir) return Promise.resolve();
     const dir = this.dir;
     const data = JSON.stringify(this.state, null, 2);
-    this.writing = this.writing.then(() => writeFile(watermarkPath(dir), data, "utf8"));
+    this.writing = this.writing.then(async () => {
+      const finalPath = watermarkPath(dir);
+      const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(tmpPath, data, "utf8");
+      await rename(tmpPath, finalPath);
+      // The rename this instance just performed is itself the freshest
+      // possible mtime — recorded here rather than left for the next
+      // refresh()'s stat() to discover, so this instance never re-reads its
+      // own write back as though some other process had made it.
+      const stats = await stat(finalPath);
+      this.loadedMtimeMs = stats.mtimeMs;
+    });
     return this.writing;
   }
 }

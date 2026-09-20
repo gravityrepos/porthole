@@ -818,8 +818,26 @@ of whatever MCP server may also be attached (`PortholeSocketServer` already
 serves several clients at once; the timeline and an MCP server are proof of
 that) — and streams findings as they occur rather than answering one question
 and exiting. Default severity is `error`; `--severity warning` or
-`--severity note` widen it. A finding line carries everything the ticket that
-sent you here needs to quote into `findings`/`what_was_happening`:
+`--severity note` widen it.
+
+**Forwarding, same as `porthole ui`/`porthole capture`.** Since GRA-199 the
+device side listens on an abstract socket named for the app
+(`localabstract:porthole.<applicationId>`), not a shared TCP port, so `watch`
+needs to know the app it is forwarding to before it can bridge anything.
+`PORTHOLE_APPLICATION_ID` (written into `.mcp.json` by `portholeMcpConfig` —
+see [Setup](#setup)) covers this for free in the ordinary case; running the
+CLI on its own, pass it explicitly: `porthole watch --application-id
+com.example.shop`. Without either that or `--legacy-tcp-port` (see the
+[GRA-199 migration note](#setup) if you are still on the pre-migration shared
+TCP port), `--forward` refuses outright — the same refusal `ui`/`capture`
+already give — rather than guessing a socket name and silently forwarding to
+one nothing is listening on, which is exactly the failure mode an earlier
+version of this command had: it kept issuing the pre-GRA-199 `adb forward
+tcp:<port> tcp:<port>`, and on real hardware that rewrote a working forward
+into a dead one without saying a word.
+
+A finding line carries everything the ticket that sent you here needs to
+quote into `findings`/`what_was_happening`:
 
 ```
 ERROR  main thread blocked for 6240ms  t=2088311..2094551  com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:146)
@@ -834,6 +852,22 @@ prints the same finding as one JSON object per line instead, for a hook to
 parse with `jq`; every diagnostic (connection state, reconnect chatter) goes
 to stderr only, so stdout is never anything but findings.
 
+**One line per occurrence — except for an episode still in progress.** A
+stall, a failed call, a query on the main thread: `findingsOf` anchors each
+of those on one specific contributing event (the worst stall so far, the
+first failure), so a fresh line means a genuinely new, distinct occurrence
+happened, and `watch` prints every one of them. `frames-dropped` and
+`recompose-hotspot` are the opposite shape — their `count` is a running
+tally over one continuous, still-open episode (missed frames summed across
+the jank so far; a component's own recompositions summed across the storm so
+far), which climbs on essentially every tick for as long as the episode
+lasts. Printing those on the same "count grew" rule floods a `--json` hook:
+one jank episode measured seventeen lines, counts walking 32 → 209, roughly
+one line a second for as long as it lasted — seventeen lines about the same
+problem, not seventeen problems. Those two ids alone reprint at most once
+every 10 seconds while their own episode is still ongoing; everything else is
+unaffected.
+
 **Deduplication.** A `watch` running alongside a live agent session must not
 repeat what the agent's own ["since your last call" banner](#what-happened-while-you-were-not-looking)
 already surfaced, and must not make that banner repeat what `watch` already
@@ -847,13 +881,20 @@ already means; `--severity warning`/`--severity note` still dedupe repeats,
 but only within `watch`'s own run, since there is no shared field for those
 severities to share.
 
+Not full mutual exclusion, and it does not claim to be: refresh-then-decide-
+then-write is three steps, not one atomic compare-and-swap, so a `watch` and
+the MCP surface's banner — or two `watch`es — that both make that decision
+inside the same ~200ms poll interval can still both report the same error
+once. Neither repeats it afterward, once each has seen the other's write —
+"within one poll interval both may report," not "never."
+
 **Exit codes**, and nothing else stops it:
 
 | code | meaning |
 | --- | --- |
 | 0 | clean stop — SIGINT |
 | 1 | `--until-first` found a qualifying finding (on stdout) |
-| 2 | bad arguments, or nothing to connect to |
+| 2 | bad arguments, or an internal error stopped the watch |
 | 3 | `--timeout` elapsed with nothing (yet) to report |
 
 A disconnect is never on that list. `porthole watch` reconnects on its own,
@@ -866,14 +907,18 @@ reason to stop watching it.
 the moment something breaks:
 
 ```bash
-porthole watch --until-first
+porthole watch --until-first --application-id com.example.shop
 ```
 
 Run it the way you'd run any long-lived command in Claude Code — as a
 background bash task. Claude Code notifies the agent when a background task
 exits; `--until-first`'s exit code (1, with the finding already on stdout) *is*
 the notification, and the finding is already there to paste into `findings`
-without another tool call.
+without another tool call. `--application-id` is shown explicitly here on
+purpose — a recipe meant to be pasted as-is should not depend on whatever
+happened to already be exported in that shell; drop it if
+`PORTHOLE_APPLICATION_ID` is already set (it usually is, once
+`portholeMcpConfig` has generated `.mcp.json`).
 
 **Hook**, for a gate that runs once and reports back — `--json` so the hook
 can parse what it found:
@@ -887,7 +932,7 @@ can parse what it found:
         "hooks": [
           {
             "type": "command",
-            "command": "porthole watch --until-first --json --timeout 30 --severity error; code=$?; if [ $code -eq 1 ]; then exit 2; fi; exit 0"
+            "command": "porthole watch --until-first --json --timeout 30 --severity error --application-id com.example.shop; code=$?; if [ $code -eq 1 ]; then exit 2; fi; exit 0"
           }
         ]
       }
@@ -917,7 +962,10 @@ before adapting the command line itself, not the quoting shown here).
   and tested above.
 - **Exit codes.** Decided and tested: 0/1/2/3 as the table above, chosen to
   match `porthole capture`'s own `process.exit(2)` discipline for bad
-  arguments rather than invent a fifth code for the same fact.
+  arguments rather than invent a fifth code for the same fact — code 2 also
+  covers an internal defect (a crash inside the finding-evaluation loop
+  itself), never code 1, which a hook would otherwise read as a genuine
+  finding with nothing on stdout to back it up.
 
 ## Handing a moment to the agent
 

@@ -369,11 +369,17 @@ if (command === "ui") {
 } else if (command === "watch") {
   const options = parseWatch(rest);
   if (options.forward) {
-    const forwarded = runAdb(
-      ["forward", `tcp:${options.port}`, `tcp:${options.port}`],
-      options.serial,
-    );
-    if (!forwarded.ok) console.error(forwarded.output);
+    // GRA-199: same forwardTarget() `porthole ui`/`porthole capture` use
+    // above — QA (F1) caught this dispatch still forwarding the pre-GRA-199
+    // `tcp:PORT tcp:PORT`, which the device side has not listened on since
+    // that ticket, so it silently rewrote a working forward into a dead one.
+    const target = forwardTarget(options.port, options.applicationId, options.legacyTcpPort);
+    if (!target.ok) {
+      console.error(target.error);
+    } else {
+      const forwarded = runAdb(["forward", `tcp:${options.port}`, target.target], options.serial);
+      if (!forwarded.ok) console.error(forwarded.output);
+    }
   }
   // AbortController, not a direct `device.stop()` in a SIGINT handler here:
   // runWatch() owns its own DeviceClient and every timer that could still be

@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -311,7 +312,17 @@ describe("capture command: refused before device contact", () => {
         'if (arg0 !== "forward" && arg0 !== "-s") return;\n' +
         'const fs = require("fs");\n' +
         "if (process.env.PORTHOLE_ADB_SENTINEL) {\n" +
-        '  fs.writeFileSync(process.env.PORTHOLE_ADB_SENTINEL, "adb ran");\n' +
+        // GRA-56 QA (F1): the sentinel used to be the bare string "adb ran",
+        // enough to prove adb was reached at all but not what it was asked
+        // to do. Writing `[arg0, ...argv.slice(2)]` — `arg0` already
+        // normalised to a basename just above, since Node resolves argv[1]
+        // to an absolute script path before this preload ever runs (same
+        // reason the arg0 check itself compares basenames, not the raw
+        // value) — lets a test assert on the exact forward target: the
+        // difference between `forward tcp:8790
+        // localabstract:porthole.<id>` and the pre-GRA-199 `forward
+        // tcp:8790 tcp:8790` a caller could still regress to.
+        "  fs.writeFileSync(process.env.PORTHOLE_ADB_SENTINEL, JSON.stringify([arg0, ...process.argv.slice(2)]));\n" +
         "}\n" +
         "process.exit(0);\n",
     );
@@ -570,6 +581,46 @@ describe("capture command: refused before device contact", () => {
       if (existsSync(adbSentinel)) rmSync(adbSentinel);
       if (existsSync(commandSentinel)) rmSync(commandSentinel);
       if (existsSync(out)) rmSync(out);
+    }
+  });
+
+  // GRA-56 QA (F1 blocker): `watch`'s own dispatch (cli.ts's `command ===
+  // "watch"` branch) merged before GRA-199 converted `ui`/`capture` to
+  // `forwardTarget()` and was never updated — it kept running the
+  // pre-GRA-199 `adb forward tcp:PORT tcp:PORT`, which the device side has
+  // not listened on since that ticket, so on real hardware it silently
+  // rewrote a working forward into a dead one and the watch never
+  // connected. Reuses this describe's own fake-adb shim rather than
+  // standing up a second, tens-of-megabytes copy of node.exe just for
+  // `watch` — the shim writes its own `argv` to the sentinel (see
+  // `beforeAll` above), which is what lets these two pin the exact forward
+  // target rather than only whether adb was reached at all.
+  it("porthole watch --application-id forwards to the abstract socket, not the pre-GRA-199 tcp:PORT tcp:PORT", () => {
+    const adbSentinel = adbSentinelPath();
+    try {
+      // --timeout 1: watch never gives up on its own otherwise, and this
+      // test only needs the forward call that happens before it starts
+      // trying to connect at all — no fake device is stood up here.
+      const result = spawnCliWithFakeAdb(
+        ["watch", "--port", "8790", "--application-id", "com.example.shop", "--timeout", "1"],
+        adbSentinel,
+      );
+      expect(existsSync(adbSentinel), result.stderr.toString("utf8")).toBe(true);
+      const argv = JSON.parse(readFileSync(adbSentinel, "utf8"));
+      expect(argv).toEqual(["forward", "tcp:8790", "localabstract:porthole.com.example.shop"]);
+    } finally {
+      if (existsSync(adbSentinel)) rmSync(adbSentinel);
+    }
+  });
+
+  it("porthole watch refuses to guess a forward target without --application-id or --legacy-tcp-port, and never touches adb", () => {
+    const adbSentinel = adbSentinelPath();
+    try {
+      const result = spawnCliWithFakeAdb(["watch", "--port", "8790", "--timeout", "1"], adbSentinel);
+      expect(existsSync(adbSentinel)).toBe(false);
+      expect(result.stderr.toString("utf8")).toContain("PORTHOLE_APPLICATION_ID");
+    } finally {
+      if (existsSync(adbSentinel)) rmSync(adbSentinel);
     }
   });
 });
