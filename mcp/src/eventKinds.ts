@@ -41,6 +41,7 @@ export const EVENT_KINDS = [
   "blocked",
   "gc",
   "memory",
+  "strict_violation",
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -100,6 +101,14 @@ const KIND_GROUPS: readonly KindGroup[] = [
   {
     kinds: ["log_append", "mark", "work_start", "work_end", "blocked"],
     narrated: "raw here",
+  },
+  {
+    kinds: ["strict_violation"],
+    narrated:
+      "raw here; `findings` turns one into an entry at `error` (main-thread disk writes and network " +
+      "calls), `warning` (leaked closeables/cursors), or `note` (everything else) — only ever for a " +
+      "violation whose stack names a frame in the app's own package, so a platform-only violation is " +
+      "not a finding at all",
   },
 ];
 

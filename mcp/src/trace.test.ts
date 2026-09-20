@@ -626,6 +626,77 @@ describe("findingsOf", () => {
       expect(findings.map((f) => f.severity)).toEqual(["error", "note"]);
     });
   });
+
+  // GRA-59: StrictModeCollector already did the filtering (only a violation
+  // whose stack touched the app's own package became an event at all) and
+  // the counting (a flood at one site is a handful of events, not one per
+  // violation). findingsOf's own job is picking the highest-count event per
+  // site and mapping its category to a severity — a fixture event in, a
+  // finding with the right severity out.
+  describe("strict-mode violations (GRA-59)", () => {
+    function strictEvent(overrides: Record<string, unknown> = {}, t = 100) {
+      return event("strict_violation", t, {
+        category: "main_thread_disk",
+        type: "DiskWriteViolation",
+        thread: "main",
+        site: "com.example.shop.CartAdapter.onBindViewHolder:88",
+        count: 1,
+        stack: "com.example.shop.CartAdapter.onBindViewHolder(CartAdapter.kt:88)\nandroid.os.StrictMode.foo",
+        ...overrides,
+      });
+    }
+
+    it("calls a main-thread disk violation an error", () => {
+      const findings = find([strictEvent({ category: "main_thread_disk" })]);
+      expect(findings[0]).toMatchObject({ severity: "error", confidence: "observed" });
+    });
+
+    it("calls a main-thread network violation an error", () => {
+      const findings = find([strictEvent({ category: "main_thread_network", type: "NetworkViolation" })]);
+      expect(findings[0].severity).toBe("error");
+    });
+
+    it("calls a leak a warning", () => {
+      const findings = find([strictEvent({ category: "leak", type: "LeakedClosableViolation" })]);
+      expect(findings[0].severity).toBe("warning");
+    });
+
+    it("calls everything else a note", () => {
+      const findings = find([strictEvent({ category: "other", type: "UntaggedSocketViolation" })]);
+      expect(findings[0].severity).toBe("note");
+    });
+
+    it("names the call site and the violation type in the title", () => {
+      const findings = find([strictEvent()]);
+      expect(findings[0].title).toContain("DiskWriteViolation");
+      expect(findings[0].title).toContain("com.example.shop.CartAdapter.onBindViewHolder:88");
+    });
+
+    it("collapses repeated updates for the same site into one finding, keeping the highest count", () => {
+      const findings = find([
+        strictEvent({ count: 1 }, 100),
+        strictEvent({ count: 50 }, 150),
+        strictEvent({ count: 200 }, 400),
+      ]);
+      const strict = findings.filter((f) => f.id.startsWith("strict-"));
+      expect(strict).toHaveLength(1);
+      expect(strict[0].count).toBe(200);
+      expect(strict[0].title).toContain("200×");
+    });
+
+    it("keeps two different call sites as two separate findings", () => {
+      const findings = find([
+        strictEvent({ site: "a.B.c:1" }),
+        strictEvent({ site: "a.B.d:2" }),
+      ]);
+      const strict = findings.filter((f) => f.id.startsWith("strict-"));
+      expect(strict).toHaveLength(2);
+    });
+
+    it("says nothing when there is no strict-mode event at all", () => {
+      expect(find([event("recompose", 0)]).some((f) => f.id.startsWith("strict-"))).toBe(false);
+    });
+  });
 });
 
 // GRA-200: findingsOf is deliberately selective (see its own comment on
