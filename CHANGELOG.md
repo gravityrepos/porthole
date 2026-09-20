@@ -125,6 +125,12 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+- `FrameCollector` computed its first-draw flag, and fired the hooks that
+  depend on it, only after the "is this frame janky" early return — so a
+  smooth first frame never counted as the first draw, and anything keyed on
+  it (now the startup collector's first-frame phase) waited for the first
+  dropped frame instead. The flag and the hooks now run for every frame,
+  before the jank test (GRA-60).
 - `portholeMcpConfig` now pins the npm package it writes into `.mcp.json`'s
   `porthole` entry to the same `uiPackageVersion` that `portholeUi` runs and
   the runtime AAR is pinned to, instead of leaving it unversioned for `npx`
