@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { DeviceEvent } from "./device.js";
 import type { Finding } from "./trace.js";
 import { findingsOf } from "./trace.js";
-import { startupFindingsOf } from "./startup.js";
+import { reconcileStartupWithTrace, startupFindingsOf } from "./startup.js";
 
 function event(name: string, t: number, data: Record<string, unknown> = {}): DeviceEvent {
   return { event: name, t, seq: t, data };
@@ -259,5 +259,133 @@ describe("findingsOf includes startup findings (trace.ts wiring)", () => {
     expect(ids).toContain("startup-slow-0");
     const startupSlow = findings.find((f) => f.id === "startup-slow-0")!;
     expect(startupSlow.evidence?.crossReferenced).toEqual(["db-on-main-thread"]);
+  });
+});
+
+// GRA-231: reconcileStartupWithTrace — the two independent measurements of
+// the same launch (Perfetto's own `trace-startup`, perfetto.ts#interpret,
+// and the runtime's `startup` event above) told about each other.
+describe("reconcileStartupWithTrace", () => {
+  /** Shaped the way `interpret()`'s own `trace-startup` block (perfetto.ts) builds one. */
+  function traceStartupFinding(over: Partial<Finding> & { durMs: number }): Finding {
+    const { durMs, ...rest } = over;
+    return {
+      id: "trace-startup",
+      severity: durMs >= 500 ? "warning" : "note",
+      confidence: "observed",
+      title: `cold start took ${durMs}ms`,
+      detail: "No single reason dominated the platform's own breakdown of it.",
+      count: 1,
+      evidence: { durMs, startupType: "cold", reasons: {} },
+      window: { from: 1_000, to: 1_000 + durMs },
+      ...rest,
+    };
+  }
+
+  it("no trace-startup finding at all: returns the findings untouched", () => {
+    const other: Finding = { id: "trace-jank", severity: "warning", confidence: "observed", title: "x", spanning: true };
+    const result = reconcileStartupWithTrace([other], [startupEvent()]);
+    expect(result).toEqual([other]);
+  });
+
+  it("a trace-startup finding but no runtime startup event at all: unchanged, no note", () => {
+    const finding = traceStartupFinding({ durMs: 900 });
+    const result = reconcileStartupWithTrace([finding], [event("mark", 10, { label: "x" })]);
+    expect(result).toEqual([finding]);
+  });
+
+  it("a runtime startup event exists but its window does not overlap the trace finding's: unchanged, no note", () => {
+    const finding = traceStartupFinding({ durMs: 900, window: { from: 1_000, to: 1_900 } });
+    const runtime = startupEvent({ originMs: 50_000, firstFrameMs: 51_000, totalMs: 1_000 });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    expect(result).toEqual([finding]);
+  });
+
+  it("overlapping match, plausible gap: attaches runtime evidence and phases, no note added", () => {
+    // Trace times from the launch request (earlier), runtime from the fork —
+    // gap of 40ms, well inside the 5000ms bound.
+    const finding = traceStartupFinding({ durMs: 1_300, window: { from: 1_000, to: 2_300 } });
+    const runtime = startupEvent({
+      originMs: 1_000,
+      onCreateEntryMs: 1_005,
+      onCreateExitMs: 1_040,
+      activityOnCreateMs: 1_120,
+      activityOnStartMs: 1_150,
+      activityOnResumeMs: 1_170,
+      firstFrameMs: 2_260,
+      totalMs: 1_260,
+    });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    expect(result).toHaveLength(1);
+    const reconciled = result[0];
+    expect(reconciled.evidence?.runtimeTotalMs).toBe(1_260);
+    expect(reconciled.evidence?.runtimeOriginKind).toBe("fork");
+    expect(reconciled.evidence?.gapMs).toBe(40); // 1300 - 1260
+    // Original evidence (durMs, startupType, reasons) survives the merge.
+    expect(reconciled.evidence?.durMs).toBe(1_300);
+    expect(reconciled.evidence?.runtimePhases).toEqual([
+      { name: "fork", atMs: 1_000 },
+      { name: "onCreateEntry", atMs: 1_005 },
+      { name: "onCreateExit", atMs: 1_040 },
+      { name: "activityOnCreate", atMs: 1_120 },
+      { name: "activityOnStart", atMs: 1_150 },
+      { name: "activityOnResume", atMs: 1_170 },
+      { name: "firstFrame", atMs: 2_260 },
+      { name: "reportFullyDrawn", atMs: 1_300 }, // default fixture value, see startupEvent()
+    ]);
+    // Mutation check: no reconciliation note fires for a plausible gap.
+    expect(result.some((f) => f.id.startsWith("startup-reconciliation-"))).toBe(false);
+  });
+
+  it("a warm/hot runtime event labels its origin phase activityOrigin, not fork", () => {
+    const finding = traceStartupFinding({ durMs: 30, window: { from: 20_000, to: 20_030 } });
+    const runtime = relaunchEvent({ originMs: 20_000, firstFrameMs: 20_003, totalMs: 3 });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    const phases = result[0].evidence?.runtimePhases as Array<{ name: string; atMs: number }>;
+    expect(phases[0]).toEqual({ name: "activityOrigin", atMs: 20_000 });
+  });
+
+  it("negative gap (runtime claims more time than the trace): implausible, emits one note naming both numbers", () => {
+    // Trace says 200ms; runtime, for the "same" launch, says 900ms — the
+    // later-origin runtime total can never legitimately exceed the
+    // earlier-origin trace total.
+    const finding = traceStartupFinding({ durMs: 200, window: { from: 1_000, to: 1_200 } });
+    const runtime = startupEvent({ originMs: 1_000, firstFrameMs: 1_900, totalMs: 900 });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    expect(result).toHaveLength(2);
+    const note = result.find((f) => f.id === "startup-reconciliation-1000")!;
+    expect(note.severity).toBe("note");
+    expect(note.title).toContain("200ms");
+    expect(note.title).toContain("900ms");
+    expect(note.evidence?.gapMs).toBe(-700);
+  });
+
+  it("gap past the bound (5000ms, reused from the cold-slow threshold): implausible, emits one note", () => {
+    const finding = traceStartupFinding({ durMs: 6_500, window: { from: 0, to: 6_500 } });
+    const runtime = startupEvent({ originMs: 0, firstFrameMs: 1_000, totalMs: 1_000 });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    const note = result.find((f) => f.id === "startup-reconciliation-0")!;
+    expect(note.evidence?.gapMs).toBe(5_500);
+    expect(note.detail).toContain("5500ms");
+    expect(note.window).toEqual(finding.window);
+  });
+
+  it("gap right at the bound is still plausible: no note (boundary, not strictly-past)", () => {
+    const finding = traceStartupFinding({ durMs: 6_000, window: { from: 0, to: 6_000 } });
+    const runtime = startupEvent({ originMs: 0, firstFrameMs: 1_000, totalMs: 1_000 });
+    const result = reconcileStartupWithTrace([finding], [runtime]);
+    expect(result).toHaveLength(1); // gapMs === 5000, not > 5000
+    expect(result[0].evidence?.gapMs).toBe(5_000);
+  });
+
+  it("two separate launches in the window: each trace-startup finding reconciles against its own runtime event only", () => {
+    const first = traceStartupFinding({ durMs: 300, window: { from: 0, to: 300 } });
+    const second = traceStartupFinding({ durMs: 5, window: { from: 20_000, to: 20_005 } });
+    const runtimeFirst = startupEvent({ originMs: 0, firstFrameMs: 260, totalMs: 260 });
+    const runtimeSecond = relaunchEvent({ originMs: 20_000, firstFrameMs: 20_003, totalMs: 3 });
+    const result = reconcileStartupWithTrace([first, second], [runtimeFirst, runtimeSecond]);
+    expect(result).toHaveLength(2);
+    expect(result[0].evidence?.runtimeTotalMs).toBe(260);
+    expect(result[1].evidence?.runtimeTotalMs).toBe(3);
   });
 });

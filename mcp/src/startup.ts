@@ -189,3 +189,157 @@ export function startupFindingsOf(events: DeviceEvent[], otherFindings: Finding[
   }
   return findings;
 }
+
+/**
+ * GRA-231: does the trace's own `trace-startup` finding — Perfetto's
+ * `android.startup.startups`/`startup_breakdowns` modules, via the
+ * `startup` question (`ask_system_trace`, interpret() in perfetto.ts) —
+ * agree with `StartupCollector`'s own `startup` event for the same launch?
+ *
+ * The two exist side by side today without knowing about each other — see
+ * the "GRA-60 hook" comment above `interpret()`'s own `trace-startup` block
+ * in perfetto.ts, which names exactly this function's job as the thing left
+ * undone. `ask_system_trace` (index.ts) already has both by the time it
+ * would call this: `askTrace`'s findings, already converted onto this
+ * session's uptime clock (`toUptimeMs`), and `timeline.buffer()`, the same
+ * session's own device events, on that same clock by construction. Nothing
+ * here reaches for a device or a trace file itself, which is what makes it
+ * cheap to rig-test with hand-built fixtures instead of a live capture —
+ * the same split `startupFindingsOf` above makes.
+ *
+ * A `trace-startup` finding whose window overlaps a runtime `startup`
+ * event's own `[originMs, firstFrameMs]` span (the same session, the
+ * *only* session a caller's `timeline.buffer()` can ever hand this) gets
+ * that launch's phases attached to `evidence.runtimePhases`, plus
+ * `evidence.runtimeTotalMs`/`runtimeOriginKind`/`gapMs`. A `trace-startup`
+ * finding with no matching runtime event, or a runtime `startup` event with
+ * no matching trace window, is left exactly as it arrived — this function
+ * only ever adds evidence or an extra note, never removes or overwrites a
+ * finding either side already produced on its own.
+ *
+ * README's Startup section spells out the structural gap this is
+ * reconciling: the trace times a launch from the launch request itself —
+ * before the process even forks — while Porthole times from the fork
+ * (cold) or the relaunched Activity's own first lifecycle callback
+ * (warm/hot), always a later instant. So `gapMs` (trace total minus runtime
+ * total) is expected to be positive — that gap *is* the process-creation
+ * and window-setup work neither side can see — and a `note` finding fires
+ * only when the two numbers say something that gap cannot explain: `gapMs`
+ * negative (the runtime claims *more* time than the trace, which the later
+ * origin makes impossible for the same launch), or `gapMs` past
+ * [RECONCILIATION_GAP_BOUND_MS].
+ */
+export function reconcileStartupWithTrace(findings: Finding[], events: DeviceEvent[]): Finding[] {
+  const launches = events
+    .filter((event) => event.event === "startup")
+    .map((event) => ({ event, launch: launchDataOf(event) }))
+    .filter(
+      (entry): entry is { event: DeviceEvent; launch: LaunchData & { firstFrameMs: number; totalMs: number } } =>
+        entry.launch.firstFrameMs != null && entry.launch.totalMs != null,
+    );
+  // Nothing to reconcile against — every `trace-startup` finding passes
+  // through unchanged, per this function's own "no change when the other
+  // side is absent" contract.
+  if (launches.length === 0) return findings;
+
+  const reconciled: Finding[] = [];
+  const notes: Finding[] = [];
+
+  for (const finding of findings) {
+    if (finding.id !== "trace-startup" || !finding.window) {
+      reconciled.push(finding);
+      continue;
+    }
+    const window = finding.window;
+    const match = launches.find(({ launch }) => overlaps(window, { from: launch.originMs, to: launch.firstFrameMs }));
+    if (!match) {
+      reconciled.push(finding);
+      continue;
+    }
+
+    const { event, launch } = match;
+    const traceDurMs = num((finding.evidence ?? {}).durMs);
+    const gapMs = traceDurMs - launch.totalMs;
+
+    reconciled.push({
+      ...finding,
+      evidence: {
+        ...finding.evidence,
+        runtimeTotalMs: launch.totalMs,
+        runtimeOriginKind: launch.originKind,
+        runtimePhases: phasesOf(event, launch.originKind),
+        gapMs,
+      },
+    });
+
+    if (gapMs < 0 || gapMs > RECONCILIATION_GAP_BOUND_MS) {
+      notes.push({
+        // Suffixed by the launch's own origin, the same collision-avoidance
+        // `startup-slow-${originMs}` already relies on (this file, above):
+        // more than one launch in the window must not collapse onto one id.
+        id: `startup-reconciliation-${launch.originMs}`,
+        severity: "note",
+        confidence: "observed",
+        title:
+          gapMs < 0
+            ? `trace and runtime disagree on startup timing: trace ${traceDurMs}ms is shorter than the runtime's own ${launch.totalMs}ms`
+            : `trace and runtime startup totals are ${gapMs}ms apart — wider than expected`,
+        detail:
+          gapMs < 0
+            ? "The trace times a launch from the launch request itself, before the process even " +
+              "forks; Porthole times from the fork (cold) or the relaunched Activity's own first " +
+              "callback (warm/hot) — always a later instant, so the trace's own total should never " +
+              "come out shorter than the runtime's. Either these are not the same launch, or one of " +
+              "the two numbers is simply wrong — this does not pick which."
+            : `Some of this gap is structural — the trace starts timing before ${launch.originKind === "fork" ? "the fork" : "the relaunched Activity's own first callback"}, Porthole after it (see README's Startup section) — but ${gapMs}ms alone is past the ${RECONCILIATION_GAP_BOUND_MS}ms Android vitals itself calls an excessive cold start, more than ordinary process-creation overhead accounts for.`,
+        count: 1,
+        evidence: {
+          traceDurMs,
+          runtimeTotalMs: launch.totalMs,
+          gapMs,
+          originKind: launch.originKind,
+        },
+        window,
+      });
+    }
+  }
+
+  return [...reconciled, ...notes];
+}
+
+/**
+ * How far past [COLD_SLOW_THRESHOLD_MS] `gapMs` (trace total minus runtime
+ * total) may run before [reconcileStartupWithTrace] calls it implausible
+ * rather than structural. Reuses that same constant rather than inventing a
+ * second number: the portion of a launch that happens before Porthole's own
+ * origin — zygote fork, `ActivityThread`, window setup — is real OS work,
+ * but if it alone outweighs the entire budget Android vitals considers
+ * acceptable for a whole cold start, the gap has stopped being "process
+ * creation overhead" and become a second thing wrong that neither side's
+ * own number, read alone, could show.
+ */
+const RECONCILIATION_GAP_BOUND_MS = COLD_SLOW_THRESHOLD_MS;
+
+/**
+ * The runtime event's own phases, oldest first — what
+ * [reconcileStartupWithTrace] attaches to `evidence.runtimePhases`. Reads
+ * straight off the event's wire fields rather than [LaunchData] (which only
+ * carries what the rest of this file needs): the intermediate phases —
+ * `onCreateEntry`/`onCreateExit`/the three activity lifecycle callbacks —
+ * exist only on the wire today, and widening `LaunchData` for one caller
+ * would make every other reader of it carry fields it never asked for.
+ */
+function phasesOf(event: DeviceEvent, originKind: string): Array<{ name: string; atMs: number }> {
+  const data = event.data;
+  const entries: Array<[string, unknown]> = [
+    [originKind === "fork" ? "fork" : "activityOrigin", data.originMs],
+    ["onCreateEntry", data.onCreateEntryMs],
+    ["onCreateExit", data.onCreateExitMs],
+    ["activityOnCreate", data.activityOnCreateMs],
+    ["activityOnStart", data.activityOnStartMs],
+    ["activityOnResume", data.activityOnResumeMs],
+    ["firstFrame", data.firstFrameMs],
+    ["reportFullyDrawn", data.reportFullyDrawnMs],
+  ];
+  return entries.filter(([, v]) => v != null).map(([name, v]) => ({ name, atMs: num(v) }));
+}

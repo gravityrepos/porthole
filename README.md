@@ -1439,6 +1439,24 @@ hardware reconciliation GRA-60's own acceptance criteria ask for — the same
 pairing, on a physical device, with the gap accounted for — has not been run
 yet.
 
+**`ask_system_trace` does that pairing automatically, when it can.** Its
+`startup` question already reads Perfetto's own attribution of a launch
+(`trace-startup`, from `android.startup.startups`/`startup_breakdowns`); when
+the window it was asked about also holds this collector's own `startup`
+event for the same launch, `trace-startup`'s evidence grows the runtime
+event's phases (`runtimePhases`), its own total (`runtimeTotalMs`,
+`runtimeOriginKind`) and the gap between the two (`gapMs`). A positive
+`gapMs` is exactly the structural difference above, not a discrepancy — it
+is never suppressed or explained away. A `startup-reconciliation-<originMs>`
+note fires only when the two numbers disagree in a way that difference
+cannot account for: `gapMs` negative (the runtime claiming more time than
+the trace, which the trace's earlier origin makes impossible for the same
+launch), or a `gapMs` past the same 5000ms line `startup-slow` already draws
+for "this cold startup is excessive" — past that, the pre-fork portion of
+the launch is no longer plausible as ordinary process-creation overhead.
+Neither side is ever silently preferred over the other, and neither changes
+when the other is absent from the window (GRA-231).
+
 Needs API 24 for `Process.getStartUptimeMillis()` — this module's `minSdk` is
 26, so that is never actually a gate in practice. A process only ever runs
 `Application.onCreate` once, which is what keeps the classifier from ever

@@ -133,6 +133,21 @@ PR that makes the change, not after the fact.
   hand-typed version string, which had drifted two releases stale, is gone;
   the one hand-maintained version on the page now lives in the status block,
   next to the registries that explain what it means (GRA-131).
+- `ask_system_trace`'s `trace-startup` finding now reconciles against the
+  runtime's own `startup` event for the same launch, when the window holds
+  one: the launch's phases (fork or activity origin, `onCreate`
+  entry/exit, the three activity lifecycle callbacks, first frame,
+  `reportFullyDrawn`) land in `evidence.runtimePhases`, alongside
+  `runtimeTotalMs`, `runtimeOriginKind` and `gapMs`. The trace times a
+  launch from the launch request itself, before the process even forks;
+  Porthole times from the fork (cold) or the relaunched Activity's own
+  first callback (warm/hot) — always a later instant — so a positive
+  `gapMs` is that structural difference, not a discrepancy (see README's
+  Startup section). A `startup-reconciliation-<originMs>` note fires only
+  when the two numbers say something that gap cannot explain: `gapMs`
+  negative, or past the same 5000ms line `startup-slow` already draws for
+  "this cold startup is excessive." Neither side changes when the other is
+  absent (GRA-231).
 
 ### Fixed
 

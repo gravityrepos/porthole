@@ -27,6 +27,7 @@ import {
   type SystemContext,
 } from "./system.js";
 import { askTrace, findTraceProcessor, questionsDescription } from "./perfetto.js";
+import { reconcileStartupWithTrace } from "./startup.js";
 import { captureArgs, countPortholeLabels, describeCapture, planCapture } from "./systrace.js";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -1826,6 +1827,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const bootFrom = toBoot(events, span.from);
       const bootTo = toBoot(events, span.to);
 
+      // GRA-231: without a `toUptimeMs` converter, `interpret()` (perfetto.ts)
+      // has no way to place any point-placeable finding — startup included —
+      // and every one of them comes back `spanning: true` instead of its own
+      // `window` (see `rowsWindow`/`place` there). The reconciliation below
+      // needs `trace-startup`'s own window to test against a runtime
+      // `startup` event's window, so this tool needs the same wrapper around
+      // `fromBootMs` that `timeline.ts` already builds for its own `askTrace`
+      // call.
+      const toUptimeMs = (bootNs: number) => fromBootMs(events, bootNs / 1e6)?.at ?? null;
+
       const {
         findings: traceFindings,
         unanswered,
@@ -1839,9 +1850,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         fromNs: bootFrom.ns,
         toNs: bootTo.ns,
         ask,
+        toUptimeMs,
       });
 
-      const findings = traceFindings.map(withFollowUp);
+      // GRA-231: this session's own runtime `startup` events (already on
+      // this session's uptime clock, same as `traceFindings`' own `window`
+      // after `toUptimeMs` — see toBoot/toUptimeMs above) reconciled against
+      // whichever `trace-startup` finding(s) just came back, before
+      // `withFollowUp` — a `startup-reconciliation-*` note is exactly as
+      // followable as anything else in this list.
+      const findings = reconcileStartupWithTrace(traceFindings, events).map(withFollowUp);
       const payload = {
         trace,
         app,
