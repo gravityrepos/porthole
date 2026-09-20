@@ -353,7 +353,12 @@ PR that makes the change, not after the fact.
   (compileOnly on the runtime side, floor 2.14 — no app code beyond the
   dependency, since LeakCanary installs itself automatically), Porthole
   hooks `LeakCanary.config.onHeapAnalyzedListener`, chaining onto whatever
-  listener was already there. Each leak becomes its own `leak` event — the
+  listener was already there — off the main thread, on its own daemon
+  thread: the first touch of `LeakCanary.config` runs LeakCanary's own
+  static init (`shark.AndroidReferenceMatchers`' full reference-pattern
+  list), measured at roughly a second on a cold launch, which made this
+  integration responsible for the exact `main-thread-stall` finding it
+  exists to report. Each leak becomes its own `leak` event — the
   leaking object's class, retained heap size, how many occurrences this
   heap dump found, and LeakCanary's own rendered trace text (redacted,
   bounded, the same path as everything else) — and `findings` promotes an

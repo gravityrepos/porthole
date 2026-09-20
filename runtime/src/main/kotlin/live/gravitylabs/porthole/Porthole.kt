@@ -236,6 +236,14 @@ object Porthole {
             // called from inside it, never unconditionally here, which is
             // what keeps "absent" meaning no setup entry at all rather than
             // a present-but-false one (see that method's own doc comment).
+            //
+            // QA: the actual hook now runs on its own background thread
+            // (see install()'s own doc comment for why — touching
+            // LeakCanary.config for the first time is expensive enough to
+            // stall the main thread on a cold launch), so `true` here means
+            // "an attempt was launched," not "confirmed hooked" — this
+            // collectors line is best-effort, and whether it actually hooked
+            // is always Setup.report()'s own leakcanary row, never this list.
             if (LeakCanaryPorthole.install(ring)) collectors += "leakcanary"
             if (exitInfo.install(app)) collectors += "exit_info"
             if (autoWire.install(app)) collectors += "autowire"

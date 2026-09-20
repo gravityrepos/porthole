@@ -2261,7 +2261,10 @@ zero-configuration shape `ComponentActivity`'s own `fullyDrawnReporter` gets
 for [startup](#startup); Porthole hooks the one seam it offers for "a heap
 was analyzed" — `LeakCanary.config.onHeapAnalyzedListener` — chaining onto
 whatever listener was already there, the same way every other integration
-here chains rather than replaces.
+here chains rather than replaces. On its own background thread: the first
+touch of `LeakCanary.config` runs LeakCanary's own static init, expensive
+enough on a cold launch to be a `main-thread-stall` finding in its own right
+if this ran where it originally did, synchronously during process start.
 
 Each leak LeakCanary classifies becomes its own event: the leaking object's
 class, the retained heap size, how many separate occurrences this one heap
