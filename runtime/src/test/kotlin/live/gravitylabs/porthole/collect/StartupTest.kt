@@ -49,9 +49,11 @@ class StartupAssemblyTest {
         firstFrameMs: Long? = 1_260L,
         reportFullyDrawnMs: Long? = null,
         originAssumed: Boolean = false,
+        originKind: String = StartupAssembly.OriginKind.FORK,
     ) = StartupAssembly.Timestamps(
         originMs = originMs,
         originAssumed = originAssumed,
+        originKind = originKind,
         onCreateEntryMs = onCreateEntryMs,
         onCreateExitMs = onCreateExitMs,
         activityOnCreateMs = activityOnCreateMs,
@@ -186,6 +188,20 @@ class StartupAssemblyTest {
     fun `toEvent carries reportFullyDrawnMs when it was observed`() {
         val event = StartupAssembly.toEvent(t(reportFullyDrawnMs = 1_900L))
         assertEquals(1_900L, event["reportFullyDrawnMs"]?.jsonPrimitive?.long)
+    }
+
+    // -- QA 60-C: originKind travels on the wire, defaults to fork --
+
+    @Test
+    fun `originKind defaults to fork`() {
+        val event = StartupAssembly.toEvent(t())
+        assertEquals("fork", event["originKind"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test
+    fun `originKind carries activity for a warm-hot-shaped origin`() {
+        val event = StartupAssembly.toEvent(t(originKind = StartupAssembly.OriginKind.ACTIVITY))
+        assertEquals("activity", event["originKind"]?.jsonPrimitive?.contentOrNull)
     }
 }
 
@@ -340,6 +356,12 @@ class StartupLiveRelaunchTest {
             hot.data.asObject().containsKey("activityOnCreateMs"),
         )
         assertTrue(hot.data.asObject().containsKey("activityOnResumeMs"))
+        // QA 60-C: a hot/warm origin is the relaunched Activity's own
+        // lifecycle callback, never a fork — originKind says so, and
+        // originAssumed is true for the same reason (its own contract is
+        // "not the real fork time", which this categorically is not).
+        assertEquals("activity", hot.data.asObject()["originKind"]?.jsonPrimitive?.contentOrNull)
+        assertTrue(hot.data.asObject()["originAssumed"]?.jsonPrimitive?.boolean == true)
 
         // -- warm: that instance destroyed, a fresh one created --
         first.pause().stop().destroy()
@@ -362,6 +384,8 @@ class StartupLiveRelaunchTest {
             "a warm launch's whole distinguishing feature is a fresh Activity.onCreate",
             warm.data.asObject().containsKey("activityOnCreateMs"),
         )
+        assertEquals("activity", warm.data.asObject()["originKind"]?.jsonPrimitive?.contentOrNull)
+        assertTrue(warm.data.asObject()["originAssumed"]?.jsonPrimitive?.boolean == true)
 
         // "cold only once per process" — the property EM's follow-up asked to keep and test.
         assertEquals(listOf("cold", "hot", "warm"), afterWarm.map(::classificationOf))
@@ -387,6 +411,35 @@ class StartupLiveRelaunchTest {
 
         assertNull("no relaunch should be armed before the process's own cold event exists", armedCallback)
         assertTrue(startupEvents(ring).isEmpty())
+    }
+
+    @Test
+    fun `reportFullyDrawn during a warm-hot launch is recorded on that launch, not lost — QA 60-B`() {
+        val ring = EventRing()
+        val collector = StartupCollector(ring)
+        var armedCallback: ((Long) -> Unit)? = null
+        collector.armNextFrame = { callback -> armedCallback = callback }
+        collector.install(app)
+
+        val first = Robolectric.buildActivity(PlainActivity::class.java)
+        first.create().start().resume()
+        collector.onFirstFrame(SystemClock.uptimeMillis() + 10L)
+        ShadowLooper.idleMainLooper(2_000, TimeUnit.MILLISECONDS)
+        assertEquals(1, startupEvents(ring).size)
+
+        // hot relaunch: report before the ending frame arrives, the way a
+        // fast screen that was already fully drawn once might.
+        first.pause().stop()
+        first.restart().resume()
+        assertTrue(armedCallback != null)
+        collector.onReportFullyDrawn()
+        armedCallback!!.invoke(SystemClock.uptimeMillis() + 5L)
+
+        val hot = startupEvents(ring)[1]
+        assertTrue(
+            "a reportFullyDrawn call that happened before this launch's own ending frame must not be dropped",
+            hot.data.asObject().containsKey("reportFullyDrawnMs"),
+        )
     }
 }
 

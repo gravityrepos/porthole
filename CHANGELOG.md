@@ -87,14 +87,22 @@ PR that makes the change, not after the fact.
   the first frame drawn, all in one `startup` event classified cold, warm or
   hot — and not only the first launch: every relaunch while the process stays
   alive gets its own warm or hot `startup` event too, observed live off the
-  same activity lifecycle callbacks. `findings` turns a slow one into a
-  `startup-slow` entry naming the dominant phase and cross-referencing any
-  `db-on-main-thread` or `main-thread-stall` finding that fell inside the
-  startup window, and adds a `startup-not-fully-drawn` note when the app
-  never reports itself fully drawn — caught automatically via
-  `ComponentActivity.fullyDrawnReporter` in a Compose (or any ComponentActivity)
-  app, with the new `Porthole.reportFullyDrawn()` as the documented fallback
-  for an Activity that is not one (GRA-60).
+  same activity lifecycle callbacks, carrying `originKind` (`fork` for the
+  cold launch, `activity` for every relaunch after it) so a reader can tell
+  the two kinds of span apart. `findings` judges every launch in the window
+  on its own — reopening the app does not erase an earlier slow launch's own
+  finding — turning a slow **cold** launch into a `startup-slow` entry naming
+  the dominant phase and cross-referencing any `db-on-main-thread` or
+  `main-thread-stall` finding that fell inside that launch's own window, and
+  noting once, for the cold launch only, when the app never reports itself
+  fully drawn — caught automatically via `ComponentActivity.fullyDrawnReporter`
+  in a Compose (or any ComponentActivity) app, with the new
+  `Porthole.reportFullyDrawn()` as the documented fallback for an Activity
+  that is not one. Warm and hot launches get no `startup-slow` today: their
+  origin is the relaunched Activity's own lifecycle callback, already inside
+  the system's own launch work, and Android vitals' warm/hot thresholds are
+  measured from the launch request itself — a materially different span, not
+  a smaller number for the same one (GRA-60).
 
 ### Changed
 
@@ -131,6 +139,15 @@ PR that makes the change, not after the fact.
   it (now the startup collector's first-frame phase) waited for the first
   dropped frame instead. The flag and the hooks now run for every frame,
   before the jank test (GRA-60).
+- `findings` read `startup` as if `StartupCollector` emitted at most one per
+  session, taking only the newest event — so backgrounding and reopening the
+  app made an earlier slow cold launch's own `startup-slow` (and its
+  db-on-main/main-thread-stall cross-reference) disappear the moment the
+  fast relaunch's event became the newest one, and could accuse a cold
+  launch that *did* call `reportFullyDrawn()` of never having called it,
+  once a later relaunch's event carried no `reportFullyDrawnMs` of its own.
+  Every `startup` event in the window is now judged independently (QA
+  60-A/60-B, GRA-60).
 - `portholeMcpConfig` now pins the npm package it writes into `.mcp.json`'s
   `porthole` entry to the same `uiPackageVersion` that `portholeUi` runs and
   the runtime AAR is pinned to, instead of leaving it unversioned for `npx`
