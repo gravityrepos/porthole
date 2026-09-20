@@ -12,8 +12,10 @@ import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -35,6 +37,14 @@ import java.io.File
  * and handed straight to the listener [LeakCanaryPorthole.install] attached
  * — this is the same shape `StrictModeTest` uses a hand-built `Throwable` in
  * place of a real `android.os.strictmode` violation.
+ *
+ * GRA-64 QA: [LeakCanaryPorthole.install] no longer hooks synchronously — it
+ * launches a background thread and returns immediately (see that method's
+ * own doc comment for why: touching `LeakCanary.config` for the first time
+ * is expensive enough to stall the main thread on a cold launch). Every test
+ * below that needs the hook to have actually attached before proceeding goes
+ * through [installAndAwaitHook], which polls [Setup.report] rather than
+ * assuming any particular delay.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], manifest = Config.NONE)
@@ -49,12 +59,31 @@ class LeakCanaryTest {
         // listener.
         LeakCanaryPorthole.uninstall()
         LeakCanary.config = LeakCanary.Config()
+        LeakCanaryPorthole.lastHookThreadName = null
     }
 
     private fun EventFrame.field(key: String) = (data as JsonObject).getValue(key).jsonPrimitive
 
     private fun leakEvents(ring: EventRing): List<EventFrame> =
         ring.since(0, 10_000).filter { it.event == EventKinds.LEAK }
+
+    /**
+     * [LeakCanaryPorthole.install] plus a bounded wait for its background
+     * thread to actually finish attaching — polling [Setup.report] rather
+     * than `Thread.sleep`ing a guessed delay, and failing loudly rather than
+     * proceeding against a listener that was never attached if the deadline
+     * passes.
+     */
+    private fun installAndAwaitHook(ring: EventRing) {
+        assertTrue(LeakCanaryPorthole.install(ring))
+        val deadlineAt = System.currentTimeMillis() + 5_000
+        while (Setup.report().none { it.name == "leakcanary" }) {
+            if (System.currentTimeMillis() > deadlineAt) {
+                fail("LeakCanaryPorthole's background hook thread did not finish within 5s")
+            }
+            Thread.sleep(5)
+        }
+    }
 
     private fun leakTrace(className: String, retainedBytes: Int?) = LeakTrace(
         gcRootType = LeakTrace.GcRootType.JAVA_FRAME,
@@ -92,12 +121,41 @@ class LeakCanaryTest {
     fun `install hooks a present LeakCanary and setup reports present and hooked`() {
         val ring = EventRing()
 
-        assertTrue(LeakCanaryPorthole.install(ring))
+        installAndAwaitHook(ring)
 
         val entry = Setup.report().single { it.name == "leakcanary" }
         assertTrue(entry.onClasspath)
         assertTrue(entry.instrumented)
         assertNull(entry.hint)
+    }
+
+    // -- off the main thread (GRA-64 QA) --------------------------------------
+
+    @Test
+    fun `the hook's own work never runs on the main thread`() {
+        // GRA-64 QA: this used to run synchronously inside install(), on
+        // whatever thread called it — Porthole.install(), the main thread,
+        // during process start. Touching LeakCanary.config for the first
+        // time is expensive enough (shark.AndroidReferenceMatchers' own
+        // static init) to have measured out at roughly a second on a cold
+        // launch, which is a real, findings-worthy main-thread stall this
+        // integration was itself causing.
+        val ring = EventRing()
+
+        assertTrue(LeakCanaryPorthole.install(ring))
+
+        val deadlineAt = System.currentTimeMillis() + 5_000
+        while (LeakCanaryPorthole.lastHookThreadName == null) {
+            if (System.currentTimeMillis() > deadlineAt) fail("the hook never ran within 5s")
+            Thread.sleep(5)
+        }
+
+        assertNotEquals("main", LeakCanaryPorthole.lastHookThreadName)
+        assertTrue(
+            "expected the same dedicated, named daemon thread every other collector's own " +
+                "background work uses, got: ${LeakCanaryPorthole.lastHookThreadName}",
+            LeakCanaryPorthole.lastHookThreadName!!.startsWith("porthole-leakcanary-hook"),
+        )
     }
 
     // -- chaining: an app's (or LeakCanary's own default) listener is never silently dropped --
@@ -110,7 +168,7 @@ class LeakCanaryTest {
         )
 
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         val fixture = analysis(applicationLeaks = listOf(ApplicationLeak(listOf(leakTrace("com.example.shop.LeakyActivity", 128_000)))))
         LeakCanary.config.onHeapAnalyzedListener.onHeapAnalyzed(fixture)
@@ -128,7 +186,7 @@ class LeakCanaryTest {
     @Test
     fun `an application leak becomes one event with class, retained size, trace text and count`() {
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         val trace = leakTrace("com.example.shop.LeakyActivity", 256_000)
         // Two occurrences of the exact same leak: LeakCanary groups repeats
@@ -154,7 +212,7 @@ class LeakCanaryTest {
     @Test
     fun `two application leaks in one analysis become two separate events`() {
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         val leaks = listOf(
             ApplicationLeak(listOf(leakTrace("com.example.shop.LeakyActivity", 100))),
@@ -171,7 +229,7 @@ class LeakCanaryTest {
     @Test
     fun `a library leak carries kind=library, distinct from an application leak's kind=application`() {
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         val libraryLeak = LibraryLeak(
             leakTraces = listOf(leakTrace("android.view.inputmethod.InputMethodManager", 4_000)),
@@ -188,7 +246,7 @@ class LeakCanaryTest {
     @Test
     fun `carries the heap dump's own start and end so a stall in that window can be attributed to it`() {
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         val leak = ApplicationLeak(listOf(leakTrace("com.example.shop.LeakyActivity", 1)))
         LeakCanary.config.onHeapAnalyzedListener.onHeapAnalyzed(
@@ -210,7 +268,7 @@ class LeakCanaryTest {
     @Test
     fun `a heap analysis failure emits nothing - LeakCanary already has its own notification for that`() {
         val ring = EventRing()
-        LeakCanaryPorthole.install(ring)
+        installAndAwaitHook(ring)
 
         LeakCanaryPorthole.onHeapAnalyzed(
             ring,

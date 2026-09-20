@@ -67,42 +67,88 @@ internal object LeakCanaryPorthole {
     @Volatile private var chained: OnHeapAnalyzedListener? = null
 
     /**
-     * Probes the classpath and, if LeakCanary is there, hooks it.
+     * The name of the thread that last actually ran [hook]'s body — read by
+     * `LeakCanaryTest` to prove it is never `"main"`. A real app never reads
+     * this; it exists because the property under test ("this ran off the
+     * main thread") has no other observable trace once the call returns.
+     */
+    @Volatile internal var lastHookThreadName: String? = null
+
+    /**
+     * Probes the classpath and, if LeakCanary is there, hooks it — off the
+     * main thread.
      *
      * Called by [live.gravitylabs.porthole.Porthole.install] the same way it
      * calls into [WorkManagerPorthole] — only after confirming [PROBE_CLASS]
      * is present, so nothing here ever runs in an app that never added
-     * LeakCanary. Absent, this returns `false` and — deliberately — never
-     * calls [Setup.recordLeakCanary] at all: the EM was explicit that a
-     * debug-only, opt-in library like this one should never be recommended,
+     * LeakCanary. Absent, this returns `false` immediately and — deliberately
+     * — never calls [Setup.recordLeakCanary] at all: the EM was explicit that
+     * a debug-only, opt-in library like this one should never be recommended,
      * and [live.gravitylabs.porthole.collect.Setup.report]'s `leakcanary`
      * entry exists only once something is known to say about it.
      *
-     * @return true once a listener is actually attached.
+     * GRA-64 QA: this used to call [hook] synchronously, from the main
+     * thread, inside [live.gravitylabs.porthole.Porthole.install] — which
+     * runs during process start, before `Application.onCreate`. The first
+     * touch of `LeakCanary.config` builds `shark.AndroidReferenceMatchers`'
+     * full reference-pattern list, measured at roughly a second on a cold
+     * launch: Porthole's own integration was producing the exact
+     * `main-thread-stall` finding it exists to report. Dispatched to a
+     * dedicated daemon thread instead — the same shape every other
+     * collector's own background work already takes (`porthole-memory`,
+     * `porthole-watchdog`, `porthole-*`), not a `Handler.postDelayed` onto
+     * the main thread, which would only move the cost later rather than off
+     * it.
+     *
+     * A leak analyzed in the narrow window between this call and the
+     * background thread actually attaching would only reach whatever
+     * listener LeakCanary already had (its own default: a logcat dump and a
+     * notification, or the app's own, if it set one) — never Porthole's
+     * timeline, since nothing has chained onto it yet. This is not a
+     * practical race: LeakCanary's own `AppWatcher` will not even consider a
+     * destroyed object "retained" (the necessary precondition for a heap
+     * dump) until it has watched that object for `retainedDelayMillis`
+     * (default 5 seconds) with no sign it was collected, so a real analysis
+     * cannot complete in under several seconds — orders of magnitude longer
+     * than a freshly-scheduled daemon thread takes to start running. Nothing
+     * here re-queries LeakCanary for an analysis that finished before the
+     * hook attached, because nothing plausibly can.
+     *
+     * @return true once an attempt has been launched — not once hooked;
+     *   whether it actually succeeded is [Setup.report]'s `leakcanary` row,
+     *   filled in asynchronously by the background thread this starts.
      */
     fun install(ring: EventRing): Boolean {
         if (!classPresent(PROBE_CLASS)) return false
-        return runCatching { hook(ring) }
-            .onSuccess { Setup.recordLeakCanary(present = true, hooked = true, hint = null) }
-            .onFailure { t ->
-                // leakcanary-android is on the classpath (the probe above
-                // already proved that) but calling its own real API threw —
-                // the one shape this can take once presence is settled is a
-                // signature this file's compileOnly floor did not predict:
-                // NoSuchMethodError/NoSuchFieldError for a renamed member,
-                // LinkageError for an incompatible class file. The EM asked
-                // for this to say so explicitly rather than the generic
-                // "not hooked" the rest of Setup's entries fall back to.
-                Setup.recordLeakCanary(
-                    present = true,
-                    hooked = false,
-                    hint = "leakcanary-android is on the classpath but its LeakCanary.config/" +
-                        "OnHeapAnalyzedListener API did not match what Porthole compiled against " +
-                        "(floor: leakcanary-android $FLOOR_VERSION) — " +
-                        "${t.javaClass.simpleName}: ${t.message}",
-                )
-            }
-            .isSuccess
+        Thread({
+            lastHookThreadName = Thread.currentThread().name
+            runCatching { hook(ring) }
+                .onSuccess { Setup.recordLeakCanary(present = true, hooked = true, hint = null) }
+                .onFailure { t ->
+                    // leakcanary-android is on the classpath (the probe
+                    // above already proved that) but calling its own real
+                    // API threw — the one shape this can take once
+                    // presence is settled is a signature this file's
+                    // compileOnly floor did not predict:
+                    // NoSuchMethodError/NoSuchFieldError for a renamed
+                    // member, LinkageError for an incompatible class file.
+                    // The EM asked for this to say so explicitly rather
+                    // than the generic "not hooked" the rest of Setup's
+                    // entries fall back to.
+                    Setup.recordLeakCanary(
+                        present = true,
+                        hooked = false,
+                        hint = "leakcanary-android is on the classpath but its LeakCanary.config/" +
+                            "OnHeapAnalyzedListener API did not match what Porthole compiled against " +
+                            "(floor: leakcanary-android $FLOOR_VERSION) — " +
+                            "${t.javaClass.simpleName}: ${t.message}",
+                    )
+                }
+        }, "porthole-leakcanary-hook").apply {
+            isDaemon = true
+            start()
+        }
+        return true
     }
 
     /**
@@ -113,7 +159,15 @@ internal object LeakCanaryPorthole {
      * keep hearing about every analysis, not silently lose it the moment
      * Porthole is added.
      */
-    private fun hook(ring: EventRing) {
+    // GRA-64 QA: hook() now runs on its own background thread (install()'s
+    // own doc comment says why) while uninstall() can run concurrently, on
+    // whatever thread Porthole.shutdown() is called from — a real
+    // possibility now that the two are no longer serialised by both running
+    // on the main thread. Synchronized on this object (a single, uncontended
+    // lock in the overwhelmingly common case: shutdown() is a test/reinstall
+    // path, not a hot one) so `chained` and `LeakCanary.config` are never
+    // read and written from both at once.
+    private fun hook(ring: EventRing): Unit = synchronized(this) {
         val existing = LeakCanary.config.onHeapAnalyzedListener
         chained = existing
         LeakCanary.config = LeakCanary.config.copy(
@@ -129,15 +183,17 @@ internal object LeakCanaryPorthole {
 
     /**
      * Hands the previously-chained listener back, undoing [hook]. A no-op
-     * when [install] was never called or never got far enough to hook
-     * anything — [live.gravitylabs.porthole.Porthole.shutdown] calls this
+     * when [install] was never called, or its background thread has not
+     * reached [hook] yet, or it never got far enough to hook anything —
+     * [live.gravitylabs.porthole.Porthole.shutdown] calls this
      * unconditionally, the same way it calls every other collector's own
      * `stop()` regardless of whether that collector ever started.
      */
-    fun uninstall() {
+    fun uninstall(): Unit = synchronized(this) {
         val previous = chained ?: return
         chained = null
         runCatching { LeakCanary.config = LeakCanary.config.copy(onHeapAnalyzedListener = previous) }
+        Unit
     }
 
     /**
