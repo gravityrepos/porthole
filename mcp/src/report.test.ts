@@ -220,6 +220,41 @@ describe("renderReport", () => {
     expect(renderReport(trace())).toContain("nothing worth reporting");
   });
 
+  it("prints a resolved where beneath its finding (GRA-201)", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          {
+            id: "main-thread-stall",
+            severity: "error",
+            confidence: "observed",
+            title: "main thread blocked for 305ms",
+            where: { resolved: true, path: "app/src/main/kotlin/CartViewModel.kt", line: 148 },
+          },
+        ],
+      }),
+    );
+    expect(text).toContain("at app/src/main/kotlin/CartViewModel.kt:148");
+  });
+
+  it("says nothing about where when it did not resolve — a report is not the place for a reason code", () => {
+    const text = renderReport(
+      trace({
+        findings: [
+          {
+            id: "main-thread-stall",
+            severity: "error",
+            confidence: "observed",
+            title: "main thread blocked for 305ms",
+            where: { resolved: false, reason: "ambiguous" },
+          },
+        ],
+      }),
+    );
+    expect(text).not.toContain("at ");
+    expect(text).not.toContain("ambiguous");
+  });
+
   it("keeps severity order and hangs the mark off the finding", () => {
     const text = renderReport(
       trace({

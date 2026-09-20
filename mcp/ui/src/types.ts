@@ -111,6 +111,16 @@ export interface ViewWindow {
  * `lib/findings.ts`'s `placeFindings`, which is the one place that has to
  * survive a finding carrying neither.
  */
+/**
+ * GRA-201: where a finding's evidence lives in the project's own source,
+ * mirrored from `mcp/src/sources.ts`'s `Where` for the same `node:*` reason
+ * as `Finding` itself. A fact, not a judgement — see that module's own doc
+ * comment for what distinguishes `not found`/`ambiguous`/`synthetic`.
+ */
+export type Where =
+  | { resolved: true; path: string; line?: number }
+  | { resolved: false; reason: string };
+
 export interface Finding {
   id: string;
   severity: "error" | "warning" | "note";
@@ -121,6 +131,7 @@ export interface Finding {
   source: "porthole" | "trace";
   window?: { from: number; to: number };
   spanning?: true;
+  where?: Where;
 }
 
 /** `/api/findings`'s whole response body.

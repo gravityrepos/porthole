@@ -19,6 +19,15 @@ build/
 local.properties
 *.hprof
 
+# GRA-201: one fixture file deliberately lives under a directory named
+# build/ -- sources.test.ts's proof that the source-location walk skips
+# build output, which needs a real build/ directory on disk to skip. `build/`
+# above stops git from recursing into it at all, so a plain negation on the
+# file itself would never be reached; both the directory and its contents
+# have to be re-included explicitly.
+!mcp/src/fixtures/sources/app/build/
+!mcp/src/fixtures/sources/app/build/**
+
 # node
 node_modules/
 dist/

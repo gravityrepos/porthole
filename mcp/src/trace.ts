@@ -1,6 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
 import type { DeviceEvent } from "./device.js";
+import { whereForFrame, whereForName, type Where } from "./sources.js";
 
 /**
  * Turning a recorded run into something worth reading.
@@ -65,6 +66,15 @@ export interface Finding {
    * as a point under one frame would invent a precision neither one has.
    */
   spanning?: true;
+  /**
+   * GRA-201: where the evidence above lives in the project's own source —
+   * resolved by `sources.ts` from a stack frame or a composable/owner name
+   * already on this finding, never the other way around. A fact about the
+   * project on disk, not a judgement: it never changes `title`, `severity`
+   * or `detail`. Absent (not merely unresolved) when source resolution is
+   * off — see `sources.ts`'s own doc comment for exactly when.
+   */
+  where?: Where;
 }
 
 export interface Trace {
@@ -491,12 +501,19 @@ export function findingsOf(
     const worst = stalls.reduce((a, b) =>
       num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
     );
+    // GRA-201: the same top-frame text `detail` already carries, resolved to
+    // where it lives under the project root — `where` is a fact about that
+    // frame, so it is derived from `detail`'s own source rather than
+    // reparsing `detail` after the `|| undefined` above has thrown the
+    // empty-string case away.
+    const topFrame = str(worst.data.top).split("\n")[0] || undefined;
+    const where = whereForFrame(topFrame);
     findings.push({
       id: "main-thread-stall",
       severity: "error",
       confidence: "observed",
       title: `main thread blocked for ${num(worst.data.durationMs)}ms`,
-      detail: str(worst.data.top).split("\n")[0] || undefined,
+      detail: topFrame,
       count: stalls.length,
       during: markAt(marks, worst.t),
       evidence: {
@@ -506,6 +523,7 @@ export function findingsOf(
       // `blocked` is reported when the stall ends, so `worst.t` is its end and
       // the start is however long before that its own duration says.
       window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
+      ...(where ? { where } : {}),
     });
   }
 
@@ -688,6 +706,10 @@ export function findingsOf(
     const hottest = [...byName.entries()].sort((a, b) => b[1] - a[1])[0];
     const trigger = [...triggers.entries()].sort((a, b) => b[1] - a[1])[0];
     if (hottest && hottest[1] >= 100) {
+      // GRA-201: the composable's own name, previously carried only inside
+      // `title`'s prose — `evidence.composable` gives `whereForName` (and
+      // any other reader) the bare name without reparsing the sentence.
+      const where = whereForName(hottest[0]);
       findings.push({
         id: "recompose-hotspot",
         severity: "note",
@@ -697,10 +719,12 @@ export function findingsOf(
           ? `most often within a frame of ${trigger[0]} — ordering, not proof`
           : undefined,
         count: hottest[1],
+        evidence: { composable: hottest[0] },
         // Scoped to the hottest component's own recompositions, not every
         // recompose in the run, so the window is as tight as the count it
         // labels rather than as wide as the whole capture.
         window: eventWindow(recompose.filter((e) => str(e.data.name) === hottest[0])),
+        ...(where ? { where } : {}),
       });
     }
   }
@@ -735,6 +759,7 @@ export function findingsOf(
     // though it happened just now, in the wrong process's session.
     const predates = "the death predates this process's uptime clock, so it cannot be placed on this session's timeline";
     const description = str(exit.data.description) || undefined;
+    const where = whereForFrame(topFrame);
 
     findings.push({
       id: `exit-${num(exit.data.timestamp)}`,
@@ -751,6 +776,7 @@ export function findingsOf(
         ...(topFrame ? { topFrame } : {}),
       },
       spanning: true,
+      ...(where ? { where } : {}),
     });
   }
 

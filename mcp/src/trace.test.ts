@@ -1,8 +1,12 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { DeviceEvent } from "./device.js";
 import { compareMetrics } from "./report.js";
+import { resetSourceIndexForTests } from "./sources.js";
 import {
   alsoInWindowOf,
   alsoInWindowSentence,
@@ -951,5 +955,132 @@ describe("GRA-113: every finding carries a window, taken from the events that pr
     // death predates this process's clock) — is the only one that is.
     const spanningIds = findings.filter((f) => f.spanning).map((f) => f.id);
     expect(spanningIds).toEqual([expect.stringMatching(/^exit-/)]);
+  });
+});
+
+describe("GRA-201: findings carry where when source resolution is on", () => {
+  const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
+
+  let root: string;
+  let savedProjectRoot: string | undefined;
+
+  beforeEach(() => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    root = mkdtempSync(path.join(tmpdir(), "porthole-trace-where-"));
+    const cartViewModel = path.join(root, "app/src/main/kotlin/CartViewModel.kt");
+    mkdirSync(path.dirname(cartViewModel), { recursive: true });
+    writeFileSync(cartViewModel, "class CartViewModel\n");
+    process.env.PORTHOLE_PROJECT_ROOT = root;
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+    else process.env.PORTHOLE_PROJECT_ROOT = savedProjectRoot;
+    resetSourceIndexForTests();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches where to main-thread-stall when the top frame's file exists exactly once (AC1)", () => {
+    const events = [
+      event("blocked", 500, {
+        durationMs: 400,
+        top: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+    const finding = find(events).find((f) => f.id === "main-thread-stall");
+    // Mutation quoted (final report): deleting the `...(where ? { where } :
+    // {})` spread on this finding's object literal in trace.ts is the
+    // one-line change that makes this assertion fail (`where` reads
+    // `undefined` instead).
+    expect(finding?.where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/CartViewModel.kt",
+      line: 1,
+    });
+  });
+
+  it("says ambiguous when the top frame's file exists twice under the root (AC1)", () => {
+    const duplicate = path.join(root, "legacy/src/main/kotlin/CartViewModel.kt");
+    mkdirSync(path.dirname(duplicate), { recursive: true });
+    writeFileSync(duplicate, "class CartViewModel\n");
+
+    const events = [
+      event("blocked", 500, {
+        durationMs: 400,
+        top: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+    const finding = find(events).find((f) => f.id === "main-thread-stall");
+    expect(finding?.where).toEqual({ resolved: false, reason: "ambiguous" });
+  });
+
+  it("says not found when the top frame's file exists nowhere under the root (AC1)", () => {
+    const events = [event("blocked", 500, { durationMs: 400, top: "x.Ghost.method(Ghost.kt:1)" })];
+    const finding = find(events).find((f) => f.id === "main-thread-stall");
+    expect(finding?.where).toEqual({ resolved: false, reason: "not found" });
+  });
+
+  it("attaches where to an ANR exit finding via topAppFrame", () => {
+    const events = [
+      event("exit", 100, {
+        reason: "REASON_ANR",
+        mainStack: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+    const finding = find(events).find((f) => f.id.startsWith("exit-"));
+    expect(finding?.where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/CartViewModel.kt",
+      line: 1,
+    });
+  });
+
+  it("attaches where to recompose-hotspot via the composable's portholeNode label, and carries the bare name in evidence", () => {
+    const screens = path.join(root, "app/src/main/kotlin/Screens.kt");
+    writeFileSync(screens, '@Composable\nfun X() { Modifier.portholeNode("Cart.ItemRow") }\n');
+
+    const events = Array.from({ length: 150 }, (_, i) =>
+      event("recompose", i, { name: "Cart.ItemRow" }),
+    );
+    const finding = find(events).find((f) => f.id === "recompose-hotspot");
+    expect(finding?.evidence).toMatchObject({ composable: "Cart.ItemRow" });
+    expect(finding?.where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/Screens.kt",
+      line: 2,
+    });
+  });
+
+  it("attaches no where at all when PORTHOLE_PROJECT_ROOT is unset — the off switch (AC5)", () => {
+    delete process.env.PORTHOLE_PROJECT_ROOT;
+    const events = [
+      event("blocked", 500, {
+        durationMs: 400,
+        top: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+    const finding = find(events).find((f) => f.id === "main-thread-stall");
+    expect(finding?.where).toBeUndefined();
+  });
+
+  it("changes nothing about a finding except where — resolution on vs off is otherwise byte-identical (AC3)", () => {
+    const events = [
+      event("blocked", 500, {
+        durationMs: 400,
+        top: "x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)",
+      }),
+    ];
+    const on = find(events).find((f) => f.id === "main-thread-stall")!;
+
+    delete process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    const off = find(events).find((f) => f.id === "main-thread-stall")!;
+
+    const { where: onWhere, ...onRest } = on;
+    const { where: offWhere, ...offRest } = off;
+    expect(onWhere).toBeDefined();
+    expect(offWhere).toBeUndefined();
+    expect(onRest).toEqual(offRest);
   });
 });
