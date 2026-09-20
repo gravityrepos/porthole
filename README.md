@@ -2464,7 +2464,8 @@ modules and stop, which is what they used to do. `build` is the exception — it
 still covers the Android modules only, so `check` is the command that verifies
 everything the JVM side can. Two of the plugin's tests, the AGP pair, skip unless
 you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and need the network,
-which is why they are opt-in.
+which is why they are opt-in. Aside from that pair, `./gradlew -p gradle-plugin
+test` is expected to pass with zero failures on Linux, macOS and Windows alike.
 
 The runtime tests run the request-body tee against a real client and a real
 socket via MockWebServer. The property they exist to hold down is the boring

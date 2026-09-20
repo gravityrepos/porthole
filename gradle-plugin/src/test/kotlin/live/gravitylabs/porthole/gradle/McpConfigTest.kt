@@ -127,7 +127,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val env = readEnvBlock()
-        assertEquals(projectDir.root.absolutePath, env["PORTHOLE_PROJECT_ROOT"])
+        assertEquals(canonicalPathOf(projectDir.root), env["PORTHOLE_PROJECT_ROOT"])
     }
 
     /**
@@ -448,7 +448,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val env = readEnvBlock()
-        val expected = File(projectDir.root, "sdk-relative").absolutePath
+        val expected = canonicalPathOf(File(projectDir.root, "sdk-relative"))
         assertEquals(expected, env["PORTHOLE_SDK_DIR"])
     }
 
@@ -510,7 +510,13 @@ class McpConfigTest : StubAdbFunctionalTest() {
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val env = readEnvBlock()
-        assertEquals(File(projectDir.root, "./sdk-dot-relative").absolutePath, env["PORTHOLE_SDK_DIR"])
+        // canonicalPathOf on the whole joined File would normalize the "./"
+        // straight out of it — collapsing exactly the segment this test
+        // exists to prove survives — so only projectDir.root (the half that
+        // actually differs between JUnit's raw path and Gradle's canonical
+        // one) is canonicalized; the dot-relative suffix is joined on
+        // afterwards, verbatim, the same as the production path is built.
+        assertEquals(File(canonicalPathOf(projectDir.root), "./sdk-dot-relative").path, env["PORTHOLE_SDK_DIR"])
     }
 
     @Test
@@ -557,7 +563,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val env = readEnvBlock()
-        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
+        assertEquals(canonicalPathOf(sdk), env["PORTHOLE_SDK_DIR"])
     }
 
     @Test
@@ -574,7 +580,7 @@ class McpConfigTest : StubAdbFunctionalTest() {
         assertEquals(TaskOutcome.SUCCESS, result.task(":portholeMcpConfig")?.outcome)
 
         val env = readEnvBlock()
-        assertEquals(sdk.absolutePath, env["PORTHOLE_SDK_DIR"])
+        assertEquals(canonicalPathOf(sdk), env["PORTHOLE_SDK_DIR"])
     }
 
     @Test

@@ -371,6 +371,15 @@ PR that makes the change, not after the fact.
   now permits cleartext for `localhost`/`127.0.0.1` only, wired in via
   `sample/src/debug/AndroidManifest.xml` so release carries no
   `networkSecurityConfig` and is unaffected (GRA-236).
+- Five `McpConfigTest` cases failed on a stock macOS checkout: each compared
+  JUnit's `TemporaryFolder.root` (`/var/folders/...`) against a path
+  `portholeMcpConfig` resolved through Gradle, which canonicalizes the
+  project directory before joining a relative path onto it (`/private/var/
+  folders/...` — macOS's `/var` is itself a symlink into `/private/var`).
+  The assertions now canonicalize whichever side came straight from
+  `java.io.File`, via a shared `canonicalPathOf` test helper, rather than
+  comparing raw `absolutePath`s across that boundary or loosening the
+  comparison to `endsWith` (GRA-223).
 
 ## [0.2.2] - 2026-09-16
 
