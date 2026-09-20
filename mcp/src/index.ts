@@ -52,6 +52,7 @@ import {
 } from "./sessions.js";
 import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
+import { captureScreenshot } from "./screenshot.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -2790,6 +2791,78 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       } catch (error) {
         return fail(error);
       }
+    },
+  );
+
+  server.registerTool(
+    "screenshot",
+    {
+      title: "See the screen",
+      description:
+        "Captures the device's screen right now and returns it as an image. The semantics tree and " +
+        "recomposition counts do not say that the price is rendering as `$NaN`, that a list is empty, " +
+        "or that a dialog is covering everything — that is a look, not a query.\n\n" +
+        "Scaled and re-encoded before it comes back: JPEG, about 640px wide, quality 80, capped at " +
+        "1.5MB. `originalWidth`/`originalHeight` in the payload are the device's real resolution; the " +
+        "image itself is the scaled copy, so treat this as a look at the screen, not a source of " +
+        "pixel-accurate measurements — `semantics_tree` has element bounds for that.\n\n" +
+        "Refuses rather than returning a black rectangle when a FLAG_SECURE window is on top: " +
+        "screencap itself returns solid black for one of those, and handing that back as if it were " +
+        "the app would be worse than saying so.\n\n" +
+        "Multi-display devices (foldables, Auto): defaults to display 0, the main display; pass " +
+        "`displayId` for another.\n\n" +
+        "Never written to the session file on disk: unlike the app's own text events, a screenshot " +
+        "cannot be redacted, so it exists only in this one response.",
+      inputSchema: {
+        serial: z.string().optional().describe("Device serial, when more than one is attached."),
+        displayId: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Which display to capture (`adb shell dumpsys display` lists them). Defaults to 0, the main display."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({
+      serial,
+      displayId,
+    }): Promise<{
+      content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+      isError?: boolean;
+    }> => {
+      const result = await captureScreenshot({ serial, displayId, adbOptions: { env: adbEnv, binary: adbBinary } });
+      if (!result.ok) {
+        return ok(result.message, { ok: false, reason: result.reason, displayId: result.displayId });
+      }
+      const kb = Math.max(1, Math.round(result.bytes / 1024));
+      const caption =
+        `Captured ${result.width}x${result.height} (scaled from ${result.originalWidth}x` +
+        `${result.originalHeight} on display ${result.displayId}), ${kb}KB JPEG.`;
+      const payload = {
+        ok: true,
+        originalWidth: result.originalWidth,
+        originalHeight: result.originalHeight,
+        width: result.width,
+        height: result.height,
+        bytes: result.bytes,
+        quality: result.quality,
+        displayId: result.displayId,
+      };
+      // GRA-55: the same banner/sinceLast attachment `ok()` gives every other
+      // tool, called directly rather than through `ok()` itself — `ok()`'s
+      // own `content` shape is text-only (`joinSummaryAndPayload()`), and
+      // widening that shared chokepoint for the one tool that returns an
+      // image is a bigger, riskier change than building this one response
+      // by hand from the same underlying `attachSinceLastAndBanner()` work.
+      const { summary, payload: withSinceLast } = await attachSinceLastAndBanner(caption, payload);
+      return {
+        content: [
+          { type: "text", text: summary },
+          { type: "image", data: result.base64, mimeType: result.mimeType },
+          { type: "text", text: JSON.stringify(withSinceLast, null, 2) ?? "null" },
+        ],
+      };
     },
   );
 

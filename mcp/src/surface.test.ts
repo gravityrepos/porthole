@@ -7,6 +7,9 @@ import type { DeviceEvent } from "./device.js";
 import { buildRig } from "./testing/harness.js";
 import { stripComments } from "./testing/stripComments.js";
 import { buildFakeAdb, fakeAdbArgsKey, type FakeAdb } from "./testing/fakeAdb.js";
+import { buildFakeScreencapAdb } from "./testing/fakeScreencapAdb.js";
+import { PNG } from "pngjs";
+import * as jpeg from "jpeg-js";
 
 /**
  * The shape of the MCP surface, rather than any one tool's output.
@@ -438,7 +441,7 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
 });
 
 describe("the tool surface", () => {
-  // The 18 names `index.ts` registers, in registration order, verified
+  // The 19 names `index.ts` registers, in registration order, verified
   // against the running server rather than copied from the ticket that
   // asked for this test — see the "registers exactly these tools" case
   // below, which is what would have caught this list being wrong.
@@ -461,6 +464,7 @@ describe("the tool surface", () => {
     "logs",
     "timeline",
     "open_timeline",
+    "screenshot",
   ];
 
   it("registers exactly these tools — a rename or a deletion fails this, named", async () => {
@@ -1126,6 +1130,82 @@ describe("porthole_connect", () => {
       expect(monkeyIndex).toBeGreaterThan(stopIndex);
     } finally {
       await closeAll(rig, adb);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-63: the agent can see the screen
+// ---------------------------------------------------------------------------
+
+describe("screenshot", () => {
+  function solidPng(width: number, height: number, [r, g, b]: [number, number, number] = [0, 0, 0]): Buffer {
+    const png = new PNG({ width, height });
+    for (let i = 0; i < png.data.length; i += 4) {
+      png.data[i] = r;
+      png.data[i + 1] = g;
+      png.data[i + 2] = b;
+      png.data[i + 3] = 255;
+    }
+    return PNG.sync.write(png);
+  }
+
+  it("is readOnlyHint:true — capturing the screen touches nothing on the device", () => {
+    const block = toolSource("screenshot");
+    expect(block).toContain("readOnlyHint: true");
+  });
+
+  it("returns an image content block a multimodal agent can read, plus a text summary and JSON payload", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(1200, 2000, [40, 90, 200]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", {});
+      expect(result.isError).toBeFalsy();
+
+      const image = result.content.find((c) => c.type === "image") as
+        | { type: "image"; data: string; mimeType: string }
+        | undefined;
+      expect(image, "no image content block in the result").toBeDefined();
+      expect(image?.mimeType).toBe("image/jpeg");
+      // Round-trip: what came back must actually decode as a JPEG, not just
+      // be a base64 string of the right shape.
+      const decoded = jpeg.decode(Buffer.from(image!.data, "base64"));
+      expect(decoded.width).toBeGreaterThan(0);
+      expect(decoded.height).toBeGreaterThan(0);
+
+      expect(result.json).toMatchObject({ ok: true, originalWidth: 1200, originalHeight: 2000 });
+      expect(result.text).toContain("Captured");
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  it("refuses a black capture — names FLAG_SECURE, carries no image block", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(200, 400, [0, 0, 0]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("FLAG_SECURE");
+      expect(result.content.some((c) => c.type === "image")).toBe(false);
+      expect(result.json).toMatchObject({ ok: false, reason: "black-frame" });
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  it("passes displayId through to the adb call", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(20, 20, [10, 20, 30]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", { displayId: 2 });
+      expect(result.isError).toBeFalsy();
+      expect(adb.calls()[0]).toEqual(["exec-out", "screencap", "-p", "-d", "2"]);
+    } finally {
+      await rig.close();
+      adb.cleanup();
     }
   });
 });

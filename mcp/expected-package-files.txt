@@ -38,6 +38,8 @@ dist/report.js
 dist/report.js.map
 dist/save.js
 dist/save.js.map
+dist/screenshot.js
+dist/screenshot.js.map
 dist/sessions.js
 dist/sessions.js.map
 dist/system.js
@@ -63,6 +65,7 @@ src/moment.ts
 src/perfetto.ts
 src/report.ts
 src/save.ts
+src/screenshot.ts
 src/sessions.ts
 src/system.ts
 src/systrace.ts

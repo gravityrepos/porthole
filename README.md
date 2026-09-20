@@ -49,6 +49,7 @@ them they cover:
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device — and, now, why it died last time |
 | `porthole_connect` | the parts of getting connected `porthole_status` cannot do on its own: install/version checks, launching, restarting |
+| `screenshot` | the device screen right now, as an image — scaled, re-encoded, and refused rather than faked when a FLAG_SECURE window is on top |
 
 Everything is debug-only. Release builds link a no-op artifact with identical
 signatures, so the calls stay in your code and compile to nothing.
