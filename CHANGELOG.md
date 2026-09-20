@@ -44,6 +44,34 @@ PR that makes the change, not after the fact.
   runtime itself observed; `compare` was already indifferent to `findings`
   (it only ever diffed `metrics`), so a baseline without trace findings
   compares cleanly against a run with them, and vice versa.
+- New `accessibility` MCP tool: a lint pass over a fresh Compose semantics
+  capture, in the existing findings vocabulary. `warning` for an interactive
+  node with no `text` and no `contentDescription` at all, and for a touch
+  target under 24dp; `note` for one between 24dp and 48dp (Compose's own
+  `minimumInteractiveComponentSize` may already pad it back up, invisibly to
+  the captured bounds — the finding says so), for a node whose role implies
+  it is actionable with no click action (or the reverse), for a
+  non-decorative `Role.Image` node with no description, for a description
+  repeated across siblings, and — `confidence: "correlated"`, only past a
+  1.3× system font scale — for text whose box leaves it no visible room to
+  grow. Every finding names the node's `stableId`, its path in the tree and
+  any `testTag`; there is no screenshot annotation in this build, so pairing
+  to what is on screen is by `stableId` through `semantics_tree`'s own
+  output only. A clean screen says so explicitly, `"nothing found, N
+  node(s) checked"`, and coverage is always stated: only the Compose
+  semantics tree is seen, never a plain Android `View` or anything Compose
+  itself marked `invisibleToUser`. `findings` folds these findings in too,
+  but only when a semantics capture (`semantics_tree` or `accessibility`,
+  either counts) already landed inside the window being asked about — never
+  a fresh capture of its own, so a caller who never asked about
+  accessibility never pays for it. `SemanticsCollector.kt` gained the one
+  flag this needed that the wire did not already carry
+  (`invisibleToUser`); `ProfileData` gained `density`, present on the
+  `profile` device event all along but never parsed on this side until this
+  pass needed to turn a captured pixel bounds into a dp figure. Out of
+  scope: colour contrast, View hierarchies, any compliance claim — this
+  proves what the captured tree proves, never a certification; the TalkBack
+  check on a real device remains the hardware pass (GRA-72).
 - New `setup` MCP tool: every entry the runtime's `setup` report carries —
   which integration is instrumented, which is only on the classpath, and
   the `socket`/`strictmode` entries alongside them — was previously
@@ -297,6 +325,24 @@ PR that makes the change, not after the fact.
 
 ### Changed
 
+- `where` is now a breakpoint address, not merely a file: `resolved: true`
+  always carries a real, numeric `line` — never optional any more — plus a
+  new `kind`, `"frame"` when the line came from the evidence itself (a stack
+  frame's own rendered `File.kt:NN`) or `"declaration"` when it did not (a
+  composable/`state` name is never a line, so this is the line of the
+  declaration the lookup found in source instead). A frame whose file
+  resolves but whose own line does not — a stripped release build can carry
+  a real file name next to no line table — no longer reports `resolved:
+  true` with the line silently missing; it reads `"synthetic"`, the same as
+  any other frame with nothing to point at. An ambiguous `where` now also
+  carries `candidates`, every path it actually found, rather than leaving an
+  agent to guess which two (or more) files "ambiguous" meant. A lookup that
+  matched nothing gains a fourth reason, `"not in project"`, for evidence
+  that named a package no directory under the root is authored in at all —
+  a library frame (`okhttp3.internal.connection.RealCall`, an androidx
+  class) reads this way instead of the less specific `"not found"`, decided
+  from the walk's own file paths already in memory, never an extra read
+  (GRA-205).
 - Every Porthole app on a device now binds its own on-device endpoint instead
   of contending for one shared loopback TCP port: the runtime listens by
   default on an Android abstract-namespace Unix socket named

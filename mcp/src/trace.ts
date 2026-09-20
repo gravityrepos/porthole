@@ -432,6 +432,18 @@ export interface ProfileData {
   deviceRamMb: number;
   refreshHz: number;
   lowRamDevice: boolean;
+  /**
+   * GRA-72: px-per-dp, `DisplayMetrics.density` — `DeviceCollector.kt` has
+   * always sent this on the `profile` event; nothing on this side read it
+   * until `accessibility.ts` needed to turn a captured node's
+   * pixel `bounds` into a dp figure worth comparing against the 48dp/24dp
+   * touch-target thresholds. `0` (never a real density) means "not present
+   * on this profile" — an old on-disk `meta.json` from before this field
+   * existed, or a hand-built test fixture — and callers must treat that as
+   * unknown, never as "0dp everything," the same way `assumed: true` above
+   * already means "no profile at all."
+   */
+  density: number;
 }
 
 /**
@@ -451,7 +463,33 @@ export function profileFromEvent(event: DeviceEvent): ProfileData | null {
     deviceRamMb: num(event.data.deviceRamMb),
     refreshHz: num(event.data.refreshHz, 60),
     lowRamDevice: event.data.lowRamDevice === "true" || event.data.lowRamDevice === true,
+    density: num(event.data.density, 0),
   };
+}
+
+/**
+ * GRA-72: the system font scale at or before `windowTo` — `resolveProfile`'s
+ * own single-purpose sibling, kept separate rather than folded into
+ * `ProfileData` because font scale can change live (a user opens system
+ * settings mid-session) while the rest of the profile realistically never
+ * does, so this scans both the one-time `profile` event *and* every later
+ * `fontScale` change (`DeviceCollector.kt`'s `DeviceEventKinds.FONT_SCALE`),
+ * taking whichever is most recent at or before `windowTo` — never a value
+ * from later than what is being described, same rule `resolveProfile`
+ * follows. `fallback` (default 1, meaning "no scaling") is what a caller
+ * gets when neither kind of event has been seen yet.
+ */
+export function resolveFontScale(liveEvents: DeviceEvent[], windowTo: number, fallback = 1): number {
+  let latest: { t: number; value: number } | null = null;
+  for (const event of liveEvents) {
+    if (event.t > windowTo || event.event !== "device") continue;
+    const kind = str(event.data.kind);
+    if (kind !== "profile" && kind !== "fontScale") continue;
+    const value = num(event.data.fontScale, NaN);
+    if (!Number.isFinite(value)) continue;
+    if (!latest || event.t >= latest.t) latest = { t: event.t, value };
+  }
+  return latest ? latest.value : fallback;
 }
 
 /** What `buildTrace` needs to know about the device: the resolved refresh rate, and whether that number is something the device actually reported (`assumed: false`, `full` carries the rest) or a guess (`assumed: true`, `full` absent). */
@@ -1079,8 +1117,18 @@ export function findingsOf(
   // -------------------------------------------------------------------
   findings.push(...startupFindingsOf(events, findings));
 
+  return sortBySeverity(findings);
+}
+
+/**
+ * GRA-72: shared with `index.ts`'s `findings` tool, which folds
+ * `accessibility.ts`'s own findings into `trace.findings` after this
+ * function has already sorted it once — the same order, so `findings[0]`
+ * stays "the worst one" after the merge, not merely before it.
+ */
+export function sortBySeverity(findings: Finding[]): Finding[] {
   const order: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
-  return findings.sort((a, b) => order[a.severity] - order[b.severity]);
+  return [...findings].sort((a, b) => order[a.severity] - order[b.severity]);
 }
 
 /** `error`-severity exit reasons (GRA-58#exit-findings) — see `findingsOf`'s own comment for the rest of the mapping. */

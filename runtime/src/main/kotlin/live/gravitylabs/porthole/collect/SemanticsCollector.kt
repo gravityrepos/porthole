@@ -166,6 +166,13 @@ internal class SemanticsCollector {
                 if (config.getOrNull(SemanticsProperties.Selected) == true) add("selected")
                 if (config.contains(SemanticsActions.OnClick)) add("clickable")
                 if (config.isMergingSemanticsOfDescendants) add("merging")
+                // GRA-72: `accessibility`'s decorative-image rule needs this to
+                // tell "no description because it draws nothing meaningful"
+                // (Modifier.clearAndSetSemantics / Image's own
+                // `invisibleToUser`-marked default) apart from "no description
+                // because nobody set one" — the same marker TalkBack itself
+                // reads to skip a node entirely.
+                if (config.getOrNull(SemanticsProperties.InvisibleToUser) != null) add("invisibleToUser")
             },
             children = children,
             truncated = (overBudget || tooDeep) && node.children.isNotEmpty(),

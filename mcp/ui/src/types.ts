@@ -115,11 +115,19 @@ export interface ViewWindow {
  * GRA-201: where a finding's evidence lives in the project's own source,
  * mirrored from `mcp/src/sources.ts`'s `Where` for the same `node:*` reason
  * as `Finding` itself. A fact, not a judgement — see that module's own doc
- * comment for what distinguishes `not found`/`ambiguous`/`synthetic`.
+ * comment for what distinguishes `not found`/`ambiguous`/`synthetic`/`not in
+ * project`.
+ *
+ * GRA-205: a resolved `where` is a breakpoint address — `line` is required,
+ * never optional, and `kind` says whether it came from the evidence itself
+ * (`"frame"`) or from the declaration `whereForName` found for a name that
+ * never carried a line to begin with (`"declaration"`). An `ambiguous`
+ * reason carries every candidate path it found, not only the count.
  */
 export type Where =
-  | { resolved: true; path: string; line?: number }
-  | { resolved: false; reason: string };
+  | { resolved: true; path: string; line: number; kind: "frame" | "declaration" }
+  | { resolved: false; reason: "ambiguous"; candidates: string[] }
+  | { resolved: false; reason: "not found" | "synthetic" | "not in project" | "too many source files under the project root to search them all" };
 
 export interface Finding {
   id: string;

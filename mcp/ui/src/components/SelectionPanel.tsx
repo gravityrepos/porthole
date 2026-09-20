@@ -499,8 +499,9 @@ function Detail({ hit }: { hit: Hit }) {
 function FindingDetail({ finding }: { finding: Finding }) {
   const [copied, setCopied] = useState(false);
   const where = finding.where;
-  const whereText =
-    where?.resolved && (where.line ? `${where.path}:${where.line}` : where.path);
+  // GRA-205: a resolved `where` always carries a line now — a breakpoint
+  // address, never a bare path.
+  const whereText = where?.resolved ? `${where.path}:${where.line}` : undefined;
 
   const copyWhere = () => {
     if (!whereText) return;
@@ -549,7 +550,11 @@ function FindingDetail({ finding }: { finding: Finding }) {
               </button>
             ) : (
               <div className="mt-0.5 font-mono text-[12px] text-[var(--color-dim)]">
-                {where.resolved === false ? where.reason : "unresolved"}
+                {where.resolved === false
+                  ? where.reason === "ambiguous"
+                    ? `ambiguous: ${where.candidates.join(", ")}`
+                    : where.reason
+                  : "unresolved"}
               </div>
             )}
           </div>

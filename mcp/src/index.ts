@@ -41,10 +41,23 @@ import {
   buildTrace,
   describeBudget,
   num,
+  resolveFontScale,
   resolveProfile,
+  sortBySeverity,
   str,
   type Finding,
 } from "./trace.js";
+// GRA-72: the accessibility lint pass over a captured semantics tree lives
+// entirely in accessibility.ts — this file only fetches a tree, hands it
+// off, and (in `findings`) folds the result back in. See that module's own
+// doc comment for the rules, thresholds and the fold-in decision.
+import {
+  lintSemanticsTree,
+  parseSemanticsNode,
+  recordSemanticsCapture,
+  semanticsCaptureForWindow,
+  summarizeAccessibilityResult,
+} from "./accessibility.js";
 import { timelineKindsDescription } from "./eventKinds.js";
 import {
   UNKNOWN_DEVICE_ID,
@@ -997,6 +1010,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       : finding;
   }
 
+  /**
+   * GRA-72: the device state `accessibility.ts`'s touch-target and
+   * font-scale checks need, resolved the same way `resolveProfile` already
+   * is everywhere else — the live buffer, unbounded by any particular
+   * window, since this always describes "right now" for a live capture.
+   * `density: null` (not `0` or a guessed default) means genuinely unknown,
+   * which `lintSemanticsTree` already treats as "skip that rule and say
+   * so" rather than silently measuring against a made-up screen.
+   */
+  function currentDensityAndFontScale(): { density: number | null; fontScale: number } {
+    const buffered = timeline.buffer();
+    const profile = resolveProfile({
+      liveEvents: buffered,
+      windowTo: Infinity,
+      sessionProfile: device.sessions?.currentMeta()?.profile ?? null,
+      hello: (device.hello as unknown as Record<string, unknown>) ?? null,
+    });
+    const density = !profile.assumed && profile.full.density > 0 ? profile.full.density : null;
+    const fontScale = resolveFontScale(buffered, Infinity);
+    return { density, fontScale };
+  }
+
   // ---------------------------------------------------------------------------
   // tools
   // ---------------------------------------------------------------------------
@@ -1731,6 +1766,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         withEvents: false,
         profile,
       });
+
+      // GRA-72: folded in only when a semantics capture (from `semantics_tree`
+      // or `accessibility`) landed inside this exact window — never a fresh
+      // RPC of `findings`' own, so a caller who never asked about
+      // accessibility never pays for it. See accessibility.ts's own doc
+      // comment on `semanticsCaptureForWindow` for the full reasoning.
+      const a11yCapture = semanticsCaptureForWindow(span.from, span.to);
+      if (a11yCapture) {
+        const a11y = lintSemanticsTree(a11yCapture.root, {
+          density: a11yCapture.density,
+          fontScale: a11yCapture.fontScale,
+          capturedAt: a11yCapture.capturedAt,
+        });
+        trace.findings = sortBySeverity([...trace.findings, ...a11y.findings]);
+      }
 
       const findings = trace.findings.map(withFollowUp);
 
@@ -2963,7 +3013,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "the same UI produces the same id across captures and across process restarts, so two " +
         "captures can be diffed. Nodes carrying a porthole node id line up with the ids in the " +
         "recompositions report.\n\n" +
-        "A snapshot of what is on screen now. It says nothing about cost — a large tree is not a slow one — so do not infer performance from its shape; use `frames` for that.",
+        "A snapshot of what is on screen now. It says nothing about cost — a large tree is not a slow one — so do not infer performance from its shape; use `frames` for that.\n\n" +
+        "GRA-72: this capture is also what `findings` folds its own accessibility findings from, " +
+        "for free, whenever `findings`' window happens to cover this call's own moment — see " +
+        "`accessibility` below for the same pass run and reported on its own.",
       inputSchema: {
         merged: z
           .boolean()
@@ -2975,11 +3028,95 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async ({ merged, maxDepth, maxNodes }): Promise<ToolResult> =>
-      call<{ root: unknown; error?: string }>(
+      call<{ root: unknown; error?: string; capturedAt: number }>(
         "semantics_tree",
         { merged, maxDepth, maxNodes },
         (tree) =>
           tree.error ? tree.error : tree.root ? "Captured the semantics tree." : "Empty tree.",
+        // GRA-72: recorded here too, not only by the dedicated `accessibility`
+        // tool below — both are legitimately "a semantics capture", and
+        // `findings`' fold-in should not require an agent to have called the
+        // newer tool specifically. A side effect, not a payload change: the
+        // returned value is handed back exactly as the device sent it.
+        (tree) => {
+          const { density, fontScale } = currentDensityAndFontScale();
+          recordSemanticsCapture({
+            capturedAt: tree.capturedAt,
+            root: parseSemanticsNode(tree.root),
+            density,
+            fontScale,
+          });
+          return tree;
+        },
+      ),
+  );
+
+  server.registerTool(
+    "accessibility",
+    {
+      title: "Accessibility defects the semantics tree already proves",
+      description:
+        "A lint pass over a fresh Compose semantics capture: an interactive node with no label at all, " +
+        "a touch target measurably under the 48dp minimum, a node that looks clickable but carries no " +
+        "click action (or the reverse), a non-decorative image with no description, a description " +
+        "repeated across siblings, and text whose box leaves no room to grow at a large system font " +
+        "scale. Each finding names the node's `stableId`, its path in the tree and any `testTag` — " +
+        "the `stableId` resolves through `semantics_tree`'s own output, so 'show me that node' is one " +
+        "more call away, never a screenshot annotation (not available in this build — pairing is by " +
+        "`stableId` through `semantics_tree` only).\n\n" +
+        "A clean screen says so explicitly: 'nothing found, N node(s) checked', never a bare empty " +
+        "list indistinguishable from 'did not look'. `coverage` says what this pass did and did not " +
+        "see — only the Compose semantics tree, never a plain Android View, never anything Compose " +
+        "itself marked invisible to the user.\n\n" +
+        "A touch target between 24dp and 48dp is a `note`, not a `warning`: Compose's own " +
+        "`minimumInteractiveComponentSize` (wired into IconButton, Checkbox and friends by default) " +
+        "may already pad it back up to 48dp at touch time, invisibly to the bounds this tool can see — " +
+        "below 24dp that automatic padding cannot plausibly explain the shortfall away, so that is a " +
+        "`warning`.\n\n" +
+        "Out of scope: colour contrast (nothing captured here carries a rendered colour), a View " +
+        "hierarchy's own accessibility tree, and any claim of compliance — this proves what the " +
+        "captured tree proves, never a certification. The TalkBack check on a real device remains the " +
+        "hardware pass this cannot replace.\n\n" +
+        "Calling this also feeds `findings`: its own next call folds these findings in for free, " +
+        "whenever its window covers this capture's moment.",
+      inputSchema: {
+        merged: z
+          .boolean()
+          .optional()
+          .describe("Merged tree (what accessibility services see). Default true, and the one this pass is meant to run against — TalkBack never sees the unmerged tree either."),
+        maxDepth: z.number().int().positive().optional().describe("Depth cap on the capture. Default 40."),
+        maxNodes: z.number().int().positive().optional().describe("Node budget on the capture. Default 1500."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ merged, maxDepth, maxNodes }): Promise<ToolResult> =>
+      call<{
+        root: unknown;
+        error?: string;
+        capturedAt: number;
+        findings?: Finding[];
+        nodesChecked?: number;
+        coverage?: string[];
+      }>(
+        "semantics_tree",
+        { merged, maxDepth, maxNodes },
+        // `tree.error` (no semantics owner found) is a *successful* RPC
+        // carrying no tree — `call`'s own try/catch already covers an
+        // unreachable device, so this is this tool's own thing to report,
+        // same distinction `semantics_tree` itself draws.
+        (tree) => (tree.error ? tree.error : summarizeAccessibilityResult({
+          findings: tree.findings ?? [],
+          nodesChecked: tree.nodesChecked ?? 0,
+          coverage: tree.coverage ?? [],
+        })),
+        (tree) => {
+          if (tree.error) return tree;
+          const root = parseSemanticsNode(tree.root);
+          const { density, fontScale } = currentDensityAndFontScale();
+          recordSemanticsCapture({ capturedAt: tree.capturedAt, root, density, fontScale });
+          const lint = lintSemanticsTree(root, { density, fontScale, capturedAt: tree.capturedAt });
+          return { ...tree, findings: lint.findings, nodesChecked: lint.nodesChecked, coverage: lint.coverage };
+        },
       ),
   );
 

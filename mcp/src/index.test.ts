@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,6 +17,7 @@ import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 import { joinSummaryAndPayload } from "./index.js";
 import { resetSourceIndexForTests } from "./sources.js";
 import { currentSourceFingerprint, resetComposeReportCacheForTests } from "./composeReport.js";
+import { resetAccessibilityCaptureForTests } from "./accessibility.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -2748,6 +2749,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();
@@ -2778,6 +2780,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
         line: 14,
+        kind: "declaration",
       });
     } finally {
       await rig.close();
@@ -3003,6 +3006,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();
@@ -3119,5 +3123,239 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const { where: onWhere, ...onOwnerRest } = onJson.owners[0];
     const { where: offWhere, ...offOwnerRest } = offJson.owners[0];
     expect(onOwnerRest).toEqual(offOwnerRest);
+  });
+});
+
+/**
+ * GRA-72: an accessibility lint pass over a fresh Compose semantics
+ * capture. The fixture tree below mirrors what `SemanticsCollector.kt`
+ * would actually emit for the sample's own `Cart.ClearPromo` (an IconButton
+ * with no contentDescription, GRA-72's own deliberate fixture in
+ * Screens.kt) and `Cart.TinyTarget` (a 32dp clickable box) -- hand-built,
+ * per the ticket's own allowance, rather than a live emulator capture.
+ * Density 3 (xxhdpi): 144px == 48dp exactly (the IconButton, at the real
+ * minimum -- isolates the missing-label fixture from the touch-target
+ * rule), 96px == 32dp (TinyTarget).
+ */
+describe("GRA-72: accessibility", () => {
+  const CAPTURED_AT = 5_000;
+  const DENSITY = 3;
+
+  function a11ySemanticsTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: null,
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 1080, bottom: 2000 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [
+          {
+            stableId: "iconbtn-clearpromo",
+            nodeId: 2,
+            role: "Button",
+            testTag: "Cart.ClearPromo",
+            text: null,
+            contentDescription: null,
+            bounds: { left: 100, top: 200, right: 244, bottom: 344 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+          {
+            stableId: "tiny-target",
+            nodeId: 3,
+            role: null,
+            testTag: "Cart.TinyTarget",
+            text: null,
+            contentDescription: "Clear promo code (small target)",
+            bounds: { left: 100, top: 400, right: 196, bottom: 496 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+        ],
+      },
+    };
+  }
+
+  function cleanSemanticsTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: "Just some text",
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 300, bottom: 100 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [],
+      },
+    };
+  }
+
+  const densityEvent = { event: "device", t: 0, data: { kind: "profile", density: String(DENSITY) } };
+
+  afterEach(() => resetAccessibilityCaptureForTests());
+
+  it("reports the IconButton fixture (no contentDescription) with its stableId and position", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", {});
+      expect(result.isError).toBeFalsy();
+      const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
+      const finding = findings.find((f) => f.id === "a11y-missing-label");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("warning");
+      const evidence = finding?.evidence as { stableId: string; path: string; testTag: string };
+      expect(evidence.stableId).toBe("iconbtn-clearpromo");
+      expect(evidence.testTag).toBe("Cart.ClearPromo");
+      expect(evidence.path).toContain("Cart.ClearPromo");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports the deliberately 32dp target with its measured size", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", {});
+      const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
+      const finding = findings.find((f) => f.id === "a11y-touch-target-small");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("note"); // 32dp: under 48, not under the 24dp warning line
+      expect(finding?.evidence).toMatchObject({
+        stableId: "tiny-target",
+        measuredDp: { width: 32, height: 32 },
+      });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("a correct screen reports 'nothing found, N nodes checked' explicitly", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: cleanSemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("nothing found, 1 node(s) checked");
+      const payload = result.json as { findings: unknown[]; nodesChecked: number; coverage: string[] };
+      expect(payload.findings).toEqual([]);
+      expect(payload.nodesChecked).toBe(1);
+      expect(payload.coverage.length).toBeGreaterThan(0);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("the stableId a finding names resolves through semantics_tree's own output to the same node", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const a11y = await rig.client.callTool("accessibility", {});
+      const findings = (a11y.json as { findings: Array<{ evidence?: Record<string, unknown> }> }).findings;
+      const stableId = findings[0]?.evidence?.stableId as string;
+      expect(stableId).toBeTruthy();
+
+      const tree = await rig.client.callTool("semantics_tree", {});
+      const raw = tree.json as { root: Record<string, unknown> };
+      const found = findByStableId(raw.root, stableId);
+      expect(found, `stableId ${stableId} did not resolve through semantics_tree`).toBeDefined();
+    } finally {
+      await rig.close();
+    }
+
+    function findByStableId(node: Record<string, unknown> | null, id: string): unknown {
+      if (!node) return undefined;
+      if (node.stableId === id) return node;
+      for (const child of (node.children as Array<Record<string, unknown>>) ?? []) {
+        const hit = findByStableId(child, id);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+  });
+
+  it("findings folds accessibility findings in when a semantics capture landed inside the window", async () => {
+    let semanticsCalls = 0;
+    const rig = await buildRig({
+      handlers: {
+        semantics_tree: () => {
+          semanticsCalls++;
+          return a11ySemanticsTree();
+        },
+      },
+    });
+    try {
+      await rig.pushEvents([densityEvent, { event: "recompose", t: 6_000, data: {} }]);
+
+      // A capture, from the pre-existing semantics_tree tool -- GRA-72's own
+      // decision that either tool feeds the same cache.
+      await rig.client.callTool("semantics_tree", {});
+      expect(semanticsCalls).toBe(1);
+
+      const before = semanticsCalls;
+      const result = await rig.client.callTool("findings", { from: 0, to: 10_000 });
+      // No fresh RPC paid for by findings itself -- the whole point of
+      // GRA-72's fold-in decision.
+      expect(semanticsCalls).toBe(before);
+
+      const findings = (result.json as { findings: Array<{ id: string }> }).findings;
+      expect(findings.some((f) => f.id.startsWith("a11y-"))).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings does not fold anything in when no semantics capture falls inside the window", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent, { event: "recompose", t: 1_000, data: {} }]);
+
+      // A capture at CAPTURED_AT (5000) -- but findings then asks about a
+      // window that does not cover it.
+      await rig.client.callTool("accessibility", {});
+      const result = await rig.client.callTool("findings", { from: 0, to: 1_000 });
+      const findings = (result.json as { findings: Array<{ id: string }> }).findings;
+      expect(findings.some((f) => f.id.startsWith("a11y-"))).toBe(false);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings never calls semantics_tree on its own when nothing has ever been captured", async () => {
+    let semanticsCalls = 0;
+    const rig = await buildRig({
+      handlers: {
+        semantics_tree: () => {
+          semanticsCalls++;
+          return { capturedAt: 0, merged: true, root: null };
+        },
+      },
+    });
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: {} }]);
+      await rig.client.callTool("findings", { from: 0, to: 2_000 });
+      expect(semanticsCalls).toBe(0);
+    } finally {
+      await rig.close();
+    }
   });
 });
