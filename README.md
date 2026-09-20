@@ -1188,6 +1188,17 @@ Full previews live in `inflight`'s `recentHttp` (last 25 calls). The event
 timeline carries only a 512-character snippet, so turning bodies on does not
 blow out the ring buffer.
 
+**The `screenshot` MCP tool captures outside this pipeline entirely**, and is
+worth naming here rather than leaving as a silent exception to everything
+above. A bitmap has no query string, header or bind value to redact — it is
+unredactable by construction — so none of the knobs on this page apply to
+it. What stands in for redaction instead: it is returned only to the caller
+that asked for it, never written to a session file or a trace, never
+broadcast to the timeline UI, and refused outright rather than returned when
+the captured frame comes back solid black — what `screencap` produces for a
+`FLAG_SECURE` window, not real content. See [Security](#security) for the
+full account.
+
 ## Frames
 
 Every other collector measures a cause. This one measures the effect: a

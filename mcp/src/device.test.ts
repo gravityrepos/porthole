@@ -761,6 +761,23 @@ describe("notConnectedMessage's checklist", () => {
     expect(message).toContain("debug build is running");
     expect(message).toContain("adb forward tcp:PORT tcp:PORT");
   });
+
+  // GRA-230 QA (on GRA-62/GRA-63): porthole_status/porthole_connect can fix
+  // most of what used to send an agent straight to a manual adb checklist —
+  // this pins that the message actually says so, and says so first, not as
+  // an afterthought after the five manual steps.
+  it("leads with porthole_status and porthole_connect, ahead of the manual checklist", () => {
+    const client = new DeviceClient("127.0.0.1", 8677);
+    const message = client.notConnectedMessage();
+
+    expect(message).toContain("porthole_status");
+    expect(message).toContain("porthole_connect");
+    const leadIndex = message.indexOf("porthole_status");
+    const checklistIndex = message.indexOf("1. the debug build is running");
+    expect(leadIndex).toBeGreaterThan(-1);
+    expect(checklistIndex).toBeGreaterThan(-1);
+    expect(leadIndex).toBeLessThan(checklistIndex);
+  });
 });
 
 // ---------------------------------------------------------------------------
