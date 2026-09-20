@@ -491,8 +491,30 @@ function Detail({ hit }: { hit: Hit }) {
 /** A finding's own detail layout: its `detail` sentence, then its window on
  *  the device's uptime clock — a point (`from` == `to`), a span, or, for a
  *  `spanning` finding, a note that it describes the whole window asked
- *  about rather than a moment inside it. */
+ *  about rather than a moment inside it. GRA-201: `where` -- resolved from
+ *  the same evidence the server already put in `title`/`detail`, never a
+ *  second opinion on it -- renders as its own row when present, since an
+ *  unresolved `where` (ambiguous, not found, synthetic) is worth showing
+ *  too, not only a resolved one. */
 function FindingDetail({ finding }: { finding: Finding }) {
+  const [copied, setCopied] = useState(false);
+  const where = finding.where;
+  const whereText =
+    where?.resolved && (where.line ? `${where.path}:${where.line}` : where.path);
+
+  const copyWhere = () => {
+    if (!whereText) return;
+    void navigator.clipboard
+      .writeText(whereText)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {
+        // Clipboard access can be refused; the path is still on screen.
+      });
+  };
+
   return (
     <div className="mt-3 flex flex-col gap-3.5">
       {finding.detail && (
@@ -513,6 +535,25 @@ function FindingDetail({ finding }: { finding: Finding }) {
                 : "unplaced"}
           </div>
         </div>
+        {where && (
+          <div className="min-w-0">
+            <Label>where</Label>
+            {whereText ? (
+              <button
+                type="button"
+                onClick={copyWhere}
+                title="click to copy"
+                className="mt-0.5 block w-full cursor-pointer truncate text-left font-mono text-[12px] text-[#7fb2ff] hover:underline [overflow-wrap:anywhere]"
+              >
+                {copied ? "copied" : whereText}
+              </button>
+            ) : (
+              <div className="mt-0.5 font-mono text-[12px] text-[var(--color-dim)]">
+                {where.resolved === false ? where.reason : "unresolved"}
+              </div>
+            )}
+          </div>
+        )}
       </dl>
     </div>
   );

@@ -3,8 +3,8 @@
 // @vitest-environment happy-dom -- see App.render.test.tsx's top comment for
 // why happy-dom over jsdom, and why it is opted into per-file rather than as
 // the package default.
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SelectionPanel } from "./SelectionPanel";
 import { LANES } from "../timeline/lanes";
 import type { Hit } from "../lib/laneData";
@@ -72,5 +72,61 @@ describe("SelectionPanel renders a finding hit (GRA-114 ruling 3)", () => {
     // assume the server upheld it.
     render(<SelectionPanel hit={findingHit({ window: undefined, spanning: undefined })} />);
     expect(screen.getByText("unplaced")).toBeTruthy();
+  });
+});
+
+/** GRA-201: `where` -- resolved from the finding's own evidence, server-side
+ *  -- shows up as its own row, resolved or not. There was no `where` field
+ *  before this ticket, so this is a fresh block rather than an adapted one,
+ *  following GRA-167's own pattern of adding a describe per new field. */
+describe("SelectionPanel renders a finding's where (GRA-201)", () => {
+  it("shows nothing extra when where is absent -- the off switch, or an older server", () => {
+    render(<SelectionPanel hit={findingHit({ where: undefined })} />);
+    expect(screen.queryByText("where")).toBeNull();
+  });
+
+  it("shows a resolved location as path:line", () => {
+    render(
+      <SelectionPanel
+        hit={findingHit({
+          where: { resolved: true, path: "app/src/main/kotlin/CartViewModel.kt", line: 148 },
+        })}
+      />,
+    );
+    expect(screen.getByText("where")).toBeTruthy();
+    expect(screen.getByText("app/src/main/kotlin/CartViewModel.kt:148")).toBeTruthy();
+  });
+
+  it("shows a resolved location with no line as the bare path", () => {
+    render(
+      <SelectionPanel
+        hit={findingHit({ where: { resolved: true, path: "core/network/src/ApiClient.kt" } })}
+      />,
+    );
+    expect(screen.getByText("core/network/src/ApiClient.kt")).toBeTruthy();
+  });
+
+  it("shows the reason, not a fabricated path, when resolution failed", () => {
+    render(<SelectionPanel hit={findingHit({ where: { resolved: false, reason: "ambiguous" } })} />);
+    expect(screen.getByText("where")).toBeTruthy();
+    expect(screen.getByText("ambiguous")).toBeTruthy();
+  });
+
+  it("copies the resolved path to the clipboard on click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    // happy-dom exposes navigator.clipboard as getter-only; a plain
+    // Object.assign throws instead of overriding it.
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    render(
+      <SelectionPanel
+        hit={findingHit({
+          where: { resolved: true, path: "app/src/main/kotlin/CartViewModel.kt", line: 148 },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText("app/src/main/kotlin/CartViewModel.kt:148"));
+    expect(writeText).toHaveBeenCalledWith("app/src/main/kotlin/CartViewModel.kt:148");
+    expect(await screen.findByText("copied")).toBeTruthy();
   });
 });
