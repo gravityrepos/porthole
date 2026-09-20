@@ -1408,11 +1408,28 @@ Perfetto trace directly, for the same reason.
 This matters more than usual, because an agent will take these outputs at face
 value.
 
-**Recomposition counts cover instrumented call sites only.** Compose exposes no
-public hook for "every recomposition in the tree", so the porthole counts the
-scopes you wrapped in `PortholeScreen` or `Modifier.portholeNode`. A composable that
-does not appear in the report is uninstrumented, not idle. The report says so in
-its own `notes` field.
+**Recomposition counts cover instrumented call sites only** — for now. The
+porthole counts the scopes you wrapped in `PortholeScreen` or
+`Modifier.portholeNode`. A composable that does not appear in the report is
+uninstrumented, not idle. The report says so in its own `notes` field.
+
+This is going to stop being true, and the reason it was true has already
+expired. The sentence above used to continue "Compose exposes no public hook
+for every recomposition in the tree"; there is one.
+`androidx.compose.runtime.tooling.CompositionObserver`, added in Compose 1.6,
+hands over every invalidated recompose scope *and the state objects that
+invalidated it*. The GRA-70 spike attached it to the sample with no app code
+whatsoever — a component declared in the manifest, the way `androidx.startup`
+installs itself — and got counts matching the instrumented ones, for the whole
+tree instead of the wrapped part of it. Counting that way is measurably close
+to free; deriving a readable *name* for a scope costs more and will be opt-in,
+because it makes Compose allocate a recompose scope for every composable and
+so slightly changes the app being measured. Two conditions come with it, and
+they are why this paragraph is a plan and not yet a feature: the API is
+experimental, and it does not exist before Compose 1.6, so apps on 1.5 keep
+the behaviour described above. The workings, the measurements and the proposed
+follow-up are in
+[docs/spikes/GRA-70-recomposition-counts.md](docs/spikes/GRA-70-recomposition-counts.md).
 
 **Attribution is temporal, not causal.** `Snapshot.registerApplyObserver` tells
 us which state objects were written in each apply, and we pair that with the
