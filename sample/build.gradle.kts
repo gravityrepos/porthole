@@ -49,6 +49,12 @@ porthole {
     // Same reason: this repo builds the CLI too, so point `portholeUi` at the
     // local build instead of fetching the published package.
     uiCommand.set(listOf("node", rootProject.file("mcp/dist/cli.js").absolutePath, "ui"))
+    // GRA-59: on, so the sample's own "StrictMode" button (CartViewModel.
+    // triggerStrictModeViolation) actually demonstrates a strict_violation
+    // finding rather than silently doing nothing. Off is the right default
+    // for a real app; this repo's own sample is exactly the place to turn
+    // it on.
+    strictMode.set(true)
 }
 
 dependencies {

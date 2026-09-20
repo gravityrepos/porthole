@@ -139,6 +139,7 @@ private fun Controls(viewModel: CartViewModel) {
             Button(onClick = { viewModel.uploadNote() }) { Text("Upload note") }
             Button(onClick = { viewModel.fetchThumbnail() }) { Text("Thumbnail") }
             Button(onClick = { viewModel.blockTheMainThread() }) { Text("Block main") }
+            Button(onClick = { viewModel.triggerStrictModeViolation(context) }) { Text("StrictMode") }
             Button(onClick = { viewModel.fetchWithKtor() }) { Text("Ktor") }
             Button(onClick = {
                 WorkManager.getInstance(context)
