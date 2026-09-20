@@ -16,7 +16,7 @@
       ]
     },
     {
-      "source": "/api/:path*",
+      "source": "/api/(.*)",
       "headers": [
         {
           "key": "Content-Security-Policy",
