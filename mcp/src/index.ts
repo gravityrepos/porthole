@@ -44,6 +44,7 @@ import {
 } from "./sessions.js";
 import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
+import { whereForFrame, whereForName, type Where } from "./sources.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -310,9 +311,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     method: string,
     params: Record<string, unknown>,
     summarise: (value: T) => string,
+    // GRA-201: lets a tool attach `where` (or anything else) to the device's
+    // own reply before it is summarised and returned, without every call
+    // site re-implementing the try/catch above just to touch the payload.
+    augment?: (value: T) => T,
   ) {
     try {
-      const result = await device.request<T>(method, params);
+      const raw = await device.request<T>(method, params);
+      const result = augment ? augment(raw) : raw;
       return ok(summarise(result), result);
     } catch (error) {
       return fail(error);
@@ -430,6 +436,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     versionName: string | null;
     versionAssumed: boolean;
     topAppFrame: string | null;
+    /** GRA-201: `topAppFrame` resolved to where it lives under the project root. Absent — not `undefined` on a present key — when source resolution is off; see sources.ts. */
+    where?: Where;
   }
 
   /**
@@ -455,16 +463,19 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       .slice()
       .sort((a, b) => num(b.data.timestamp) - num(a.data.timestamp))
       .slice(0, EXITS_SECTION_CAP)
-      .map(
-        (e): ExitSummary => ({
+      .map((e): ExitSummary => {
+        const topAppFrame = str(e.data.mainStack).split("\n")[0] || null;
+        const where = whereForFrame(topAppFrame);
+        return {
           reason: str(e.data.reason),
           timestamp: num(e.data.timestamp),
           at: new Date(num(e.data.timestamp)).toISOString(),
           versionName: e.data.versionName != null ? str(e.data.versionName) : null,
           versionAssumed: e.data.versionAssumed === true,
-          topAppFrame: str(e.data.mainStack).split("\n")[0] || null,
-        }),
-      );
+          topAppFrame,
+          ...(where ? { where } : {}),
+        };
+      });
 
     return { apiUnavailable, recent };
   }
@@ -2067,29 +2078,44 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           name: string;
           count: number;
           triggeredBy: Array<{ key: string; count: number }>;
+          where?: Where;
         }>;
         totalNodes?: number;
         truncated?: boolean;
         unattributedWrites: Array<{ key: string; count: number }>;
-      }>("recompositions", { screen, ...windowArgs, limit: limit ?? 50 }, (report) => {
-        if (report.nodes.length === 0) {
-          return "No instrumented composable recomposed in that window.";
-        }
-        const top = report.nodes[0];
-        const cause = top.triggeredBy[0];
-        const total = report.nodes.reduce((sum, node) => sum + node.count, 0);
-        // A capped list that does not say it is capped reads as the whole
-        // truth, which is how "only three composables recomposed" gets believed.
-        const cut = report.truncated
-          ? ` Busiest ${report.nodes.length} of ${report.totalNodes ?? report.nodes.length} nodes shown.`
-          : "";
-        return (
-          `${total} recompositions across ${report.nodes.length} nodes. ` +
-          `Worst: ${top.name} at ${top.count}` +
-          (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".") +
-          cut
-        );
-      });
+      }>(
+        "recompositions",
+        { screen, ...windowArgs, limit: limit ?? 50 },
+        (report) => {
+          if (report.nodes.length === 0) {
+            return "No instrumented composable recomposed in that window.";
+          }
+          const top = report.nodes[0];
+          const cause = top.triggeredBy[0];
+          const total = report.nodes.reduce((sum, node) => sum + node.count, 0);
+          // A capped list that does not say it is capped reads as the whole
+          // truth, which is how "only three composables recomposed" gets believed.
+          const cut = report.truncated
+            ? ` Busiest ${report.nodes.length} of ${report.totalNodes ?? report.nodes.length} nodes shown.`
+            : "";
+          return (
+            `${total} recompositions across ${report.nodes.length} nodes. ` +
+            `Worst: ${top.name} at ${top.count}` +
+            (cause ? `, most often after a write to ${cause.key} (${cause.count} of them).` : ".") +
+            cut
+          );
+        },
+        // GRA-201: `name` is the string literal given to portholeNode/PortholeScreen
+        // (PortholeCompose.kt), not a declared Kotlin symbol — see sources.ts's own
+        // doc comment for why that is what the name index looks up.
+        (report) => ({
+          ...report,
+          nodes: report.nodes.map((node) => {
+            const where = whereForName(node.name);
+            return where ? { ...node, where } : node;
+          }),
+        }),
+      );
     },
   );
 
@@ -2163,7 +2189,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       annotations: { readOnlyHint: true },
     },
     async ({ viewModel }): Promise<ToolResult> =>
-      call<{ owners: Array<{ name: string; fields: unknown[] }> }>(
+      call<{ owners: Array<{ name: string; fields: unknown[]; where?: Where }> }>(
         "state",
         { viewModel },
         (dump) => {
@@ -2174,6 +2200,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             .map((owner) => `${owner.name} (${owner.fields.length} fields)`)
             .join(", ");
         },
+        // GRA-201: an owner's `name` is whatever registerViewModel(name, vm)
+        // was called with — usually, but not always, the class's own name —
+        // so this resolves the label the same way `recompositions` above does.
+        (dump) => ({
+          owners: dump.owners.map((owner) => {
+            const where = whereForName(owner.name);
+            return where ? { ...owner, where } : owner;
+          }),
+        }),
       ),
   );
 
@@ -2342,27 +2377,42 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const resolved = await resolveWindowSince({ sinceMs, from, to, since });
       const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
       return call<{
-        stalls: Array<{ durationMs: number; stack: string }>;
+        stalls: Array<{ durationMs: number; stack: string; where?: Where }>;
         mainThreadQueries: Array<{ sql: string; elapsedMs: number; kind: string }>;
         stallThresholdMs: number;
-      }>("blocking", { ...windowArgs, limit }, (report) => {
-        const parts: string[] = [];
-        if (report.stalls.length) {
-          const worst = report.stalls[0];
-          parts.push(
-            `${report.stalls.length} stall(s) over ${report.stallThresholdMs}ms, worst ` +
-              `${worst.durationMs}ms in ${worst.stack.split("\n")[0]}`,
-          );
-        }
-        if (report.mainThreadQueries.length) {
-          const worst = report.mainThreadQueries[0];
-          parts.push(
-            `${report.mainThreadQueries.length} database ${report.mainThreadQueries.length === 1 ? "query" : "queries"} ` +
-              `on the main thread, worst ${worst.elapsedMs}ms: ${worst.sql.slice(0, 80)}`,
-          );
-        }
-        return parts.length ? parts.join(". ") : "Nothing blocked the main thread in this window.";
-      });
+      }>(
+        "blocking",
+        { ...windowArgs, limit },
+        (report) => {
+          const parts: string[] = [];
+          if (report.stalls.length) {
+            const worst = report.stalls[0];
+            parts.push(
+              `${report.stalls.length} stall(s) over ${report.stallThresholdMs}ms, worst ` +
+                `${worst.durationMs}ms in ${worst.stack.split("\n")[0]}`,
+            );
+          }
+          if (report.mainThreadQueries.length) {
+            const worst = report.mainThreadQueries[0];
+            parts.push(
+              `${report.mainThreadQueries.length} database ${report.mainThreadQueries.length === 1 ? "query" : "queries"} ` +
+                `on the main thread, worst ${worst.elapsedMs}ms: ${worst.sql.slice(0, 80)}`,
+            );
+          }
+          return parts.length ? parts.join(". ") : "Nothing blocked the main thread in this window.";
+        },
+        // GRA-201: each stall's own top frame (the stack's first line), the
+        // same text `main-thread-stall` resolves in trace.ts — resolved
+        // here too since this is a live device reply, not one of that
+        // analyser's findings.
+        (report) => ({
+          ...report,
+          stalls: report.stalls.map((stall) => {
+            const where = whereForFrame(stall.stack.split("\n")[0]);
+            return where ? { ...stall, where } : stall;
+          }),
+        }),
+      );
     },
   );
 

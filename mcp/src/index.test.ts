@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildRig,
   buildRingInState,
@@ -14,6 +15,7 @@ import {
 import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 import { joinSummaryAndPayload } from "./index.js";
+import { resetSourceIndexForTests } from "./sources.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -2600,4 +2602,145 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
       rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }, 20_000);
+});
+
+describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a real project", () => {
+  // The same fixture sources.test.ts uses: two modules,
+  // FixtureCartViewModel.kt under app/, ApiClient.kt under core/network/,
+  // and a Fixture.PromoField portholeNode label in FixtureScreens.kt --
+  // named distinctly from the real sample app so a walk rooted at the
+  // whole worktree never finds both and calls them ambiguous.
+  const FIXTURE_ROOT = fileURLToPath(new URL("./fixtures/sources", import.meta.url));
+
+  let savedProjectRoot: string | undefined;
+
+  function withProjectRoot(root: string | undefined): void {
+    if (root === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+    else process.env.PORTHOLE_PROJECT_ROOT = root;
+  }
+
+  it("blocking attaches where to a stall whose top frame names a file under the root", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const rig = await buildRig({
+      handlers: {
+        blocking: () => ({
+          stalls: [
+            {
+              durationMs: 900,
+              stack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+            },
+          ],
+          mainThreadQueries: [],
+          stallThresholdMs: 700,
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("blocking", {});
+      expect(result.isError).toBeFalsy();
+      const stalls = (result.json as { stalls: Array<{ where?: unknown }> }).stalls;
+      expect(stalls[0].where).toEqual({
+        resolved: true,
+        path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
+        line: 11,
+      });
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+  });
+
+  it("recompositions attaches where to a node resolved via its portholeNode label, not its declaring function", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const rig = await buildRig({
+      handlers: {
+        recompositions: () => ({
+          nodes: [{ name: "Fixture.PromoField", count: 42, triggeredBy: [] }],
+          totalNodes: 1,
+          truncated: false,
+          unattributedWrites: [],
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("recompositions", {});
+      expect(result.isError).toBeFalsy();
+      const nodes = (result.json as { nodes: Array<{ where?: unknown }> }).nodes;
+      expect(nodes[0].where).toEqual({
+        resolved: true,
+        path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
+        line: 14,
+      });
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+  });
+
+  it("porthole_status's exits carry where on topAppFrame", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        {
+          event: "exit",
+          t: 1000,
+          data: {
+            reason: "REASON_ANR",
+            timestamp: Date.now(),
+            mainStack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+          },
+        },
+      ]);
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      const exits = (status.json as { exits: { recent: Array<{ where?: unknown }> } }).exits;
+      expect(exits.recent[0].where).toEqual({
+        resolved: true,
+        path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
+        line: 11,
+      });
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+  });
+
+  it("attaches no where at all when PORTHOLE_PROJECT_ROOT is unset — the off switch", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(undefined);
+    const rig = await buildRig({
+      handlers: {
+        blocking: () => ({
+          stalls: [
+            {
+              durationMs: 900,
+              stack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+            },
+          ],
+          mainThreadQueries: [],
+          stallThresholdMs: 700,
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("blocking", {});
+      const stalls = (result.json as { stalls: Array<{ where?: unknown }> }).stalls;
+      expect(stalls[0].where).toBeUndefined();
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+  });
 });
