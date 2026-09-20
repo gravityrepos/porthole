@@ -1030,19 +1030,46 @@ describe("porthole_connect", () => {
     }
   });
 
-  it("says a release build has no runtime in it, instead of a generic 'not connected' — GRA-62 AC4", async () => {
-    // buildRig's default hello reports packageName "com.example.shop" — the
-    // package porthole_connect's own default-resolution falls back to.
+  it("reports forwardTarget's own refusal when neither packageName nor PORTHOLE_APPLICATION_ID is known — GRA-199", async () => {
+    // No `packageName` argument, and this test process has no
+    // PORTHOLE_APPLICATION_ID set either (the module-level constant it
+    // reads is fixed at import time, before any test runs, so there is
+    // nothing a test could set to change it) — the one combination
+    // `forwardTarget` refuses outright, before adb's own `forward` is ever
+    // invoked at all.
     const adb = buildFakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("PORTHOLE_APPLICATION_ID");
+      expect(result.json).toMatchObject({ serial: "A1" });
+      expect(adb.calls().some((c) => c.includes("forward"))).toBe(false);
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("says a release build has no runtime in it, instead of a generic 'not connected' — GRA-62 AC4", async () => {
+    // buildRig's default hello reports packageName "com.example.shop" — the
+    // package porthole_connect's own default-resolution falls back to, once
+    // it is known. GRA-199: the forward itself happens *before* any hello
+    // could possibly be known (that is the whole point of porthole_connect
+    // — reaching a device that has never answered yet), so the test passes
+    // `packageName` explicitly, exactly as an agent without a
+    // PORTHOLE_APPLICATION_ID configured would have to.
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout: "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ HAS_CODE ]\n",
       },
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", {});
+      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("release build");
       expect(result.json).toMatchObject({ installed: true, debuggable: false });
@@ -1054,7 +1081,7 @@ describe("porthole_connect", () => {
   it("offers to launch an installed-but-not-running debug build, rather than launching unasked — GRA-62 AC4", async () => {
     const adb = buildFakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
@@ -1063,7 +1090,7 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", {});
+      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("not running");
       expect(result.text).toContain("launch: true");
@@ -1078,7 +1105,7 @@ describe("porthole_connect", () => {
   it("launches the app when asked, issuing the monkey launcher intent", async () => {
     const adb = buildFakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
@@ -1098,7 +1125,7 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { launch: true });
+      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop", launch: true });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("Launched com.example.shop");
       expect(result.json).toMatchObject({ launched: true });
@@ -1110,7 +1137,7 @@ describe("porthole_connect", () => {
   it("restarts an already-running app when asked — force-stop then the launcher intent, the same pair restartApp always issues", async () => {
     const adb = buildFakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
@@ -1131,7 +1158,7 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { restart: true });
+      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop", restart: true });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("Restarted com.example.shop");
       expect(result.json).toMatchObject({ restarted: true });

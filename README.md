@@ -184,9 +184,12 @@ navigation entry, and the nav collector names it.
 
 **A device or emulator, with the debug build running.** There is no host-side
 mode and there cannot be one: the porthole is code inside your app's process,
-binding a socket on the device's loopback interface. `adb forward` is the only
-bridge, and it needs USB debugging authorisation like anything else on adb.
-Emulator or physical device makes no difference.
+listening on a socket that never leaves the device — an Android
+abstract-namespace Unix domain socket, named for the app's own package, not a
+TCP port bound to any network interface (see [Setup](#setup) for why that
+changed in GRA-199). `adb forward` is the only bridge, and it needs USB
+debugging authorisation like anything else on adb. Emulator or physical
+device makes no difference.
 
 Everything else is the app you were going to run anyway. The porthole starts with
 the process, so there is nothing to attach and no launch flag to remember.
@@ -200,6 +203,18 @@ the process, so there is nothing to attach and no launch flag to remember.
 | Configuration cache | stored and reused |
 | minSdk | 26 |
 | JDK | 17 for the plugin, 21 for the build |
+
+**Abstract-namespace Unix sockets** (GRA-199's default bind) are not gated by
+API level at all — they are a Linux kernel feature Android's own
+`android.net.LocalServerSocket`/`LocalSocket` have wrapped since the
+earliest public releases, the same mechanism `adbd`, `zygote` and
+`installd` use for their own sockets, and `adb forward`'s `localabstract:`
+scheme has existed alongside `tcp:` for exactly as long. There is no API 26
+concern here that the loopback TCP bind this replaces did not already share.
+Verified directly on this project's own emulator at API 36; a Robolectric
+JVM test cannot exercise the real bind at all (see
+`PortholeSocketServerBindTest`'s own comment for why), so the emulator run —
+not a unit test — is this feature's actual proof on real Android code.
 
 The plugin declares AGP `compileOnly`, so your build brings its own, and it
 touches only the stable variant API. That is not the same as knowing it works,
@@ -241,6 +256,35 @@ porthole {
 The plugin puts `runtime` on your debug build types and `runtime-noop` on
 everything else, and generates the `porthole_port` resource so the port is
 configured in exactly one place.
+
+`port` is **the host port the forward listens on**, not a port the device
+opens. Since GRA-199, the runtime binds no TCP port on the device at all: it
+listens on an Android abstract-namespace Unix socket named
+`porthole.<applicationId>`, unique to your app by construction, and
+`portholeConnect`/`portholeUi` forward `tcp:<port>` (on your workstation) to
+`localabstract:porthole.<applicationId>` (on the device) rather than to a
+second copy of the port. Two Porthole apps on the same device can never
+collide on the device side any more — each has its own socket, named for its
+own package, regardless of what `port` either of them is configured with.
+`port` still matters on the host: two of *your own* MCP servers watching two
+different apps on one workstation still need two different values, the same
+as always.
+
+**Migrating from 0.2.x.** If you were on the plugin (`portholeConnect`,
+`portholeUi`, `portholeStart`) already, there is nothing to do — the plugin
+generates the new `adb forward` target for you, same as it always generated
+the old one, and `.mcp.json` regenerates the same way. The only people who
+need to act are anyone who ran `adb forward tcp:<port> tcp:<port>` **by
+hand**, outside the plugin — a CI script, a personal alias, a tool that
+shells out to adb on its own. That forward now points at a TCP port nothing
+listens on. Either update it to `adb forward tcp:<port>
+localabstract:porthole.<applicationId>`, or, for one release, set
+`porthole { legacyTcpPort.set(true) }` (and, for the MCP server if you run it
+directly rather than through the generated `.mcp.json`,
+`PORTHOLE_LEGACY_TCP_PORT=1`) to keep the pre-GRA-199 shared TCP port while
+you update whatever is forwarding by hand. `legacyTcpPort` is planned for
+removal — it exists to buy migration time, not as a permanent alternative,
+since it reintroduces the device-side collision this ticket removes.
 
 **2. Run one task.**
 
@@ -291,25 +335,29 @@ Two things worth knowing before you run it:
   launches or restarts anything on its own; when the fix needs that (not
   installed, a release build, installed but not running), it names
   `porthole_connect`, a second tool that can act on the app under test.
-- **If nothing responds once "connected", something is already holding the
-  port** — on either end. `portholeConnect`'s `adb forward` succeeds
-  whether or not anything else on this machine is already holding the
-  port, so if the MCP server still can't reach the app, check what is
-  listening on `PORTHOLE_PORT` locally and stop it, or set a different one.
-  On the device, another Porthole app already running there (the sample
-  counts, and it is exactly what running the sample and then your own app
-  produces) can be holding the socket before your app ever tries to bind —
-  `adb logcat -s Porthole:E` names it, with the port, this app's own
-  package, and the fix: stop the other app, or give this one its own
-  `porthole { port.set(...) }`.
+- **If nothing responds once "connected", something is holding the *host*
+  port** — the only place a collision can still happen since GRA-199.
+  `portholeConnect`'s `adb forward` succeeds whether or not anything else on
+  this workstation already has `PORTHOLE_PORT` bound, so if the MCP server
+  still can't reach the app, check what is listening on it locally (another
+  of your own MCP servers pointed at a different app is the common case) and
+  stop it, or give this app's `porthole { port.set(...) }` a different
+  value. The device side cannot collide any more: each app binds its own
+  abstract socket, named for its own `applicationId`, so running the sample
+  and then your own app no longer means one of them loses a race for a
+  shared port — see [Compatibility](#compatibility) for why, and the
+  migration note below if you were forwarding by hand before this.
 - **If it says "connected" but is answering for the wrong app**, the MCP
   server has `PORTHOLE_APPLICATION_ID` (written into `.mcp.json` by
   `portholeMcpConfig` from AGP's own `applicationId`) and compares it
   against every `hello` — a mismatch warns loudly (`porthole_status`, every
-  tool's banner, the timeline UI's pill in the danger tone) rather than
-  silently answering for whichever app is holding the port. It never
-  refuses the connection, so the fix is the same as above: stop the other
-  app, or give this one its own port.
+  tool's banner, the timeline UI's pill in the danger tone). This can still
+  happen on the *host* side: two apps that happen to share one
+  `PORTHOLE_PORT` on your workstation, forwarded one at a time, will each
+  answer as themselves in turn, and the mismatch check is what catches you
+  pointing an old `.mcp.json` at whichever one is currently forwarded. Give
+  each app its own `PORTHOLE_PORT` (`porthole { port.set(...) }`) to run both
+  at once.
 - **A device with two adb transports at once** (wireless plus wired, most
   commonly) makes `adb forward` ambiguous, and it fails silently for
   exactly the port this all depends on. `adb devices` lists more than one
@@ -499,7 +547,8 @@ pin — and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_SESSIONS` | on | set to `0` to turn off [sessions on disk](#sessions-on-disk) entirely |
 | `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
 | `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
-| `PORTHOLE_APPLICATION_ID` | none | the app this server expects — written by `portholeMcpConfig` from AGP's own `applicationId` on an application module, or from `porthole { applicationId.set(...) }` if you set one explicitly. A `hello` naming a different package warns loudly everywhere (`porthole_status`, every tool's banner, the timeline UI's pill) instead of silently answering for whichever app happens to be holding the port |
+| `PORTHOLE_APPLICATION_ID` | none | the app this server expects — written by `portholeMcpConfig` from AGP's own `applicationId` on an application module, or from `porthole { applicationId.set(...) }` if you set one explicitly. Compared against every `hello` (a mismatch warns loudly — `porthole_status`, every tool's banner, the timeline UI's pill) **and**, since GRA-199, is what names the abstract socket `porthole_status`/`porthole_connect` forward to (`localabstract:porthole.<applicationId>`) when they have to (re-)establish the bridge themselves — without it, and without `PORTHOLE_LEGACY_TCP_PORT`, those two tools refuse to guess a socket name and say so |
+| `PORTHOLE_LEGACY_TCP_PORT` | unset | set (to any truthy value) to forward to the pre-GRA-199 shared TCP port instead of the abstract socket — written by `portholeMcpConfig` only when `porthole { legacyTcpPort.set(true) }`. See the migration note in [Setup](#setup) |
 | `PORTHOLE_SERIAL` | none | which attached device `porthole_status`/`porthole_connect` should use when more than one is plugged in — same purpose as `porthole { deviceSerial.set(...) }`, for a server started without the generated `.mcp.json`. A tool's own `serial` argument overrides it for that one call |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
@@ -1481,15 +1530,21 @@ next to a recomposition burst says a great deal.
 
 ## Security
 
-The socket binds to `127.0.0.1` and nothing else. Reaching it from off-device
-requires `adb forward`, which requires USB debugging authorisation. On top of
-that, the whole runtime is debug-only: release builds link the no-op artifact,
-which contains no socket, no collectors and no reflection.
+By default (GRA-199) the socket is an Android abstract-namespace Unix domain
+socket — reachable only from a process on the same device, never over any
+network interface at all, on-device or off. `porthole { legacyTcpPort.set(true) }`
+restores the pre-GRA-199 bind, `127.0.0.1` and nothing else, for anyone still
+migrating; that shape carries the same story one level down — off-device
+reachability still requires `adb forward`. Either way, reaching the socket
+from off-device requires `adb forward`, which requires USB debugging
+authorisation. On top of that, the whole runtime is debug-only: release
+builds link the no-op artifact, which contains no socket, no collectors and
+no reflection.
 
 Log capture is the one collector that will happily forward whatever the app
 prints, including anything a developer logged that they should not have. It is
-debug-only and loopback-only like everything else, and the porthole's own tag is
-excluded so a failing socket write cannot log its way into a loop.
+debug-only and device-local-only like everything else, and the porthole's own
+tag is excluded so a failing socket write cannot log its way into a loop.
 
 URLs and SQL are collapsed, query-string values and sensitive headers are
 replaced with `*`, and request and response bodies are not captured at all
@@ -1998,7 +2053,11 @@ same pattern the build-id check already uses.
 
 ## Wire protocol
 
-Newline-delimited JSON over TCP, one object per line, both directions.
+Newline-delimited JSON, one object per line, both directions, over whichever
+socket [Setup](#setup) describes — the framing itself does not know or care
+whether it is riding an abstract Unix socket forwarded from the device or a
+plain TCP connection on the host side of that forward, which is exactly why
+GRA-199 changed the socket without moving `PROTOCOL_VERSION`.
 
 ```jsonc
 // request

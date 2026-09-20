@@ -26,13 +26,25 @@ import java.net.ServerSocket
  * so two Porthole apps on one device produced a log that confidently
  * claimed success for the one that lost the race.
  *
+ * GRA-199: the default bind target moved from a loopback TCP port shared by
+ * every app on the device to an abstract-namespace Unix socket keyed by
+ * package name, so the collision these tests were originally written
+ * against — two *different* apps wanting the same port — cannot happen on
+ * the new default path at all; see the "by default" and "two instances of
+ * the same package" tests below for what replaces it. The original
+ * collision-retry story survives verbatim on the `legacyTcp = true` opt-out
+ * (below), which restores the old `ServerSocket(port, ..., 127.0.0.1)` bind
+ * exactly, collision included.
+ *
  * These tests go straight at [PortholeSocketServer] rather than through
  * [live.gravitylabs.porthole.Porthole] - the bind result is a property of
  * the server itself, and `Porthole.install` in a real process would need a
  * real occupied port to exercise the same path, which is exactly what these
- * tests set up directly with a plain [ServerSocket]. Robolectric only for
- * `android.util.Log`, the same reason [live.gravitylabs.porthole.collect.LogCollectorTest]
- * needs it - a plain JVM test throws the moment anything here calls `Log.*`.
+ * tests set up directly with a plain [ServerSocket]/[LocalServerSocket].
+ * Robolectric only for `android.util.Log` and (GRA-199) `android.net.LocalSocket`'s
+ * family, the same reason [live.gravitylabs.porthole.collect.LogCollectorTest]
+ * needs it for `Log` - a plain JVM test throws the moment anything here calls
+ * an Android class with no pure-Java equivalent.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], manifest = Config.NONE)
@@ -40,16 +52,16 @@ class PortholeSocketServerBindTest {
 
     private val packageName = "com.example.shop"
 
-    // -- a genuinely occupied port fails loudly, with the state to prove it -
+    // -- legacyTcp = true: the pre-GRA-199 collision, verbatim --------------
 
     @Test
-    fun `a port already held for the whole retry window is reported as an error, with the state to match`() {
+    fun `legacyTcp - a port already held for the whole retry window is reported as an error, with the state to match`() {
         val port = freePort()
         val holder = ServerSocket(port, 1, InetAddress.getByName("127.0.0.1"))
         ShadowLog.clear()
         try {
             val ring = EventRing()
-            val server = PortholeSocketServer(port, ring, packageName = packageName)
+            val server = PortholeSocketServer(port, ring, packageName = packageName, legacyTcp = true)
 
             server.start()
             // Five attempts, 500ms apart: the whole retry window is ~2s: give
@@ -90,14 +102,12 @@ class PortholeSocketServerBindTest {
         }
     }
 
-    // -- the retry: released before the attempts run out, the server binds -
-
     @Test
-    fun `releasing the port before the retries run out lets the server bind, and says how many attempts it took`() {
+    fun `legacyTcp - releasing the port before the retries run out lets the server bind, and says how many attempts it took`() {
         val port = freePort()
         val holder = ServerSocket(port, 1, InetAddress.getByName("127.0.0.1"))
         val ring = EventRing()
-        val server = PortholeSocketServer(port, ring, packageName = packageName)
+        val server = PortholeSocketServer(port, ring, packageName = packageName, legacyTcp = true)
 
         try {
             server.start()
@@ -133,16 +143,14 @@ class PortholeSocketServerBindTest {
         }
     }
 
-    // -- self-check (a): a bind exception that is not EADDRINUSE -----------
-
     @Test
-    fun `a malformed port fails for its own reason, not misreported as EADDRINUSE`() {
+    fun `legacyTcp - a malformed port fails for its own reason, not misreported as EADDRINUSE`() {
         val ring = EventRing()
         // Out of the valid 0-65535 range: ServerSocket's own constructor
         // throws IllegalArgumentException synchronously, before any socket
         // syscall happens at all - a different failure shape than a taken
         // port, and the message must not claim the wrong one.
-        val server = PortholeSocketServer(70_000, ring, packageName = packageName)
+        val server = PortholeSocketServer(70_000, ring, packageName = packageName, legacyTcp = true)
 
         server.start()
         awaitTrue(6_000) { !server.listening && server.listeningFailure != null }
@@ -153,6 +161,117 @@ class PortholeSocketServerBindTest {
             "expected the real exception class named instead, got: $failure",
             failure.contains("IllegalArgumentException"),
         )
+        server.stop()
+    }
+
+    // -- the GRA-199 default: an abstract socket keyed by package -----------
+    //
+    // `android.net.LocalServerSocket` itself cannot be exercised from this
+    // JVM test at all - confirmed by trying it, not assumed: Robolectric
+    // ships no shadow for it (no `ShadowLocalServerSocket` anywhere in
+    // shadows-framework, unlike `ServerSocket`), and its real implementation
+    // reaches a native method with no host backing, so
+    // `LocalServerSocket("x")` under this same Robolectric config throws
+    // `IOException: socket not created` unconditionally, success or failure,
+    // package name irrelevant. [PortholeSocketServer.bindOnce] exists for
+    // exactly this: it separates "what bindWithRetry does with a bind
+    // result" (the retry count, the two message shapes, the Setup
+    // recording, the log lines) from "how a socket is actually bound",
+    // so the former is fully testable here with a fake, and the latter is
+    // proved the only way it can be - on a real device or emulator. This
+    // ticket's own report records that run.
+
+    @Test
+    fun `by default a successful bind names the abstract socket, not a TCP port, in its log line`() {
+        val ring = EventRing()
+        val port = freePort()
+        ShadowLog.clear()
+        val server = PortholeSocketServer(
+            port,
+            ring,
+            packageName = packageName,
+            bindOnce = { TcpBoundServer(ServerSocket(0)) }, // stands in for a real LocalServerSocket bind
+        )
+
+        try {
+            server.start()
+            awaitTrue(6_000) { server.listening }
+            assertTrue("expected the fake bind to succeed", server.listening)
+            assertNull(server.listeningFailure)
+            assertEquals(1, server.bindAttempts)
+
+            // `listening` flips true, on the io thread, in the statement
+            // right before Log.i is called - a volatile write's
+            // happens-before guarantee covers what came before it in program
+            // order, not what comes after, so a poll on `listening` alone can
+            // observe it true a moment before the log line actually lands.
+            // Poll for the log line itself rather than adding a fixed sleep.
+            awaitTrue(6_000) { ShadowLog.getLogsForTag("Porthole").any { it.type == Log.INFO && it.msg.startsWith("listening on") } }
+            val infoLogs = ShadowLog.getLogsForTag("Porthole").filter { it.type == Log.INFO }
+            val listeningLog = infoLogs.singleOrNull { it.msg.startsWith("listening on") }
+                ?: error("expected exactly one 'listening on ...' info log, got: $infoLogs")
+            assertTrue(
+                "expected the abstract socket named, not a TCP port, got: ${listeningLog.msg}",
+                listeningLog.msg.contains("localabstract:porthole.$packageName"),
+            )
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `by default, exhausting the retries reports the same-app explanation instead of GRA-196's port-collision one`() {
+        val port = freePort()
+        ShadowLog.clear()
+        val ring = EventRing()
+        val server = PortholeSocketServer(
+            port,
+            ring,
+            packageName = packageName,
+            // Every attempt fails - the same exception shape the real
+            // LocalServerSocket bind throws under this Robolectric config
+            // (see the section comment above), so the reason-detection
+            // branch this test exercises is the one an emulator/device run
+            // could actually reach too, not a fabricated one.
+            bindOnce = { throw java.io.IOException("socket not created") },
+        )
+
+        server.start()
+        awaitTrue(6_000) { !server.listening && server.listeningFailure != null }
+
+        assertFalse("expected the server to report it is not listening", server.listening)
+        val failure = server.listeningFailure
+            ?: error("expected a listeningFailure message once every retry was exhausted")
+        assertTrue(
+            "expected the abstract socket name in the failure, got: $failure",
+            failure.contains("localabstract:porthole.$packageName"),
+        )
+        assertTrue(
+            "expected this app's own package named in the failure, got: $failure",
+            failure.contains(packageName),
+        )
+        // GRA-199: the abstract socket is keyed by package, so a collision
+        // here can only mean another process of this SAME app - two
+        // processes, or a reinstall whose old process has not yet let go -
+        // never a *different* Porthole app, which is exactly the case this
+        // ticket removes. The message must say that, not repeat GRA-196's
+        // now-inapplicable "another app ... porthole { port.set(...) }"
+        // advice, which described moving the *host* port and never applied
+        // to a same-package collision even before this ticket.
+        assertTrue(
+            "expected the same-app explanation, got: $failure",
+            failure.contains("same app"),
+        )
+        assertFalse(
+            "a same-package collision is not fixed by moving the host port, so the old remedy must not appear: $failure",
+            failure.contains("port.set"),
+        )
+        assertEquals(5, server.bindAttempts)
+
+        val socketEntry = Setup.report().singleOrNull { it.name == "socket" }
+            ?: error("expected a `socket` entry once a bind has settled")
+        assertFalse("a failed bind must not be reported as instrumented", socketEntry.instrumented)
+
         server.stop()
     }
 

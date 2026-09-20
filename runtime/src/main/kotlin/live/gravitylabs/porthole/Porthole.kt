@@ -274,15 +274,18 @@ object Porthole {
             // now only ever appears once the socket is genuinely listening;
             // a failed bind gets PortholeSocketServer's own Log.e instead,
             // with nothing here that could contradict it.
+            val legacyTcp = legacyTcpPortFromResources(app)
             val server = PortholeSocketServer(
                 port,
                 ring,
                 packageName = app.packageName,
                 onBindResult = { ok ->
                     if (ok) {
-                        Log.i(TAG, "installed on 127.0.0.1:$port, collectors: ${finalCollectors.joinToString()}")
+                        val where = if (legacyTcp) "127.0.0.1:$port" else "localabstract:porthole.${app.packageName}"
+                        Log.i(TAG, "installed on $where, collectors: ${finalCollectors.joinToString()}")
                     }
                 },
+                legacyTcp = legacyTcp,
             )
             // Held as fields, not posted from a value nobody keeps, so
             // shutdown() can cancel this specific callback rather than
@@ -321,7 +324,7 @@ object Porthole {
             )
             registerMethods(s)
             server.start()
-            writeConnectionFile(app, port)
+            writeConnectionFile(app, port, legacyTcp)
             session = s
             // After the app has had a chance to build its clients. Asking
             // now would report everything as missing.
@@ -782,6 +785,22 @@ object Porthole {
         if (id != 0) context.resources.getBoolean(id) else false
     }.getOrDefault(false)
 
+    /**
+     * The Gradle plugin's `legacyTcpPort` DSL setting (GRA-199), written the
+     * same way as `strictMode`: a generated `bool` resource
+     * ([RES_LEGACY_TCP_PORT]), absent (reads `false`) for a build that
+     * predates this flag or never set it — which is also the correct
+     * default: the abstract socket is what fixes the two-apps-one-device
+     * collision, so opting into the old behaviour has to be a deliberate,
+     * named choice, not something a stale plugin jar could silently keep
+     * alive. See the Gradle plugin's `PortholeExtension.legacyTcpPort` KDoc
+     * for who this is for and how long it is staying.
+     */
+    private fun legacyTcpPortFromResources(context: Context): Boolean = runCatching {
+        val id = context.resources.getIdentifier(RES_LEGACY_TCP_PORT, "bool", context.packageName)
+        if (id != 0) context.resources.getBoolean(id) else false
+    }.getOrDefault(false)
+
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
@@ -804,7 +823,11 @@ object Porthole {
 
     /**
      * Drops a marker in the app's files dir naming the port the runtime actually
-     * bound.
+     * bound, and (GRA-199) which on-device endpoint it is actually listening
+     * on: `socket` is the abstract socket name a `localabstract:` forward
+     * targets, `null` when [legacyTcp] bound the old shared TCP port
+     * instead — the two are mutually exclusive by construction, the same way
+     * [PortholeSocketServer]'s own bind is.
      *
      * Nothing reads this back today — `portholeConnect` forwards whatever port
      * the extension is configured with, not this file's. Kept anyway because it
@@ -814,10 +837,11 @@ object Porthole {
      * instead of assuming the configured value matches. Tracked as a follow-up
      * (GRA-141); until that lands, do not describe this as read by anything.
      */
-    private fun writeConnectionFile(context: Context, port: Int) {
+    private fun writeConnectionFile(context: Context, port: Int, legacyTcp: Boolean) {
         runCatching {
+            val socket = if (legacyTcp) "null" else """"porthole.${context.packageName}""""
             File(context.filesDir, "porthole.json").writeText(
-                """{"port":$port,"package":"${context.packageName}","protocol":1}""",
+                """{"port":$port,"package":"${context.packageName}","socket":$socket,"protocol":1}""",
             )
         }.onFailure { Log.d(TAG, "could not write connection marker: ${it.message}") }
     }
@@ -825,6 +849,7 @@ object Porthole {
     private const val RES_PORT = "porthole_port"
     private const val RES_RING_CAPACITY = "porthole_ring_capacity"
     private const val RES_STRICT_MODE = "porthole_strict_mode"
+    private const val RES_LEGACY_TCP_PORT = "porthole_legacy_tcp_port"
 }
 
 /**

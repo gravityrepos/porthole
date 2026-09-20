@@ -746,20 +746,28 @@ describe("package mismatch", () => {
 // ---------------------------------------------------------------------------
 
 describe("notConnectedMessage's checklist", () => {
-  it("gains the two new numbered cases, beside the three it already had", () => {
+  it("no longer names 'another Porthole app holding the port' — GRA-199 made that structurally impossible", () => {
     // No socket needed: notConnectedMessage() is pure prose over `host`,
     // `port` and `lastError`, reachable in the default "disconnected" state
     // a fresh, unstarted client is already in.
     const client = new DeviceClient("127.0.0.1", 8677);
     const message = client.notConnectedMessage();
 
-    expect(message).toContain("another Porthole app");
-    expect(message).toMatch(/port\.set/);
+    // The GRA-196/197 step this ticket deletes outright, not renumbers: a
+    // second Porthole app can no longer hold the on-device endpoint at all,
+    // since each app now binds its own abstract socket keyed by package.
+    expect(message).not.toContain("another Porthole app");
+    expect(message).not.toMatch(/port\.set/);
+    // The remaining manual step (only one left: the adb-transport ambiguity
+    // neither porthole_status nor porthole_connect can safely guess at).
     expect(message).toContain("adb transport");
     expect(message).toMatch(/deviceSerial\.set/);
-    // Still the original three, not replaced by the new ones.
+    // Still the original "is it even running" step, not replaced.
     expect(message).toContain("debug build is running");
-    expect(message).toContain("adb forward tcp:PORT tcp:PORT");
+    // GRA-199: the forward target is the abstract socket, not a second copy
+    // of the port.
+    expect(message).toContain("adb forward tcp:PORT localabstract:porthole.<applicationId>");
+    expect(message).not.toContain("adb forward tcp:PORT tcp:PORT");
   });
 
   // GRA-230 QA (on GRA-62/GRA-63): porthole_status/porthole_connect can fix

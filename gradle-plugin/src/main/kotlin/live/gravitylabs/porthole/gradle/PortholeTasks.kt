@@ -22,9 +22,43 @@ import java.util.zip.ZipFile
 import javax.inject.Inject
 
 /**
- * `adb forward tcp:PORT tcp:PORT`, then writes the connection file.
+ * The far end of `adb forward tcp:PORT <target>` (GRA-199).
  *
- * The forward is what makes the device's loopback socket reachable from the
+ * `legacyTcpPort` keeps the pre-GRA-199 shared port, `tcp:PORT` — collision
+ * with another Porthole app and all. Otherwise the target is the
+ * abstract-namespace socket the runtime binds by default,
+ * `localabstract:porthole.<applicationId>`, keyed by package so two Porthole
+ * apps on one device no longer contend for anything on the device side at
+ * all. That requires knowing `applicationId`: an application module gets it
+ * from AGP for free (see [PortholeExtension.applicationId]'s own KDoc), but a
+ * library module, or an application module where AGP's own resolution
+ * somehow came back empty, does not — refusing with a clear fix here is much
+ * better than handing adb a target with a blank suffix, which would forward
+ * to `localabstract:porthole.` and simply never match anything the runtime
+ * binds.
+ *
+ * A free function, tested on its own the same way [adbArgs] is — the shape
+ * that matters here (which target string, for which inputs) does not need a
+ * device, a Project or a Task to prove.
+ */
+internal fun forwardTarget(port: Int, applicationId: String?, legacyTcpPort: Boolean): String {
+    if (legacyTcpPort) return "tcp:$port"
+    val id = applicationId?.takeIf { it.isNotBlank() }
+        ?: throw GradleException(
+            "porthole { applicationId } is not set, so the abstract socket's name " +
+                "(localabstract:porthole.<applicationId>) cannot be built. An application module " +
+                "gets this from AGP automatically; a library module needs `porthole { applicationId.set(\"...\") }`. " +
+                "Forwarding the old shared TCP port instead — not recommended, since it reintroduces the " +
+                "collision GRA-199 removed — is `porthole { legacyTcpPort.set(true) }`.",
+        )
+    return "localabstract:porthole.$id"
+}
+
+/**
+ * `adb forward tcp:PORT <target>` ([forwardTarget]), then writes the
+ * connection file.
+ *
+ * The forward is what makes the device's socket reachable from the
  * workstation, and it is deliberately the only bridge: nothing is exposed on a
  * network interface at any point.
  *
@@ -49,6 +83,20 @@ abstract class PortholeConnectTask : DefaultTask() {
     @get:Input
     @get:Optional
     abstract val applicationId: Property<String>
+
+    /**
+     * See [PortholeExtension.legacyTcpPort]. `@Optional`, not defaulted with
+     * a `.convention(false)` here: this task is also registered directly, by
+     * hand, in tests that predate this property entirely ([McpConfigTest],
+     * [StubAdbFunctionalTest]'s own `connectTask`/`disconnectTask` builders)
+     * and never set it - an unset, non-optional `@Input Property` fails
+     * Gradle's own task validation before the task action ever runs,
+     * regardless of the `getOrElse(false)` every read of this property
+     * already uses.
+     */
+    @get:Input
+    @get:Optional
+    abstract val legacyTcpPort: Property<Boolean>
 
     /**
      * Where the connection file is written. Not an `@OutputFile`.
@@ -77,9 +125,10 @@ abstract class PortholeConnectTask : DefaultTask() {
     @TaskAction
     fun connect() {
         val port = port.get()
+        val target = forwardTarget(port, applicationId.orNull, legacyTcpPort.getOrElse(false))
         val output = ByteArrayOutputStream()
         val result = exec.exec {
-            commandLine(adbArgs(adbExecutable.get(), serial.orNull, "forward", "tcp:$port", "tcp:$port"))
+            commandLine(adbArgs(adbExecutable.get(), serial.orNull, "forward", "tcp:$port", target))
             standardOutput = output
             errorOutput = output
             isIgnoreExitValue = true
@@ -102,12 +151,18 @@ abstract class PortholeConnectTask : DefaultTask() {
                 append("  \"host\": \"127.0.0.1\",\n")
                 append("  \"applicationId\": ").append(quote(applicationId.orNull)).append(",\n")
                 append("  \"deviceSerial\": ").append(quote(serial.orNull)).append(",\n")
+                // GRA-199: what the forward actually points at, so the MCP
+                // server (or anyone else reading this file) can tell a
+                // `localabstract:porthole.<id>` forward from the legacy
+                // `tcp:<port>` one without re-deriving it from applicationId
+                // and legacyTcpPort itself.
+                append("  \"target\": ").append(quote(target)).append(",\n")
                 append("  \"protocol\": 1\n")
                 append("}\n")
             },
         )
 
-        logger.lifecycle("[porthole] forwarded 127.0.0.1:$port to the device")
+        logger.lifecycle("[porthole] forwarded 127.0.0.1:$port to $target")
         logger.lifecycle("[porthole] connection file: ${file.absolutePath}")
     }
 
@@ -281,6 +336,20 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
     abstract val mcpCommand: ListProperty<String>
 
     /**
+     * See [PortholeExtension.legacyTcpPort]. `@Optional`, not defaulted with
+     * a `.convention(false)` here: this task is also registered directly, by
+     * hand, in tests that predate this property entirely ([McpConfigTest],
+     * [StubAdbFunctionalTest]'s own `connectTask`/`disconnectTask` builders)
+     * and never set it - an unset, non-optional `@Input Property` fails
+     * Gradle's own task validation before the task action ever runs,
+     * regardless of the `getOrElse(false)` every read of this property
+     * already uses.
+     */
+    @get:Input
+    @get:Optional
+    abstract val legacyTcpPort: Property<Boolean>
+
+    /**
      * Deliberately not an `@OutputFile`. It lives in the source tree, not the
      * build directory, and letting Gradle treat it as task output would invite
      * `clean` to delete a file the project owns.
@@ -315,6 +384,10 @@ abstract class PortholeMcpConfigTask : DefaultTask() {
         // check" rather than as an empty string to compare against, so an
         // unset applicationId must omit the key, not write it blank.
         applicationId.orNull?.let { env["PORTHOLE_APPLICATION_ID"] = it }
+        // GRA-199: only written when true, same reasoning again — the server
+        // treats "on the old shared TCP port" as something that has to be
+        // said explicitly, not the ordinary case an absent key could mean.
+        if (legacyTcpPort.getOrElse(false)) env["PORTHOLE_LEGACY_TCP_PORT"] = "1"
 
         val override = mcpCommand.get()
         val command: String
@@ -717,6 +790,24 @@ abstract class PortholeUiTask : DefaultTask() {
     @get:Input
     abstract val overrideCommand: ListProperty<String>
 
+    @get:Input
+    @get:Optional
+    abstract val applicationId: Property<String>
+
+    /**
+     * See [PortholeExtension.legacyTcpPort]. `@Optional`, not defaulted with
+     * a `.convention(false)` here: this task is also registered directly, by
+     * hand, in tests that predate this property entirely ([McpConfigTest],
+     * [StubAdbFunctionalTest]'s own `connectTask`/`disconnectTask` builders)
+     * and never set it - an unset, non-optional `@Input Property` fails
+     * Gradle's own task validation before the task action ever runs,
+     * regardless of the `getOrElse(false)` every read of this property
+     * already uses.
+     */
+    @get:Input
+    @get:Optional
+    abstract val legacyTcpPort: Property<Boolean>
+
     @TaskAction
     fun run() {
         val launcher = overrideCommand.get().ifEmpty {
@@ -738,6 +829,18 @@ abstract class PortholeUiTask : DefaultTask() {
                 add("--serial")
                 add(it)
             }
+            // GRA-199: `porthole ui` does its own `adb forward` (see cli.ts),
+            // and since GRA-199 that forward's target is the abstract socket
+            // named for `applicationId`, not a second copy of `port` — the
+            // plugin is the one place that already knows `applicationId`
+            // (GRA-197), so it is passed through rather than asking the CLI
+            // to rediscover it from an environment variable that a plain
+            // `portholeUi` invocation has no reason to have set.
+            applicationId.orNull?.let {
+                add("--application-id")
+                add(it)
+            }
+            if (legacyTcpPort.getOrElse(false)) add("--legacy-tcp-port")
         }
 
         logger.lifecycle("[porthole] starting the timeline UI; ctrl-c to stop")

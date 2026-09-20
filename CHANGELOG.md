@@ -109,6 +109,30 @@ PR that makes the change, not after the fact.
 
 ### Changed
 
+- Every Porthole app on a device now binds its own on-device endpoint instead
+  of contending for one shared loopback TCP port: the runtime listens by
+  default on an Android abstract-namespace Unix socket named
+  `porthole.<applicationId>`, unique per app by construction, and
+  `portholeConnect`/`portholeUi`/the MCP server's own `porthole_status`/
+  `porthole_connect` forward `tcp:<port>` (still a plain host-side port,
+  still configurable with `porthole { port.set(...) }`) to
+  `localabstract:porthole.<applicationId>` rather than to a second copy of
+  the port. Two debug apps with the plugin applied can now run, and be
+  watched by their own MCP servers, on one device at the same time — the
+  collision GRA-196/197 made loud is now structurally impossible rather than
+  merely diagnosed. The wire protocol is unchanged (`PROTOCOL_VERSION`
+  stays `1`): only the socket carrying it moved.
+  **Migrating**: nothing to do if you only ever used the plugin's own tasks
+  — `portholeConnect`, `portholeUi`, `portholeStart` — or the MCP server
+  through the `.mcp.json` `portholeMcpConfig` generates; both regenerate the
+  new target automatically. Anyone forwarding `adb forward tcp:<port>
+  tcp:<port>` **by hand**, outside the plugin, needs to update that to
+  `adb forward tcp:<port> localabstract:porthole.<applicationId>`, or set
+  `porthole { legacyTcpPort.set(true) }` (and `PORTHOLE_LEGACY_TCP_PORT=1`
+  for a hand-started MCP server) to keep the old shared TCP bind for one
+  release while updating whatever forwards by hand — that flag is planned
+  for removal, since it reintroduces the collision this change removes
+  (GRA-199).
 - The landing page's `<title>`, meta description and Open Graph tags now
   name the terms an Android developer with this problem would actually
   search — MCP, Perfetto, recompositions, frames, main-thread stalls,

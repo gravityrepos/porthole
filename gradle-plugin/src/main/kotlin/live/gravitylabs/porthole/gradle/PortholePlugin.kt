@@ -36,6 +36,7 @@ class PortholePlugin : Plugin<Project> {
             mcpCommand.convention(emptyList())
             enabled.convention(true)
             strictMode.convention(false)
+            legacyTcpPort.convention(false)
         }
 
         var configured = false
@@ -93,6 +94,7 @@ class PortholePlugin : Plugin<Project> {
             port.set(extension.port)
             serial.set(extension.deviceSerial)
             applicationId.set(extension.applicationId)
+            legacyTcpPort.set(extension.legacyTcpPort)
             connectionFile.set(connectionPath)
         }
 
@@ -112,6 +114,8 @@ class PortholePlugin : Plugin<Project> {
             serial.set(extension.deviceSerial)
             packageVersion.set(extension.uiPackageVersion)
             overrideCommand.set(extension.uiCommand)
+            applicationId.set(extension.applicationId)
+            legacyTcpPort.set(extension.legacyTcpPort)
         }
 
         project.tasks.register<PortholeTraceProcessorTask>("portholeTraceProcessor") {
@@ -133,6 +137,7 @@ class PortholePlugin : Plugin<Project> {
             // AAR resolve to.
             packageVersion.set(extension.uiPackageVersion)
             mcpCommand.set(extension.mcpCommand)
+            legacyTcpPort.set(extension.legacyTcpPort)
             // The root of the build, which is where an MCP client looks.
             configFile.set(project.rootProject.layout.projectDirectory.file(".mcp.json"))
             overwrite.set(
