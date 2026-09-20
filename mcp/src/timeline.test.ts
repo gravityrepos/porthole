@@ -42,7 +42,10 @@ vi.mock("./adb.js", async () => {
   const actual = await vi.importActual<typeof import("./adb.js")>("./adb.js");
   return {
     ...actual,
-    restartApp: vi.fn(() => ({ ok: true, output: "restarted" })),
+    // GRA-233: timeline.ts's restart route now awaits restartAppAsync (the
+    // sync restartApp this used to mock is gone — see adb.ts) so this is
+    // the seam to stub instead, same reasoning as before.
+    restartAppAsync: vi.fn(async () => ({ ok: true, output: "restarted", launchState: null, totalTimeMs: null })),
   };
 });
 

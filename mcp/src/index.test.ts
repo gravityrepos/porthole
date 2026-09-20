@@ -2347,6 +2347,14 @@ if (a[0] === "shell" && a[1] === "am" && a[2] === "force-stop") {
   logOrder("force-stop");
   process.exit(0);
 }
+// GRA-233: resolve-activity is never configured to succeed in this file's
+// own fixture — every restart/launch this preload drives falls back to
+// monkey, the same as before this ticket, so the "force-stop"/"launch"
+// ordering these tests already pin stays exactly as it was.
+if (a[0] === "shell" && a[1] === "cmd" && a[2] === "package" && a[3] === "resolve-activity") {
+  process.stderr.write("No activity found\\n");
+  process.exit(1);
+}
 if (a[0] === "shell" && a[1] === "monkey") {
   logOrder("launch");
   // GRA-186 self-check (a): PORTHOLE_TEST_MONKEY_FAIL simulates the
@@ -2356,8 +2364,26 @@ if (a[0] === "shell" && a[1] === "monkey") {
     process.stderr.write("No activities found to run, monkey aborted.\\n");
     process.exit(1);
   }
+  // GRA-233: touches the same marker directory waitForCaptureToStart's own
+  // marker uses, so the pidof handler below can honestly answer "is it up"
+  // instead of every restart/launch in this file needing its own opt-in.
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  if (markerDir) fs.writeFileSync(path.join(markerDir, "app-running"), "1");
   process.stdout.write("Events injected: 1\\n");
   process.exit(0);
+}
+// GRA-233: restartAppAsync/launchAppAsync poll this after the launch step —
+// "up" exactly when the monkey handler above most recently marked it so,
+// never unconditionally, so the monkey-fails self-check still sees no
+// process and reports the real failure.
+if (a[0] === "shell" && a[1] === "pidof") {
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  const markerFile = markerDir ? path.join(markerDir, "app-running") : null;
+  if (markerFile && fs.existsSync(markerFile)) {
+    process.stdout.write("12345\\n");
+    process.exit(0);
+  }
+  process.exit(1);
 }
 process.stderr.write("fake-adb: unhandled args " + JSON.stringify(a) + "\\n");
 process.exit(17);

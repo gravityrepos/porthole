@@ -1,6 +1,6 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { restartApp, resolveProjectRoot } from "./adb.js";
+import { restartAppAsync, resolveProjectRoot } from "./adb.js";
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { readdirSync, statSync } from "node:fs";
@@ -697,7 +697,10 @@ export class TimelineServer {
             res.end(JSON.stringify({ ok: false, output }));
             return;
           }
-          const result = restartApp(packageName, this.serial);
+          // GRA-233: awaited now that `restartApp`'s sync spawnSync version
+          // is gone — this handler already awaits `askTrace` above it, so
+          // there is nothing earlier that this could jump ahead of.
+          const result = await restartAppAsync(packageName, { serial: this.serial });
           res.writeHead(result.ok ? 200 : 502, { "content-type": "application/json" });
           res.end(JSON.stringify(result));
           return;

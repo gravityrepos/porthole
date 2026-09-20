@@ -355,6 +355,12 @@ Two things worth knowing before you run it:
   launches or restarts anything on its own; when the fix needs that (not
   installed, a release build, installed but not running), it names
   `porthole_connect`, a second tool that can act on the app under test.
+  `restart`/`launch` judge success by the app's process actually coming up
+  (`pidof`, polled for a couple of seconds), not by what the launcher
+  printed — a noisy or silent-looking launch is not read as a failure. When
+  it can resolve the launcher activity directly, it launches through `am
+  start -W` rather than `monkey`, and the result's payload carries that
+  call's own `launchState` (`COLD`/`WARM`/`HOT`) and `totalTimeMs` (GRA-233).
 - **If nothing responds once "connected", something is holding the *host*
   port** — the only place a collision can still happen since GRA-199.
   `portholeConnect`'s `adb forward` succeeds whether or not anything else on

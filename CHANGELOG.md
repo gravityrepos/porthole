@@ -371,6 +371,21 @@ PR that makes the change, not after the fact.
   now permits cleartext for `localhost`/`127.0.0.1` only, wired in via
   `sample/src/debug/AndroidManifest.xml` so release carries no
   `networkSecurityConfig` and is unaffected (GRA-236).
+- `porthole_connect`'s `restart`/`launch` and the timeline UI's own restart
+  button judged whether the app came back up by grepping `monkey`'s own
+  stdout for its "Events injected" line — on an API 36 image `monkey -p
+  <pkg> -c android.intent.category.LAUNCHER 1` prints debug noise instead
+  and never reliably prints that line, so a relaunch that plainly worked
+  still reported failure. Success is now judged by the process actually
+  being up afterwards (`pidof`, polled for up to ~2s), never mind what the
+  launcher printed; the launcher itself is now `adb shell cmd package
+  resolve-activity` followed by `am start -W -n <pkg>/<activity>` (stable
+  `Status:`/`LaunchState:`/`TotalTime:` output, reported in
+  `porthole_connect`'s own payload for GRA-60's startup work to use), with
+  `monkey` kept only as the fallback for when resolve-activity names no
+  launcher activity at all. The timeline UI's restart button now shares
+  this exact code path (`restartAppAsync`) rather than a separate sync copy
+  (GRA-233).
 
 ## [0.2.2] - 2026-09-16
 

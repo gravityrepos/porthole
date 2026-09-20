@@ -537,65 +537,192 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
 }
 
 /**
- * The `am force-stop` / launcher-intent pair both `restartApp` and
- * `restartAppAsync` send, and the one honest way to tell whether the second
- * half actually launched anything.
+ * GRA-233: on an API 36 image, `monkey -p <pkg> -c
+ * android.intent.category.LAUNCHER 1` prints debug noise to stdout and does
+ * not reliably print "Events injected" even after a launch that plainly
+ * worked — `finishRestart`'s old check (this function's predecessor) read
+ * that absence as failure, so `porthole_connect { restart: true }` and
+ * `{ launch: true }` reported failure right after a working relaunch, and
+ * the timeline UI's restart button (which shares this code path) did too.
  *
- * monkey reports success on stdout even when it launched nothing, so the
- * absence of its "Events injected" line — not its exit code — is the signal
- * that there was no launcher activity to hit.
+ * The fix stops trusting anything the launcher printed. `am start -W -n
+ * <pkg>/<activity>` against a resolved launcher activity replaces `monkey`
+ * as the primary way to launch (stable `Status:`/`LaunchState:`/`TotalTime:`
+ * output, not a human-input simulator's log), and success is judged solely
+ * by whether `packageName`'s process is actually up afterwards — polled with
+ * `pidof` for up to [LAUNCH_PID_POLL_TIMEOUT_MS] — regardless of what the
+ * launcher itself said. `monkey` survives only as the fallback for when
+ * `resolve-activity` cannot name a launcher activity at all.
  */
-function finishRestart(packageName: string, started: AdbResult): AdbResult {
-  if (!started.ok) return started;
-  if (!started.output.includes("Events injected")) {
-    return {
-      ok: false,
-      output: started.output || `No launcher activity found for ${packageName}.`,
-    };
-  }
-  return { ok: true, output: `restarted ${packageName}` };
+const LAUNCH_PID_POLL_TIMEOUT_MS = 2_000;
+const LAUNCH_PID_POLL_INTERVAL_MS = 200;
+
+/**
+ * `adb shell cmd package resolve-activity --brief -c
+ * android.intent.category.LAUNCHER <packageName>`'s last non-blank line,
+ * when it names a component. `--brief` still prints preamble ahead of the
+ * answer on some API levels, so this reads the last line rather than the
+ * first; "No activity found" and similar human-readable failures never take
+ * the `pkg/Class` shape a real component does, which is what tells the two
+ * apart without matching the failure text itself (a wording that has no
+ * reason to be stable across Android versions).
+ */
+export function parseResolvedActivity(output: string): string | null {
+  const lines = output
+    .split(/\r\n|\n|\r/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (!last) return null;
+  // Exactly one "/", with something on both sides of it and no whitespace —
+  // "pkg/.Activity" and "pkg/full.Class.Name" both match; "No activity
+  // found" and "priority=... match=..." lines do not.
+  return /^[^\s/]+\/[^\s/]+$/.test(last) ? last : null;
+}
+
+async function resolveLauncherActivity(packageName: string, options: RunAdbAsyncOptions): Promise<string | null> {
+  const result = await runAdbAsync(
+    ["shell", "cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", packageName],
+    options,
+  );
+  // A failed adb call (no such shell command on an old API level, adb itself
+  // wedged, ...) is exactly as "nothing to resolve" as an empty answer:
+  // either way there is no component to hand `am start -W`, and `monkey` is
+  // the fallback for both.
+  if (!result.ok) return null;
+  return parseResolvedActivity(result.output);
 }
 
 /**
- * Stop the app and start it again.
+ * `am start -W -n <packageName>/<activity>`'s three stable fields —
+ * confirmed against a real API 36 device, unlike anything `monkey` prints.
+ * `ok` mirrors `Status: ok`, but is not this function's last word on
+ * success: [launchApp] below judges that by `pidof`, not by this.
+ */
+export interface AmStartInfo {
+  ok: boolean;
+  launchState: string | null;
+  totalTimeMs: number | null;
+}
+
+export function parseAmStart(output: string): AmStartInfo {
+  const status = output.match(/^Status:\s*(\S+)/m)?.[1] ?? null;
+  const launchState = output.match(/^LaunchState:\s*(\S+)/m)?.[1] ?? null;
+  const totalTimeMatch = output.match(/^TotalTime:\s*(\d+)/m);
+  return {
+    ok: status === "ok",
+    launchState,
+    totalTimeMs: totalTimeMatch ? Number(totalTimeMatch[1]) : null,
+  };
+}
+
+/** `adb shell pidof <packageName>` reads as running the same way `devices.ts`'s `checkInstalledApp` already does — any digit in its output. */
+async function isProcessUp(packageName: string, options: RunAdbAsyncOptions): Promise<boolean> {
+  const result = await runAdbAsync(["shell", "pidof", packageName], options);
+  return result.ok && /\d/.test(result.output.trim());
+}
+
+/**
+ * Polls `pidof` until `packageName` is up or `timeoutMs` runs out — the one
+ * honest signal a launch actually worked, since GRA-233 exists precisely
+ * because the launcher's own stdout is not one on every API level.
+ */
+async function waitForProcessUp(
+  packageName: string,
+  options: RunAdbAsyncOptions,
+  timeoutMs = LAUNCH_PID_POLL_TIMEOUT_MS,
+  intervalMs = LAUNCH_PID_POLL_INTERVAL_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await isProcessUp(packageName, options)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+}
+
+export interface LaunchResult extends AdbResult {
+  /** `am start -W`'s LaunchState, or null when that path never ran (monkey fallback, or the call failed outright). */
+  launchState: string | null;
+  /** `am start -W`'s TotalTime in ms, same conditions as `launchState`. */
+  totalTimeMs: number | null;
+}
+
+export interface LaunchOptions extends RunAdbAsyncOptions {
+  /** Overrides [LAUNCH_PID_POLL_TIMEOUT_MS] — a test-only knob so a case that proves out the "process never appears" failure does not have to spend the full production timeout doing it. */
+  pidPollTimeoutMs?: number;
+  /** Overrides [LAUNCH_PID_POLL_INTERVAL_MS]. */
+  pidPollIntervalMs?: number;
+}
+
+/**
+ * The actual "make `packageName` come up" step, shared by `restartAppAsync`
+ * (after its own force-stop) and `launchAppAsync` (which has none) — the one
+ * place this ticket's fix lives, so the two callers, and the timeline UI's
+ * restart button behind `restartAppAsync`, cannot drift apart on how success
+ * is judged.
+ */
+async function launchApp(packageName: string, options: LaunchOptions): Promise<LaunchResult> {
+  const activity = await resolveLauncherActivity(packageName, options);
+
+  let launchOutput: AdbResult;
+  let launchState: string | null = null;
+  let totalTimeMs: number | null = null;
+
+  if (activity) {
+    launchOutput = await runAdbAsync(["shell", "am", "start", "-W", "-n", activity], options);
+    if (launchOutput.ok) {
+      const info = parseAmStart(launchOutput.output);
+      launchState = info.launchState;
+      totalTimeMs = info.totalTimeMs;
+    }
+  } else {
+    // Fallback: resolve-activity named nothing, so ask monkey to find and
+    // tap a launcher intent blind — exactly what this always did before
+    // GRA-233, kept only for the devices/API levels that leave it as the
+    // only option.
+    launchOutput = await runAdbAsync(
+      ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
+      options,
+    );
+  }
+
+  // The one check that matters: is the process actually up, never mind what
+  // the launcher printed. A launch call that itself failed to run (adb
+  // error) still gets this poll — an unrelated process already running
+  // under this package name, or a slow-but-successful launch whose adb
+  // invocation merely timed out, are both real "yes" answers this would
+  // otherwise miss.
+  const up = await waitForProcessUp(packageName, options, options.pidPollTimeoutMs, options.pidPollIntervalMs);
+  if (up) {
+    return { ok: true, output: `${packageName} is running`, launchState, totalTimeMs };
+  }
+  return {
+    ok: false,
+    output: launchOutput.output || `No launcher activity found for ${packageName}.`,
+    launchState,
+    totalTimeMs,
+  };
+}
+
+/**
+ * Stop the app and start it again — the async version and the only one:
+ * GRA-186 already moved this off `spawnSync` so a mid-capture restart would
+ * not freeze the event loop, and GRA-233's `pidof` poll (via [launchApp])
+ * would have made a synchronous version block it for up to
+ * [LAUNCH_PID_POLL_TIMEOUT_MS] on top of that. The timeline UI's own restart
+ * button (`timeline.ts`) now awaits this directly instead of a separate sync
+ * copy, so it and `porthole_connect { restart: true }` are, by construction,
+ * the same code path GRA-233 set out to fix.
  *
  * Driven from this side rather than from inside the app: a process cannot
  * reliably restart itself, and asking it to try is how you end up with a
  * half-dead process that no longer answers the socket.
  */
-export function restartApp(packageName: string, serial?: string): AdbResult {
-  const stopped = runAdb(["shell", "am", "force-stop", packageName], serial);
-  if (!stopped.ok) return stopped;
-
-  const started = runAdb(
-    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
-    serial,
-  );
-  return finishRestart(packageName, started);
-}
-
-/**
- * `restartApp`'s async twin, spawned with `runAdbAsync` instead of
- * `runAdb`'s blocking `spawnSync`.
- *
- * GRA-186: `capture_system_trace` restarts the app it is tracing partway
- * through an already-running recording (see `index.ts`), so it cannot use
- * the sync version without freezing the event loop for as long as the
- * force-stop/relaunch pair takes — exactly the problem GRA-89 already fixed
- * for the recording, pull and cleanup calls in the same tool. This shares
- * `finishRestart`'s arg-building result and "Events injected" check with the
- * sync version rather than re-deriving them, so the two can only drift by a
- * change that touches both call sites.
- */
-export async function restartAppAsync(packageName: string, options: RunAdbAsyncOptions = {}): Promise<AdbResult> {
+export async function restartAppAsync(packageName: string, options: LaunchOptions = {}): Promise<LaunchResult> {
   const stopped = await runAdbAsync(["shell", "am", "force-stop", packageName], options);
-  if (!stopped.ok) return stopped;
-
-  const started = await runAdbAsync(
-    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
-    options,
-  );
-  return finishRestart(packageName, started);
+  if (!stopped.ok) return { ...stopped, launchState: null, totalTimeMs: null };
+  return launchApp(packageName, options);
 }
 
 /**
@@ -603,14 +730,10 @@ export async function restartAppAsync(packageName: string, options: RunAdbAsyncO
  * "installed but not running" case — launching an app that is not running
  * needs no force-stop first, and sending one anyway is not merely redundant:
  * `am force-stop` on a process that is not there is harmless, but it also
- * means this could never be told apart from `restartApp` in a test that only
- * watches which adb calls ran. Shares `finishRestart`'s "Events injected"
- * check with both restart functions rather than re-deriving it a third time.
+ * means this could never be told apart from `restartAppAsync` in a test that
+ * only watches which adb calls ran. Shares [launchApp] with `restartAppAsync`
+ * rather than re-deriving its resolve/launch/poll sequence a second time.
  */
-export async function launchAppAsync(packageName: string, options: RunAdbAsyncOptions = {}): Promise<AdbResult> {
-  const started = await runAdbAsync(
-    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
-    options,
-  );
-  return finishRestart(packageName, started);
+export async function launchAppAsync(packageName: string, options: LaunchOptions = {}): Promise<LaunchResult> {
+  return launchApp(packageName, options);
 }
