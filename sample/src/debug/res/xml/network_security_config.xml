@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GRA-236: API 36's default network security policy refuses cleartext even to
+  loopback, so the sample's in-process MockWebServer (CartApi.kt, plain
+  http://localhost) makes OkHttp throw UnknownServiceException on the very
+  first request — the app hard-crashes the moment "Add" is pressed. This
+  config permits cleartext for localhost/127.0.0.1 only, and only in debug
+  (see sample/src/debug/AndroidManifest.xml); release carries no
+  networkSecurityConfig and keeps the platform default.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
