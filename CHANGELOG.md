@@ -380,6 +380,16 @@ PR that makes the change, not after the fact.
   `java.io.File`, via a shared `canonicalPathOf` test helper, rather than
   comparing raw `absolutePath`s across that boundary or loosening the
   comparison to `endsWith` (GRA-223).
+- `./gradlew check` (and `test`) discarded the whole configuration cache
+  entry on every run: `buildSrcTest`'s `doLast { exec { ... } }` called
+  `Project.exec` and a script-defined `gradlewCommand()` function from
+  inside its action, which implicitly captured this build script itself —
+  a type the configuration cache cannot serialize at all, regardless of
+  `notCompatibleWithConfigurationCache`. `buildSrcTest` is now a real `Exec`
+  task whose `commandLine` is resolved once, at configuration time, into a
+  plain `List<String>`; nothing of the script is left for the action to
+  close over. `./gradlew check` now stores a clean configuration cache
+  entry with zero problems and the next run reuses it (GRA-227).
 
 ## [0.2.2] - 2026-09-16
 

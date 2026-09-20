@@ -122,13 +122,25 @@ fun gradlewCommand(vararg args: String): List<String> {
 // So `test`/`check` fork a fresh process for `-p buildSrc test`, the same
 // structural move `release` already makes for `-p gradle-plugin` and for the
 // same reason: nothing else reaches across the build boundary.
-val buildSrcTest = tasks.register("buildSrcTest") {
+//
+// Registered as `Exec`, not an ad-hoc task with `doLast { exec { ... } } `
+// (GRA-227): that `exec` is the `Project.exec` extension, and `gradlewCommand`
+// is a function defined in this very script, so calling either one from
+// inside a `doLast` lambda implicitly captures this build script object in
+// the task's action — and the configuration cache cannot serialize a script
+// object reference at all, so every `check` discarded the whole configuration
+// cache entry with "cannot serialize Gradle script object references",
+// `notCompatibleWithConfigurationCache` notwithstanding: that annotation
+// tolerates a task whose *problems* are downgraded, not one whose action
+// closes over something the cache format has no representation for. `Exec`'s
+// own `commandLine` is resolved once, right here, at configuration time —
+// gradlewCommand(...) still runs, but its result is a plain `List<String>`
+// handed to a real task input, with nothing of the script itself captured
+// into anything that has to survive past configuration.
+val buildSrcTest = tasks.register<Exec>("buildSrcTest") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
     description = "Runs buildSrc's tests (the release-tasks changelog parser and gates) via a fresh process."
-    notCompatibleWithConfigurationCache(
-        "shells out to a fresh gradlew process for buildSrc, which this build's task graph cannot depend on directly",
-    )
-    doLast { exec { commandLine(gradlewCommand("-p", "buildSrc", "test", "--rerun-tasks")) } }
+    commandLine(gradlewCommand("-p", "buildSrc", "test", "--rerun-tasks"))
 }
 tasks.named("test") { dependsOn(buildSrcTest) }
 tasks.named("check") { dependsOn(buildSrcTest) }
