@@ -38,6 +38,8 @@ dist/moment.js
 dist/moment.js.map
 dist/perfetto.js
 dist/perfetto.js.map
+dist/render.js
+dist/render.js.map
 dist/report.js
 dist/report.js.map
 dist/ring.js
@@ -79,6 +81,7 @@ src/eventKinds.ts
 src/index.ts
 src/moment.ts
 src/perfetto.ts
+src/render.ts
 src/report.ts
 src/ring.ts
 src/save.ts
