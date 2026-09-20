@@ -1114,7 +1114,12 @@ describe("porthole_connect", () => {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
       },
-      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { exitCode: 1 },
+      // GRA-233: sequenced — checkInstalledApp's own pre-launch check reads
+      // "not running" first; no resolve-activity response is configured
+      // above, so launchAppAsync falls back to monkey and then judges
+      // success by polling pidof again afterwards, which this second entry
+      // answers "running".
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [{ exitCode: 1 }, { stdout: "12345\n" }],
       [fakeAdbArgsKey([
         "-s",
         "A1",

@@ -27,7 +27,7 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
-import { askTrace, findTraceProcessor, questionsDescription } from "./perfetto.js";
+import { askTrace, checkTracePath, findTraceProcessor, questionsDescription } from "./perfetto.js";
 import { reconcileStartupWithTrace } from "./startup.js";
 import { captureArgs, countPortholeLabels, describeCapture, planCapture } from "./systrace.js";
 import { MEASURED_OVERHEAD, RingController } from "./ring.js";
@@ -1397,11 +1397,24 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       if (restart) {
         const result = await restartAppAsync(targetPackage, { ...adbOptions, serial: chosenSerial });
+        // GRA-233: launchState/totalTimeMs come from `am start -W`'s own
+        // stable output, when the launch went through the resolved-activity
+        // path rather than the monkey fallback — present here (both on
+        // success and on a report-anyway failure) so GRA-60's startup work
+        // can use them without a second round trip.
         return result.ok
           ? ok(
               `Restarted ${targetPackage} on ${chosenSerial}. Expect a new session on the next ` +
                 "porthole_status call.",
-              { serial: chosenSerial, forward, packageName: targetPackage, ...info, restarted: true },
+              {
+                serial: chosenSerial,
+                forward,
+                packageName: targetPackage,
+                ...info,
+                restarted: true,
+                launchState: result.launchState,
+                totalTimeMs: result.totalTimeMs,
+              },
             )
           : ok(`Could not restart ${targetPackage}: ${result.output}`, {
               serial: chosenSerial,
@@ -1409,6 +1422,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               packageName: targetPackage,
               ...info,
               restarted: false,
+              launchState: result.launchState,
+              totalTimeMs: result.totalTimeMs,
             });
       }
 
@@ -1422,6 +1437,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
                 packageName: targetPackage,
                 ...info,
                 launched: true,
+                launchState: result.launchState,
+                totalTimeMs: result.totalTimeMs,
               })
             : ok(`Could not launch ${targetPackage}: ${result.output}`, {
                 serial: chosenSerial,
@@ -1429,6 +1446,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
                 packageName: targetPackage,
                 ...info,
                 launched: false,
+                launchState: result.launchState,
+                totalTimeMs: result.totalTimeMs,
               });
         }
         return ok(
@@ -2030,6 +2049,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // `fromBootMs` that `timeline.ts` already builds for its own `askTrace`
       // call.
       const toUptimeMs = (bootNs: number) => fromBootMs(events, bootNs / 1e6)?.at ?? null;
+
+      // GRA-234: stat `trace` before spending a trace_processor invocation
+      // trying to load it. Without this, a bad path (typo, a trace already
+      // cleaned up, one copied from the wrong session) reached askTrace()
+      // anyway, where every one of QUESTIONS failed to load it independently
+      // and came back unanswered — "8 question(s) failed" instead of the one
+      // sentence a caller actually needed. `asked`/`unanswered`/`findings`
+      // all come back empty here, not populated and then discarded, so nothing
+      // downstream reads a phantom result off a file that was never opened.
+      const traceCheck = checkTracePath(trace);
+      if (!traceCheck.ok) {
+        return ok(traceCheck.message!, {
+          trace,
+          app,
+          window: { from: span.from, to: span.to, sleepMs: bootTo.sleepMs },
+          asked: [],
+          skipped: [],
+          wallTimeMs: {},
+          unanswered: [],
+          findings: [],
+        });
+      }
 
       const {
         findings: traceFindings,

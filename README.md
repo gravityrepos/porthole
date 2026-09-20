@@ -355,6 +355,12 @@ Two things worth knowing before you run it:
   launches or restarts anything on its own; when the fix needs that (not
   installed, a release build, installed but not running), it names
   `porthole_connect`, a second tool that can act on the app under test.
+  `restart`/`launch` judge success by the app's process actually coming up
+  (`pidof`, polled for a couple of seconds), not by what the launcher
+  printed — a noisy or silent-looking launch is not read as a failure. When
+  it can resolve the launcher activity directly, it launches through `am
+  start -W` rather than `monkey`, and the result's payload carries that
+  call's own `launchState` (`COLD`/`WARM`/`HOT`) and `totalTimeMs` (GRA-233).
 - **If nothing responds once "connected", something is holding the *host*
   port** — the only place a collision can still happen since GRA-199.
   `portholeConnect`'s `adb forward` succeeds whether or not anything else on
@@ -1529,6 +1535,18 @@ failure this surface exists to avoid. What it is for is ruling causes out —
 CPU starvation, blocked I/O, the runtime compiling its own bytecode in the
 background — and answering yes to one of those means the app's own work was
 never the whole story.
+
+`trace` is stat'd before any of that runs. A path that does not exist or
+cannot be read is reported in one plain sentence naming it — not by putting
+all eight questions through `trace_processor_shell` anyway and reporting
+every one of them "unanswered" for the same underlying reason. When a
+similarly named file exists under the same directory (typically
+`.porthole/traces/`, where `capture_system_trace` and
+`system_trace_snapshot` both write) the message names it too — the closest
+basename match, or the newest `.pftrace` file there when nothing matches —
+as a likely fix. `asked`, `skipped`, `unanswered` and `findings` all come
+back empty in this case, not populated with a result from a file that was
+never actually opened (GRA-234).
 
 An `ask` parameter narrows which of the eight actually run, by id — omit it
 and every question runs, same as before this parameter existed. The result

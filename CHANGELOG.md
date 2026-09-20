@@ -438,6 +438,32 @@ PR that makes the change, not after the fact.
   plain `List<String>`; nothing of the script is left for the action to
   close over. `./gradlew check` now stores a clean configuration cache
   entry with zero problems and the next run reuses it (GRA-227).
+- `porthole_connect`'s `restart`/`launch` and the timeline UI's own restart
+  button judged whether the app came back up by grepping `monkey`'s own
+  stdout for its "Events injected" line — on an API 36 image `monkey -p
+  <pkg> -c android.intent.category.LAUNCHER 1` prints debug noise instead
+  and never reliably prints that line, so a relaunch that plainly worked
+  still reported failure. Success is now judged by the process actually
+  being up afterwards (`pidof`, polled for up to ~2s), never mind what the
+  launcher printed; the launcher itself is now `adb shell cmd package
+  resolve-activity` followed by `am start -W -n <pkg>/<activity>` (stable
+  `Status:`/`LaunchState:`/`TotalTime:` output, reported in
+  `porthole_connect`'s own payload for GRA-60's startup work to use), with
+  `monkey` kept only as the fallback for when resolve-activity names no
+  launcher activity at all. The timeline UI's restart button now shares
+  this exact code path (`restartAppAsync`) rather than a separate sync copy
+  (GRA-233).
+- `ask_system_trace` on a trace path that does not exist (a typo, a trace
+  already cleaned up, one copied from the wrong session) reached
+  `trace_processor_shell` anyway, where every one of its eight questions
+  failed to load the file independently and came back "unanswered" —
+  reported as "8 question(s) failed" instead of the one true sentence. The
+  path is now stat'd before anything tries to load it: a missing or
+  unreadable file is reported in one plain sentence naming it, with the
+  nearest same-prefix (or, failing that, newest) `.pftrace` file under the
+  same directory suggested when one exists, and `asked`/`skipped`/
+  `unanswered`/`findings` all come back empty rather than populated with a
+  ghost result (GRA-234).
 
 ## [0.2.2] - 2026-09-16
 
