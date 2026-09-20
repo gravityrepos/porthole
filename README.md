@@ -1632,13 +1632,11 @@ one to `/((?!api(?:/|$)).*)` — every path except `/api` and anything under it
 future `site/trace/index.html`, say) inherits the strict policy automatically
 instead of falling through to the catch-all header block, which carries no
 `Content-Security-Policy` at all. The reference keeps its own, looser policy
-on `/api/:path*`. The two `source` patterns are mutually exclusive by
+on `/api/(.*)`. The two `source` patterns are mutually exclusive by
 construction — Vercel merges the headers of every rule whose `source`
 matches a request, so a path caught by both would collect two
 `Content-Security-Policy` headers, which is worse than either policy alone.
-`/api/:path*` still misses the bare `/api` directory itself, same as before;
-the new landing-page pattern excludes that path rather than reclaiming it,
-so the directory's existing CSP gap is unchanged, not widened.
+`/api/(.*)` matches the directory index `/api/` as well as every page under it — the earlier `/api/:path*` form did not, so `/api/` was served with no policy at all, which the preview for GRA-129 showed; the landing-page pattern excludes both `/api` and `/api/` by construction.
 
 `cleanUrls` is deliberately off. It strips `.html` and redirects, and the
 reference is fifty-eight pages that link to each other by `.html` — every
@@ -2043,16 +2041,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**1555 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**1804 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 461 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 453
-passed, 0 failed, 8 skipped), 800 in the MCP server (`cd mcp && npm test` —
-797 passed, 0 failed, 3 skipped), and 294 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 294 passed, 0 failed, 0
+[Testing](#testing)): 550 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 542
+passed, 0 failed, 8 skipped), 955 in the MCP server (`cd mcp && npm test` —
+952 passed, 0 failed, 3 skipped), and 299 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 299 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 1555 disagrees with the sum of the three suites' totals stated
+XML, and when 1804 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
