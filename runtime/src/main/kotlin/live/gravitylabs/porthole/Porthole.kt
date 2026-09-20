@@ -229,7 +229,7 @@ object Porthole {
             // `integrationEntries()`.
             val strictMode = if (strictModeFromResources(app)) {
                 StrictModeCollector(ring, appPackages).also { collector ->
-                    val ok = collector.install(app)
+                    val ok = collector.install()
                     if (ok) {
                         collectors += "strictmode"
                         Setup.recordStrictMode(

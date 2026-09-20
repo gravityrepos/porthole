@@ -1275,9 +1275,9 @@ and the frames it cost are the same event seen twice.
 `db-on-main-thread` above only ever sees Room and SQLDelight going through the
 support layer. Android's own `StrictMode` sees the whole class of the same
 mistake — disk on main, network on main, a leaked cursor or closeable,
-unbuffered I/O, an untagged socket — from any source, because the platform
-itself is the one watching. Opt in and it becomes findings instead of a
-logcat line and a dialog nobody reads:
+unbuffered I/O — from any source, because the platform itself is the one
+watching. Opt in and it becomes findings instead of a logcat line and a
+dialog nobody reads:
 
 ```kotlin
 porthole {
@@ -1294,17 +1294,22 @@ policy was already in effect — not chains onto it — and the `setup` tool
 says so plainly, in exactly those terms, rather than claiming a cooperation
 `StrictMode`'s API cannot actually support.
 
-**The default check set leaves out `detectDiskReads()`.** It is the single
-noisiest check `StrictMode` has — a `SharedPreferences` read on `Context`
-creation trips it before an app's own code has even run — and
-`db-on-main-thread` already covers the read that matters categorically, with
-the SQL and the stack. Everything else reasonable to enable by default is on:
-disk writes and network on the main thread, leaked SQLite cursors and
-closeables, unbuffered I/O, untagged sockets, file-URI exposure, cleartext
-network, and (API 31+) unsafe intent launches. `penaltyDeath` is never
-installed, on either policy, ever — that is the one penalty this feature will
-not add to your app's behaviour. Non-SDK API detection is intentionally not
-part of this at all.
+**The default check set leaves out `detectDiskReads()` and `detectUntaggedSockets()`.**
+`detectDiskReads()` is the single noisiest check `StrictMode` has — a
+`SharedPreferences` read on `Context` creation trips it before an app's own
+code has even run — and `db-on-main-thread` already covers the read that
+matters categorically, with the SQL and the stack. `detectUntaggedSockets()`
+fires on essentially every networking app's ordinary startup (an untagged
+socket from a plain OkHttp connection pool is nothing the app did wrong) and
+names no fix an agent can make in this loop — the fix is
+`TrafficStats.setThreadStatsTag()` around traffic accounting this project has
+no opinion about, not a code change at the flagged call site. Everything else
+reasonable to enable by default is on: disk writes and network on the main
+thread, leaked SQLite cursors and closeables, unbuffered I/O, file-URI
+exposure, cleartext network, and (API 31+) unsafe intent launches.
+`penaltyDeath` is never installed, on either policy, ever — that is the one
+penalty this feature will not add to your app's behaviour. Non-SDK API
+detection is intentionally not part of this at all.
 
 **A violation only becomes a finding when the app's own code is in it.** A
 violation whose stack contains no frame from the app's own package — the
@@ -1318,14 +1323,18 @@ test against.
 categorical finding here is ranked: main-thread disk writes and network calls
 are `error`, leaked closeables and SQLite cursors are `warning`, everything
 else is `note`. A call site that keeps violating — a scrolling list doing a
-disk write per row, say — is reported once immediately and then again only
-every 50th repeat, each update carrying the true running count: a flood at
-one call site becomes a handful of events with an accurate total, never one
-event per violation.
+disk write per row, say — reports its first hit immediately, then the exact,
+current count at most once a second while it keeps happening: a background
+scheduler, not a per-violation check, is what puts the update on the wire,
+so a site that goes quiet still gets one final, accurate count rather than
+sitting on a stale one for the rest of the session. A burst becomes a
+handful of events with the true running count, never one event per
+violation and never a number that stopped moving early.
 
 Needs API 28 (`penaltyListener`, which hands the violation over as an object
 instead of a log line). Below that, `strictMode.set(true)` installs nothing
 at all — no log-scraping fallback — and the `setup` tool says why.
+
 ## Startup
 
 Every other collector attaches after the process is already up, so none of
