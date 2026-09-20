@@ -39,6 +39,19 @@ PR that makes the change, not after the fact.
   exact one-liner README.md already documents for OkHttp, Ktor, Room,
   SQLDelight and Navigation, as a constant kept in sync with README.md by
   test, never a snippet reconstructed from a grep of the project (GRA-65).
+- `porthole watch`: a blocking CLI client, independent of any running MCP
+  server, that streams findings as they occur and prints one line — severity,
+  title, the window on the device uptime clock, and the resolved `where`
+  when `PORTHOLE_PROJECT_ROOT` is set — the instant one crosses a severity
+  threshold (`--severity error` by default). `--until-first` exits 1 with
+  the finding already on stdout; `--json` prints one finding object per
+  line for a hook to parse, with every diagnostic on stderr only; `--timeout
+  <seconds>` gives up with exit 3 rather than waiting forever. Never exits
+  merely because the app disconnects — it reconnects on its own, the same as
+  `porthole ui`. Shares `watermark.ts`'s on-disk `lastReportedErrorT` with
+  the MCP surface's own "since your last call" banner, keyed by the same
+  session identity, so a `watch` and an agent on one session never
+  double-report the same error (GRA-56).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

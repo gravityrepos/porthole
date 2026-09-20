@@ -368,6 +368,45 @@ setInterval(() => {
 }, 2600);
 
 // ---------------------------------------------------------------------------
+// main-thread stalls
+//
+// GRA-56: `porthole watch` needs something to actually catch during a live,
+// no-emulator check, and until now nothing here ever emitted a `blocked`
+// event at all. Two ways to get one: a rare, modest stall on its own timer,
+// so a `watch` left running for a while sees one without anyone touching
+// this process — and, for a deterministic check instead of waiting on a
+// random timer, typing `stall` (optionally `stall <ms>`, e.g. `stall 6240`)
+// on this process's own stdin fires one immediately.
+// ---------------------------------------------------------------------------
+
+const STALL_TOP = "com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:146)";
+const DEFAULT_ON_DEMAND_STALL_MS = 6_240;
+
+function emitStall(durationMs) {
+  emit("blocked", {
+    durationMs,
+    top: STALL_TOP,
+    stack: `${STALL_TOP}\ncom.example.shop.ui.CartScreenKt.CartScreen(CartScreen.kt:58)`,
+  });
+}
+
+// Background texture, not the main way to exercise `watch` — see the stdin
+// trigger below for one on demand.
+setInterval(() => emitStall(150 + Math.floor(Math.random() * 250)), 45_000);
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  for (const line of chunk.split("\n")) {
+    const command = line.trim();
+    if (!command.startsWith("stall")) continue;
+    const requested = Number(command.slice("stall".length).trim());
+    const durationMs = Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_ON_DEMAND_STALL_MS;
+    emitStall(durationMs);
+    console.log(`stalled the main thread for ${durationMs}ms`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // navigation
 // ---------------------------------------------------------------------------
 
@@ -532,4 +571,7 @@ net
     socket.on("close", () => clients.delete(socket));
     socket.on("error", () => clients.delete(socket));
   })
-  .listen(PORT, "127.0.0.1", () => console.log(`mock device on 127.0.0.1:${PORT}`));
+  .listen(PORT, "127.0.0.1", () => {
+    console.log(`mock device on 127.0.0.1:${PORT}`);
+    console.log('type "stall" (or "stall <ms>") + Enter to block the main thread on demand');
+  });

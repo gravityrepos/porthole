@@ -56,6 +56,8 @@ dist/timeline.js
 dist/timeline.js.map
 dist/trace.js
 dist/trace.js.map
+dist/watch.js
+dist/watch.js.map
 dist/watermark.js
 dist/watermark.js.map
 package.json
@@ -80,6 +82,7 @@ src/system.ts
 src/systrace.ts
 src/timeline.ts
 src/trace.ts
+src/watch.ts
 src/watermark.ts
 ui/dist/assets/index-*.css
 ui/dist/assets/index-*.js

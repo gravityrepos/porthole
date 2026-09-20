@@ -33,5 +33,6 @@ export const RIG_FILES = [
   "src/setup.test.ts",
   "src/surface.test.ts",
   "src/timeline.test.ts",
+  "src/watch.test.ts",
   "src/watermark.test.ts",
 ] as const;
