@@ -194,6 +194,35 @@ private fun LeakyRow(item: CartItem, tick: Int, onBump: () -> Unit, highlight: R
     }
 }
 
+/**
+ * GRA-69 QA (AC3): a dedicated child, not folded into [RowBody] directly,
+ * because [RowBody] itself already reads `tick` unscoped (the *other*,
+ * pre-existing bug this sample demonstrates — see the README's "Animate
+ * totals" walkthrough) and so recomposes 60 times a second for a reason
+ * that has nothing to do with `highlight` at all. Measuring `Cart.ItemRow`'s
+ * own count to prove GRA-69's join would be measuring `tick`'s effect, not
+ * `highlight`'s — exactly the flaw QA's own AC3 caught (the count barely
+ * moved, in either direction, after stabilising `RowHighlight`, because it
+ * was never what was driving it).
+ *
+ * `Cart.ItemHighlight` is the isolated fixture instead: its *only*
+ * parameter is `highlight`, the same single, `remember`ed instance on every
+ * one of `RowBody`'s own 60fps recompositions (never a fresh object — only
+ * its `var` field mutates, and only on a tap). A skippable composable would
+ * skip almost every one of those calls, since the one parameter it has
+ * never actually changes identity; `highlight`'s own instability is what
+ * makes that skip impossible. Stabilising [RowHighlight] is therefore the
+ * one change that drops this composable's own recomposition count to
+ * (near) zero, independent of `tick`, with nothing about the event stream
+ * itself different — the fixture-driven proof `trace.test.ts` pins, and
+ * the live one this ticket's QA pass closed by hand against an emulator.
+ */
+@Composable
+private fun HighlightBadge(highlight: RowHighlight) {
+    val recentlyTapped = System.currentTimeMillis() - highlight.tappedAt < 500
+    Text(if (recentlyTapped) "• " else "", modifier = Modifier.portholeNode("Cart.ItemHighlight"))
+}
+
 @Composable
 private fun ScopedRow(item: CartItem, tick: () -> Int, onBump: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().portholeNode("Cart.ItemRowScoped")) {
@@ -218,11 +247,8 @@ private fun RowBody(item: CartItem, tick: Int, onBump: () -> Unit, highlight: Ro
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Read every recomposition, same as pulse(tick) below — evaluating a
-        // `var` on an unstable holder is exactly the runtime shape the
-        // compiler's own "not skippable" verdict on this parameter is about.
-        val recentlyTapped = System.currentTimeMillis() - highlight.tappedAt < 500
-        Text((if (recentlyTapped) "• " else "") + "${item.name} x${item.qty}")
+        HighlightBadge(highlight)
+        Text("${item.name} x${item.qty}")
         Text(pulse(tick))
         Button(onClick = onBump) { Text("+") }
     }

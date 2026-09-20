@@ -57,25 +57,40 @@ import { whereForName, type Where } from "./sources.js";
  * `whereForName` resolves to exactly one file (GRA-201's own "never guess"
  * rule already refuses ambiguity there) *and* the nearest preceding `fun`
  * line is unambiguous *and* that function's simple name appears in exactly
- * one loaded report's `composables` list, narrowed by package when more
- * than one candidate shares a name (same package-narrowing discipline
- * `sources.ts` already applies — see `narrowToOne` below). Every other
- * outcome — the label does not resolve, no `fun` line precedes it, the
- * name is not in any report, the name is in more than one report and
- * narrowing does not land on exactly one — is `matched: false`, with a
- * `reason` and, where there is more than one thing it could have been, the
- * `candidates` themselves. Nothing here ever guesses: an unmatched node
- * says so, in those words, rather than picking the alphabetically-first
- * same-named function and being wrong under everyone's nose.
+ * one loaded report's `composables` list — narrowed by the resolved
+ * declaration's own package **every time that package is known**, not only
+ * once there are two or more same-named candidates (QA's own B1 fix: a
+ * *single* same-named candidate drawn from the wrong module's report is not
+ * an unambiguous match, it is the only wrong answer on offer — the
+ * realistic multi-module shape where just one module has ever run
+ * `portholeComposeReport` — same package-narrowing discipline `sources.ts`
+ * already applies, see `narrowToOne` below). Every other outcome — the
+ * label does not resolve, no `fun` line precedes it, the name is not in any
+ * report, or the name is in one or more reports but none of them is in the
+ * declaration's own package (or the package could not be determined and
+ * more than one candidate exists) — is `matched: false`, with a `reason`
+ * and, whenever there was at least one same-named thing it could have been,
+ * the `candidates` themselves (module, package, and a `(param: Type, ...)`
+ * signature, so two same-module overloads are distinguishable too). Nothing
+ * here ever guesses: an unmatched node says so, in those words, rather than
+ * picking the alphabetically-first same-named function and being wrong
+ * under everyone's nose.
  *
- * **Staleness.** A report is only ever joined against when its own
- * `sourceFingerprint` (written by `PortholeComposeReportTask` — see that
- * file's KDoc, "Staleness", for exactly what it hashes and why) matches a
- * fingerprint recomputed, the same way, over the live tree right now. A
- * report built five minutes ago against source that has since changed is
- * refused, not joined — see [staleness] — because a join against code that
- * no longer exists is worse than no join at all: it would name a parameter
- * that may have already been fixed.
+ * **Staleness.** A report is only ever used to *explain* a finding when its
+ * own `sourceFingerprint` (written by `PortholeComposeReportTask` — see
+ * that file's KDoc, "Staleness", for exactly what it hashes and why)
+ * matches a fingerprint recomputed, the same way, over the live tree right
+ * now (cached per module root, same TTL as report discovery below — QA's
+ * own D8 fix, since a naive per-node recompute made a busy `recompositions`
+ * call re-walk the same tree once per node). A report built five minutes
+ * ago against source that has since changed still *matches* — `matched:
+ * true, stale: true` — but is never used to build prose (`explainNotSkippable`/
+ * `explainNotRestartable`/`explainSkippableButUnstable` all refuse a stale
+ * join on their own), because a join against code that no longer exists is
+ * worse than no join at all: it would name a parameter that may have
+ * already been fixed. Callers still say how old it is and against which
+ * commit — see [staleJoinNote] — rather than reading identically to "no
+ * report at all".
  *
  * **Multi-module.** `PORTHOLE_PROJECT_ROOT` is a Gradle root, and a Gradle
  * root can have any number of Android modules, each with its own
@@ -113,6 +128,16 @@ export interface ComposeReportProperty {
   mutable: boolean;
   stable: boolean;
   type: string;
+  /**
+   * The compiler's own word — `"stable"`, `"unstable"`, `"runtime"` or
+   * `"uncertain"` (QA B2, GRA-69). `stable` alone collapses `"runtime"`/
+   * `"uncertain"` (genuinely undetermined — an interface field like
+   * `CartViewModel.dao: CartStore`) into the same bucket as a proven
+   * `"unstable"`, which [stabilityReason] needs to tell apart: it prefers a
+   * property the compiler actually proved unstable as the reason it quotes,
+   * over one it merely could not resolve.
+   */
+  stability: "stable" | "unstable" | "runtime" | "uncertain" | string;
 }
 
 export interface ComposeReportClass {
@@ -244,6 +269,7 @@ export function setComposeReportClockForTests(fn: (() => number) | null): void {
 /** Test-only: forces the next call to re-discover reports rather than reusing a cached list. */
 export function resetComposeReportCacheForTests(): void {
   cached = null;
+  fingerprintCache.clear();
 }
 
 function discoverReports(root: string): ComposeReportFile[] {
@@ -253,6 +279,28 @@ function discoverReports(root: string): ComposeReportFile[] {
     .filter((r): r is ComposeReportFile => r !== null);
   cached = { root, builtAt: clock(), reports };
   return reports;
+}
+
+/**
+ * D8 (QA): `currentSourceFingerprint` walks and hashes every `.kt` file
+ * under a module's `src/` — not cheap on a large module — and `staleness`
+ * used to call it fresh for every single node `recompositions` joins,
+ * unconditionally: N nodes in one module meant the same tree hashed N
+ * times in one tool call for no reason, since nothing about the tree
+ * changes between one node and the next inside a single request. Cached
+ * per `moduleRoot`, same TTL and clock as [discoverReports] above and the
+ * same reasoning: a burst of tool calls seconds apart should reuse one
+ * walk, and an edit is visible again within one TTL window, not "until the
+ * process restarts".
+ */
+const fingerprintCache = new Map<string, { builtAt: number; fingerprint: string }>();
+
+function cachedSourceFingerprint(moduleRoot: string): string {
+  const hit = fingerprintCache.get(moduleRoot);
+  if (hit && clock() - hit.builtAt < CACHE_TTL_MS) return hit.fingerprint;
+  const fingerprint = currentSourceFingerprint(moduleRoot);
+  fingerprintCache.set(moduleRoot, { builtAt: clock(), fingerprint });
+  return fingerprint;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +366,7 @@ export interface Staleness {
 }
 
 export function staleness(report: ComposeReportFile): Staleness {
-  const currentFingerprint = currentSourceFingerprint(report.moduleRoot);
+  const currentFingerprint = cachedSourceFingerprint(report.moduleRoot);
   return {
     stale: currentFingerprint !== report.sourceFingerprint,
     reportFingerprint: report.sourceFingerprint,
@@ -326,6 +374,36 @@ export function staleness(report: ComposeReportFile): Staleness {
     generatedAt: report.generatedAt,
     gitHead: report.gitHead,
   };
+}
+
+/**
+ * `"report from 2026-09-20T04:10:00.000Z at git a1b2c3d"` — the one place
+ * both `trace.ts` and `index.ts` build this clause, so a stale note and a
+ * fresh one never phrase the same two fields two different ways (D6: before
+ * this, `generatedAt`/`gitHead`/`kotlinVersion` were parsed off every report
+ * and then never actually read by either caller). `gitHead` is shortened to
+ * the 7-character form everyone already recognises; absent entirely — not
+ * `"at git null"` — when the report was generated outside a git checkout
+ * (`resolveGitHead`'s own null case, ComposeReportTask.kt).
+ */
+export function reportProvenanceNote(report: ComposeReportFile): string {
+  const at = report.generatedAt || "an unknown time";
+  const head = report.gitHead ? ` at git ${report.gitHead.slice(0, 7)}` : "";
+  return `report from ${at}${head}`;
+}
+
+/**
+ * D6: what a stale join is described as — never the report's own
+ * `skippable` reading (a stale report's verdict may no longer be true of
+ * the current source at all), only that a report exists, how old it is, and
+ * that it no longer matches. [explainNotSkippable]/[explainSkippableButUnstable]
+ * refuse to run against a stale join on their own (both take
+ * `ComposeJoin & { matched: true }` but are only ever called by `trace.ts`/
+ * `index.ts` when `!join.stale`); this is the sentence that goes in place
+ * of whatever they would have said.
+ */
+export function staleJoinNote(report: ComposeReportFile): string {
+  return `${reportProvenanceNote(report)}, sources have changed since — not used for a reason.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,18 +457,37 @@ interface Candidate {
   composable: ComposeReportComposable;
 }
 
+/** `(item: CartItem, tick: Int)` — enough to tell two same-name, same-package overloads apart in a candidate list, which a bare module+package cannot. */
+function signatureOf(composable: ComposeReportComposable): string {
+  return `(${composable.parameters.map((p) => `${p.name}: ${p.type}`).join(", ")})`;
+}
+
+function toCandidateInfo(c: Candidate): { module: string; packageName: string | null; signature: string } {
+  return { module: c.report.module, packageName: c.composable.packageName, signature: signatureOf(c.composable) };
+}
+
 /**
  * Same "narrow or refuse, never guess" rule `sources.ts`'s own
- * `narrowByPackage` follows: filters to the candidates declared under
- * `packageName` (when known) and returns the single survivor, or `null` on
- * zero or more than one — the caller falls back to reporting every
- * *unfiltered* candidate as ambiguous, exactly as `sources.ts` does.
+ * `narrowByPackage` follows — with one correction QA caught (B1): the
+ * package check has to run *every* time the declaration's own package is
+ * known, not only once there are two or more candidates. A single
+ * same-named candidate drawn from a report that happens to belong to a
+ * *different* module is not "unambiguous", it is "the only wrong answer
+ * available" — the realistic multi-module shape where only the app module
+ * has ever run `portholeComposeReport` and a library module's own
+ * same-named composable (never reported) would otherwise silently borrow
+ * the app's parameter list. So: whenever `packageName` (the resolved
+ * declaration's own package) is known, every candidate — one or many — must
+ * match it, full stop; only when it is genuinely unknown (an unparseable or
+ * default-package file) does a lone candidate get the benefit of the doubt,
+ * since there is nothing left to check it against.
  */
 function narrowToOne(candidates: Candidate[], packageName: string | null): Candidate | null {
-  if (candidates.length === 1) return candidates[0];
-  if (!packageName) return null;
-  const filtered = candidates.filter((c) => c.composable.packageName === packageName);
-  return filtered.length === 1 ? filtered[0] : null;
+  if (packageName) {
+    const filtered = candidates.filter((c) => c.composable.packageName === packageName);
+    return filtered.length === 1 ? filtered[0] : null;
+  }
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 export type ComposeJoinReason =
@@ -421,8 +518,18 @@ export type ComposeJoin =
   | {
       matched: false;
       reason: ComposeJoinReason;
-      /** Every same-named composable this could have been, when there was more than one — present only for the two "more than one" reasons. */
-      candidates?: Array<{ module: string; packageName: string | null }>;
+      /**
+       * Every same-named composable this could have been — present for
+       * `"no report entry matched"` too now (B1), not only the "more than
+       * one" reason: a single candidate refused for being in the wrong
+       * package is exactly the case a caller needs `candidates` for, to say
+       * which package it actually found. Each entry's `signature` is what
+       * tells two same-module, same-package overloads apart, which module
+       * and package alone cannot.
+       */
+      candidates?: Array<{ module: string; packageName: string | null; signature: string }>;
+      /** The resolved declaration's own package, when `packageOfFile` found one — what every `candidates` entry above was checked against. */
+      declarationPackage?: string | null;
       where?: Where;
     };
 
@@ -467,10 +574,17 @@ export function joinComposableNode(nodeName: string): ComposeJoin {
   const packageName = packageOfFile(root, where.path);
   const chosen = narrowToOne(candidates, packageName);
   if (!chosen) {
+    // B1: this is reached for a single wrong-package candidate exactly as
+    // much as for two or more genuinely ambiguous ones — see
+    // `narrowToOne`'s own comment. `candidates.length` is what tells the
+    // two apart in the reason code; either way, every candidate actually
+    // found (never filtered down before this point) rides along so the
+    // caller can say which package(s) it actually found the name in.
     return {
       matched: false,
-      reason: "matched more than one report entry",
-      candidates: candidates.map((c) => ({ module: c.report.module, packageName: c.composable.packageName })),
+      reason: candidates.length === 1 ? "no report entry matched" : "matched more than one report entry",
+      candidates: candidates.map(toCandidateInfo),
+      declarationPackage: packageName,
     };
   }
 
@@ -507,60 +621,165 @@ export function joinComposableNode(nodeName: string): ComposeJoin {
  * only part the compiler's own classes list could possibly have an entry
  * for — a container's own unrelated stability is not this parameter's story.
  */
-function findClass(report: ComposeReportFile, type: string): ComposeReportClass | undefined {
-  const bareName = type.split("<")[0].trim();
-  return report.classes.find((c) => c.name === bareName);
+/** `List<CartItem>` -> `List`; `RowHighlight?` -> `RowHighlight` — the bare class name a report's own `classes` list could possibly have an entry for. */
+function bareTypeName(type: string): string {
+  return type.split("<")[0].replace(/\?$/, "").trim();
+}
+
+/** Looks in `primary`'s own classes first, then every other loaded report under the project root — D7 (QA): "owned" is "declared anywhere this project's own `portholeComposeReport` runs have reported", not only the one report `unstable`'s composable happened to come from. */
+function findClassAcrossReports(type: string, primary: ComposeReportFile): ComposeReportClass | undefined {
+  const bareName = bareTypeName(type);
+  const inPrimary = primary.classes.find((c) => c.name === bareName);
+  if (inPrimary) return inPrimary;
+
+  const resolved = resolveProjectRoot();
+  if (resolved.source !== "PORTHOLE_PROJECT_ROOT") return undefined;
+  for (const report of discoverReports(resolved.directory)) {
+    if (report === primary) continue;
+    const found = report.classes.find((c) => c.name === bareName);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** `by mutableStateOf(...)`/`mutableIntStateOf(...)`/etc. compiles a `var x` into exactly this shape — a `$delegate`-suffixed backing property of one of Compose's own observable-state holder types. Mutating through it goes through the snapshot system, which is why the compiler does not count it against the enclosing class's stability the way an ordinary `var` is — see `stabilityReason`'s own doc comment (QA B2). */
+const STATE_DELEGATE_SUFFIX = "$delegate";
+const STATE_HOLDER_TYPE = /^Mutable\w*State\b/;
+
+function isRecognizedStateDelegate(p: ComposeReportProperty): boolean {
+  return p.name.endsWith(STATE_DELEGATE_SUFFIX) && STATE_HOLDER_TYPE.test(p.type);
+}
+
+/** `tick$delegate` -> `tick` — the name a developer actually wrote, not the compiler's own synthetic backing-field name (QA B2: "strip $delegate, and say 'a delegated property' when that is what it is" — the strip half; callers that need to say "delegated" explicitly check `isRecognizedStateDelegate` themselves, since only `stabilityReason`'s own var-branch needs that distinction made in prose). */
+function displayPropertyName(p: ComposeReportProperty): string {
+  return p.name.endsWith(STATE_DELEGATE_SUFFIX) ? p.name.slice(0, -STATE_DELEGATE_SUFFIX.length) : p.name;
 }
 
 /**
- * Why `cls` is unstable, in one clause — a `var` property first (the more
- * actionable, more common reason in a hand-written class: see GRA-69's own
- * `RowHighlight` fixture), an unstable-typed field second (the OkHttpClient/
- * MockWebServer/StateFlow shape — GRA-69's own `CartApi` fixture), or, when
- * neither line is found (a class the compiler marked unstable for a reason
- * this report does not break down further — an open superclass, a captured
- * type parameter), a plain fallback that still names the class rather than
- * inventing a property that is not there.
+ * Why `cls` is unstable, in one clause (QA B2 rewrite). Three tiers, in the
+ * order the compiler's own reasoning actually works:
+ *
+ *  1. A `var` property that is not a recognised Compose state delegate —
+ *     the *mutation itself* is what breaks equality-based skipping,
+ *     independent of whether the compiler separately reports that
+ *     property's own TYPE as stable. This is `RowHighlight`'s own fixture:
+ *     `stable var tappedAt: Long` — `Long` is a stable type, and the class
+ *     is still unstable, because nothing here lets Compose observe a
+ *     reassignment. The bug this replaces picked the *first* `var` found
+ *     regardless of this distinction, which is exactly what made it pick
+ *     `CartViewModel`'s own `lastResponse$delegate: MutableState<String>` —
+ *     a `var`, but a recognised, Compose-observable delegate, and therefore
+ *     never the real cause.
+ *  2. A property the compiler proved `"unstable"` (never merely `"runtime"`
+ *     or `"uncertain"` — genuinely undetermined, not proven — unless
+ *     nothing stronger exists either): `CartViewModel`'s own `api: CartApi`
+ *     is exactly this, and is what should have been named instead of the
+ *     `var` above.
+ *  3. A property whose stability the compiler could not determine at all
+ *     (`"runtime"`/`"uncertain"` — an interface field like `dao: CartStore`,
+ *     whose real stability depends on which implementation shows up at
+ *     runtime), named honestly as undetermined rather than asserted false.
+ *  4. A plain fallback that still names the class rather than inventing a
+ *     property that is not there — a class the compiler marked unstable for
+ *     a reason this report does not break down further (an open superclass,
+ *     a captured type parameter).
  */
 function stabilityReason(cls: ComposeReportClass): string {
-  const mutable = cls.properties.find((p) => p.mutable);
-  if (mutable) return `\`${cls.name}\` is unstable because it has a \`var\` property (\`${mutable.name}\`)`;
-  const unstableField = cls.properties.find((p) => !p.stable);
+  const badVar = cls.properties.find((p) => p.mutable && !isRecognizedStateDelegate(p));
+  if (badVar) {
+    return `\`${cls.name}\` is unstable because it has a \`var\` property (\`${displayPropertyName(badVar)}\`)`;
+  }
+  const unstableField = cls.properties.find((p) => p.stability === "unstable");
   if (unstableField) {
     return (
-      `\`${cls.name}\` is unstable because its \`${unstableField.name}: ${unstableField.type}\` ` +
-      "field is itself unstable"
+      `\`${cls.name}\` is unstable because it has a property of unstable type ` +
+      `\`${unstableField.type}\` (\`${displayPropertyName(unstableField)}\`)`
+    );
+  }
+  const undeterminedField = cls.properties.find((p) => !p.stable);
+  if (undeterminedField) {
+    return (
+      `\`${cls.name}\` is unstable because its \`${displayPropertyName(undeterminedField)}: ` +
+      `${undeterminedField.type}\` field's stability could not be determined at compile time`
     );
   }
   return `\`${cls.name}\` is unstable`;
 }
 
 /**
- * `"LeakyRow is restartable but not skippable: parameter highlight: RowHighlight is unstable. RowHighlight is unstable because it has a var property (tappedAt)."`
+ * D7 (QA): the actionable half — what to actually do about an unstable
+ * parameter, which was silently absent whenever the type was not the app's
+ * own (`List`, an OkHttp/Ktor type — nothing this project's own compose
+ * compiler ever reports on, since it was never compiled by it in this
+ * build). Two different remedies for two different situations: "owned" (the
+ * type shows up in some report generated under this project root — real
+ * source, in reach) can be annotated directly; "foreign" (no report
+ * anywhere mentions it) cannot — the fix there is Compose's own escape
+ * hatch for exactly this, a stability configuration file.
+ */
+function remedyFor(type: string, primary: ComposeReportFile): string {
+  const cls = findClassAcrossReports(type, primary);
+  if (cls) {
+    if (cls.stable) return "";
+    return ` ${stabilityReason(cls)}. Annotate it \`@Immutable\`/\`@Stable\`, or make the property \`val\`.`;
+  }
+  return (
+    ` \`${bareTypeName(type)}\` was not compiled with the Compose compiler in this build; declare it ` +
+    "stable in a stability configuration file (compose compiler `stabilityConfigurationFile`)."
+  );
+}
+
+/**
+ * `"LeakyRow is restartable but not skippable: parameter highlight: RowHighlight is unstable. RowHighlight is unstable because it has a var property (tappedAt). Annotate it @Immutable/@Stable, or make the property val."`
  * — GRA-69's own example (`CartContents`/`items: List<CartItem>`) is the
  * same shape one level up, where `trace.ts` prepends the recomposition
  * count itself: `detail` here is the compiler's own reasoning alone, not
  * the count sentence, so it can be reused verbatim by both `findings` and
  * `recompositions` without either repeating the other's "recomposed N
  * times" clause. Returns `null` when `composable` is in fact skippable
- * (call [explainSkippableButUnstable] instead) or carries no unstable
- * parameter at all (nothing to explain — a composable can be `restartable`
- * and not skippable for a structural reason this report does not break
- * down, e.g. varargs or a context receiver, and inventing an unstable
- * parameter that is not there would be a worse answer than none).
+ * (call [explainSkippableButUnstable] instead), is not restartable at all
+ * (call [explainNotRestartable] instead — QA D1: `restartable: false` means
+ * "always recomposes with its caller", a structurally different, truthful
+ * story from "restartable but the compiler could not make it skip"), or
+ * carries no unstable parameter at all (nothing to explain — a composable
+ * can be `restartable` and not skippable for a structural reason this
+ * report does not break down, e.g. varargs or a context receiver, and
+ * inventing an unstable parameter that is not there would be a worse
+ * answer than none).
  */
 export function explainNotSkippable(join: ComposeJoin & { matched: true }): string | null {
   const { composable, report, enclosingFunction } = join;
   if (composable.skippable) return null;
+  if (!composable.restartable) return null;
   const unstable = composable.parameters.find((p) => !p.stable);
   if (!unstable) return null;
 
-  let sentence =
+  return (
     `\`${enclosingFunction}\` is restartable but not skippable: parameter ` +
-    `\`${unstable.name}: ${unstable.type}\` is unstable.`;
-  const cls = findClass(report, unstable.type);
-  if (cls && !cls.stable) sentence += ` ${stabilityReason(cls)}.`;
-  return sentence;
+    `\`${unstable.name}: ${unstable.type}\` is unstable.` +
+    remedyFor(unstable.type, report)
+  );
+}
+
+/**
+ * D1 (QA): the truthful description for `restartable: false` — `inline`, or
+ * explicitly `@NonRestartableComposable`. A composable that is not
+ * restartable always recomposes together with whatever composed it; asking
+ * whether it is "skippable" does not even apply to it on its own, and
+ * describing it as "restartable but not skippable" (what the code did
+ * before this fix — it only ever checked `!composable.skippable`, never
+ * `composable.restartable`) is not what the compiler said. Never promoted:
+ * this is a structural fact about the composable's shape, not evidence that
+ * stabilising a parameter would change how often it runs.
+ */
+export function explainNotRestartable(join: ComposeJoin & { matched: true }): string | null {
+  const { composable, enclosingFunction } = join;
+  if (composable.restartable) return null;
+  return (
+    `\`${enclosingFunction}\` is not restartable — it always recomposes together with whatever ` +
+    "composed it (inline, or explicitly non-restartable), so being unable to skip on its own is " +
+    "expected, not a defect to fix."
+  );
 }
 
 /**

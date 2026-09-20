@@ -1051,7 +1051,7 @@ on, and `recompositions`/`findings` join a hot node against what it says.
 
 ```
 $ ./gradlew :sample:portholeComposeReport -Pporthole.variant=roomDebug
-[porthole] wrote 6 composable(s), 10 class(es) to sample/build/porthole/compose-report.json
+[porthole] wrote 7 composable(s), 10 class(es) to sample/build/porthole/compose-report.json
 ```
 
 **The task.** `portholeComposeReport` sets `composeCompiler {
@@ -1059,14 +1059,28 @@ reportsDestination }` on the resolved debug variant and forces classic
 (non-strong) skipping for that one recompile — never for the app's real
 build — then parses the compiler's own `*-composables.txt`/`*-classes.txt`
 (plus its `*-composables.csv`, read only for the fully-qualified name the
-`.txt` never carries) into `build/porthole/compose-report.json`. Two
+`.txt` never carries) into `build/porthole/compose-report.json`. A few
 decisions worth knowing before you reach for it:
 
-- **It costs nothing until you ask for it.** The `composeCompiler {}` DSL is
-  only touched when `portholeComposeReport` is actually named on the command
-  line — an ordinary `assembleDebug` or `test` run never enables reports and
-  never pays the extra recompile they cost. There is no separate variant for
-  this; asking for the report is what opts into the cost, once, for that run.
+- **It costs nothing until you ask for it — and it is not free the build
+  after, either.** The `composeCompiler {}` DSL, and the resolved variant's
+  Kotlin compile task's own caching, are only touched once
+  `project.gradle.taskGraph.whenReady` confirms `portholeComposeReport` is
+  actually part of *this* invocation's resolved execution graph — checked
+  against the graph itself, not a string match against the command line, so
+  a Gradle task-name abbreviation (`./gradlew :sample:pCR`) is recognised
+  exactly the same as the full name. An ordinary `assembleDebug` or `test`
+  run never puts the report task in its graph, so it never enables reports
+  and never pays the extra compile they cost. That compile task is also told
+  never to cache or reuse the run that produces a report, since a
+  reports-enabled compile and an ordinary one are otherwise indistinguishable
+  cache entries — which is what actually made the abbreviated form dangerous
+  before this was fixed: it ran the report task anyway, against whatever
+  `.txt` a *previous*, cached compile had left on disk, and stamped it with a
+  fingerprint computed fresh — a stale report that read as current. The
+  honest cost of the real fix: the *next* ordinary build after running
+  `portholeComposeReport` recompiles once more too, since there is nothing
+  left in the cache for it to reuse either.
 - **Strong skipping is forced off for this recompile, on purpose.** Kotlin
   2.1's compose compiler defaults strong skipping to *on*, under which a
   composable with an unstable parameter still reports `skippable: true` — it
@@ -1085,9 +1099,12 @@ rather than mtime (a checkout or a CI cache restore touches mtimes for
 reasons that have nothing to do with whether the code changed). The MCP
 server recomputes the same hash over the live tree before joining against a
 report and **refuses the join outright** when the two disagree, rather than
-joining against a parameter that may already have been fixed — the same
-"say how old, and against which source state" the report's own `generatedAt`
-and `gitHead` fields answer for a human reading it directly.
+joining against a parameter that may already have been fixed. A stale match
+is not discarded silently, though: it still says which composable it would
+have joined, and its own `generatedAt`/`gitHead` — the "say how old, and
+against which source state" a human needs to decide whether to re-run the
+task — but never the report's `skippable` verdict, which may no longer be
+true of the source as it stands.
 
 **What joins, and what does not.** A `recompose` event carries the string
 literal given to `PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`,
@@ -1098,29 +1115,44 @@ resolve the label to `{path, line}`, then reads the nearest `fun` declaration
 at or before that line the same tolerant, one-regex-per-line way `where`
 resolves everything else — never a real parser, and never a guess: a label
 that does not resolve, a function name absent from every loaded report, or a
-same-named function in two modules with no package to narrow by all read as
-unjoined, with the candidates named when there was more than one, rather than
-picking one and being wrong under everyone's nose.
+same-named function whose declared package does not match the label's own
+resolved location all read as unjoined, with every same-named candidate it
+actually found — module, package, parameter signature — named rather than
+picking one and being wrong under everyone's nose. That last case is the
+realistic multi-module shape: only the app module has run
+`portholeComposeReport`, a *different* module owns the composable that
+actually recomposed, and another module's report happens to have an
+unrelated composable of the same simple name — a single candidate is not
+the same thing as an unambiguous one, and the join checks the declaring
+package every time it is known, not only when there is more than one
+candidate to choose between.
 
-`findings` promotes what it finds: a hotspot that joins to a composable the
-compiler marked restartable-but-not-skippable is reported at `warning` —
-above the plain, ordering-only note it used to be — with the reason in the
-compiler's own words:
+`findings` promotes what it finds, into one of four shapes:
 
-> `LeakyRow` recomposed 900 times, and `LeakyRow` is not skippable: parameter
-> `highlight: RowHighlight` is unstable. `RowHighlight` is unstable because
-> it has a `var` property (`tappedAt`).
+| `id` | when | severity |
+| --- | --- | --- |
+| `recompose-not-skippable` | joins to a composable the compiler marked restartable, not skippable, with an unstable parameter | `warning` — promoted above the other three |
+| `recompose-not-restartable` | joins to a composable the compiler never called restartable at all (`inline`, or explicitly `@NonRestartableComposable`) — it always recomposes with its caller, so "skippable" does not apply to it on its own | `note` — a structural fact, never a defect |
+| `recompose-skippable-but-unstable` | joins to a composable the compiler marked skippable, but whose parameter is still unstable — busy, not broken, a different and less urgent problem | `note` |
+| `recompose-hotspot` | does not join at all (no report, no source match, or an unresolved same-name ambiguity) — reads exactly as it did before this ticket | `note` |
 
-A hotspot that joins to a composable the compiler marked skippable, but
-whose parameter is still unstable, is a different, less urgent problem —
-busy, not broken — and is reported as its own kind of finding, at the
-ordinary `note` severity, never promoted above the first case. A hotspot
-that does not join at all — the common case for a project that has never run
-`portholeComposeReport`, or where `PORTHOLE_PROJECT_ROOT` is unset — reads
-exactly as it always has. `recompositions` carries the same join per node,
-not only the busiest one, so an agent asking about a specific composable by
-name gets the compiler's own reasoning even when it is nowhere near the top
-of the count.
+The one that promotes carries the reason in the compiler's own words, plus a
+remedy — different for a type this project's own source declares versus one
+it does not compile at all:
+
+> `Cart.ItemRow` recomposed 900 times, and `LeakyRow` is not skippable:
+> parameter `highlight: RowHighlight` is unstable. `RowHighlight` is
+> unstable because it has a `var` property (`tappedAt`). Annotate it
+> `@Immutable`/`@Stable`, or make the property `val`.
+
+A parameter typed as something this project never compiled with the Compose
+compiler at all — `List`, a networking library's own class — gets the other
+remedy instead: declare it stable in a stability configuration file
+(`composeCompiler { stabilityConfigurationFile }`), since there is no source
+here to annotate. `recompositions` carries the same join per node, not only
+the busiest one, so an agent asking about a specific composable by name gets
+the compiler's own reasoning even when it is nowhere near the top of the
+count.
 
 **Multi-module.** `PORTHOLE_PROJECT_ROOT` is a Gradle root, and a Gradle
 root can have any number of modules with Compose UI, each producing its own
@@ -1128,9 +1160,10 @@ root can have any number of modules with Compose UI, each producing its own
 it. The server finds every one of them under the root — bounded to
 `<module>/build/porthole/`, never recursing further into a `build`
 directory's own output — and joins against the union: a composable declared
-in a library module is exactly as joinable as one in the app module, and a
-same-named composable in two different modules' reports is exactly the
-ambiguous case the join above already refuses to guess between.
+in a library module is exactly as joinable as one in the app module, a type
+declared there is exactly as "owned" (see the remedy above) as one in the
+app module, and a same-named composable in two different modules' reports is
+exactly the ambiguous case the join above already refuses to guess between.
 
 ## Sessions on disk
 

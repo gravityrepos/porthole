@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.gradle
 
+import org.gradle.api.Action
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.execution.TaskExecutionGraph
 import org.gradle.api.provider.Provider
 import org.gradle.kotlin.dsl.register
 import java.io.File
@@ -46,16 +48,6 @@ class PortholePlugin : Plugin<Project> {
             if (configured) return
             configured = true
             wireAndRegister()
-        }
-
-        // GRA-69: isolated in ComposeCompilerWiring for the same reason AGP
-        // types are isolated in AndroidWiring — `org.jetbrains.kotlin.plugin
-        // .compose` is the consumer's own choice to apply, not a dependency
-        // of this plugin. `plugins.withId` fires whenever that plugin is
-        // applied, whether that happens before or after this line, and does
-        // nothing at all on a module that never applies it.
-        target.plugins.withId("org.jetbrains.kotlin.plugin.compose") {
-            ComposeCompilerWiring.configureForReportIfRequested(target)
         }
 
         // Delegated to [AndroidWiring], which is the only class here allowed to
@@ -192,17 +184,41 @@ class PortholePlugin : Plugin<Project> {
      * this is called. `-Pporthole.variant` is the exact same property
      * `portholeStart` already reads for the same ambiguous-variant case
      * (GRA-174), not a second flag to learn.
+     *
+     * D4 (QA, GRA-69): the compiler-report DSL and the resolved compile
+     * task's caching are configured from `project.gradle.taskGraph.whenReady`,
+     * gated on `graph.hasTask(reportTask.get())` — a check against the
+     * *resolved* execution graph, the one place "was this task abbreviation
+     * (`pCR`), this exact name, or a `:project:` path actually resolved to
+     * this task" is already answered for us, correctly, by Gradle itself.
+     * The `startParameter.taskNames` string match this replaced answered a
+     * different, narrower question ("was the literal string
+     * `portholeComposeReport` typed on the command line") and silently said
+     * no to a real, abbreviated invocation — see [ComposeCompilerWiring
+     * .configure]'s own KDoc for the failure mode that produced (a stale
+     * report stamped with a fresh-looking fingerprint).
      */
     private fun registerComposeReportTask(
         project: Project,
         variants: Provider<List<String>>,
         requestedVariant: Provider<String>,
     ) {
-        val reportsDir = File(project.projectDir, ComposeCompilerWiring.REPORTS_DIR)
+        val reportsDir = project.layout.buildDirectory.dir(ComposeCompilerWiring.REPORTS_DIR)
         val resolvedVariant = project.provider {
             resolveComposeReportVariant(variants.get(), requestedVariant.orNull)
         }
-        project.tasks.register<PortholeComposeReportTask>(TASK_NAME) {
+
+        val composablesTxtProvider = resolvedVariant.flatMap { v ->
+            reportsDir.map { it.file("${project.name}_$v-composables.txt") }
+        }
+        val composablesCsvProvider = resolvedVariant.flatMap { v ->
+            reportsDir.map { it.file("${project.name}_$v-composables.csv") }
+        }
+        val classesTxtProvider = resolvedVariant.flatMap { v ->
+            reportsDir.map { it.file("${project.name}_$v-classes.txt") }
+        }
+
+        val reportTask = project.tasks.register<PortholeComposeReportTask>(TASK_NAME) {
             group = GROUP
             description = "Enables the compose compiler's metrics/reports for the debug variant, " +
                 "compiles it, and parses the result into build/porthole/compose-report.json."
@@ -218,35 +234,54 @@ class PortholePlugin : Plugin<Project> {
             kotlinSources.setFrom(
                 project.fileTree(project.projectDir.resolve("src")) { include("**/*.kt") },
             )
-            composablesTxt.set(
-                resolvedVariant.flatMap { v ->
-                    project.layout.file(
-                        project.provider {
-                            File(reportsDir, "${project.name}_$v-composables.txt")
-                        },
-                    )
-                },
-            )
-            composablesCsv.set(
-                resolvedVariant.flatMap { v ->
-                    project.layout.file(
-                        project.provider {
-                            File(reportsDir, "${project.name}_$v-composables.csv")
-                        },
-                    )
-                },
-            )
-            classesTxt.set(
-                resolvedVariant.flatMap { v ->
-                    project.layout.file(
-                        project.provider {
-                            File(reportsDir, "${project.name}_$v-classes.txt")
-                        },
-                    )
-                },
-            )
+            // D5 (QA): these three are `@Internal` on the task itself — see
+            // its own KDoc for why a strict `@InputFile` there made the
+            // "reports were not actually enabled" diagnostic unreachable —
+            // `reportFiles` below is the real, tolerant `@InputFiles` input.
+            composablesTxt.set(composablesTxtProvider)
+            composablesCsv.set(composablesCsvProvider)
+            classesTxt.set(classesTxtProvider)
+            reportFiles.from(composablesTxtProvider, composablesCsvProvider, classesTxtProvider)
             outputFile.set(project.layout.buildDirectory.file("porthole/compose-report.json"))
         }
+
+        // An anonymous Action<TaskExecutionGraph> object, not a bare
+        // trailing lambda or the SAM-constructor call syntax: both of those
+        // resolve wrong here. `TaskExecutionGraph.whenReady` has both a
+        // Groovy `Closure` overload and this `Action` one, and the
+        // kotlin-dsl plugin's SAM-with-receiver support (needed elsewhere
+        // for Gradle's Groovy-shaped DSL) makes a plain Kotlin lambda
+        // resolve to the Closure overload instead of this Action one — a
+        // real compile error, not a style preference. `Action<T> { }`
+        // SAM-constructor syntax fares no better: kotlin-dsl also defines
+        // its own top-level `Action<T>(configuration: T.() -> Unit)` helper
+        // with a *receiver*-style body, and Kotlin prefers that real
+        // function over the interface's implicit SAM constructor, so a
+        // `{ graph -> ... }` body (an explicit parameter, not a receiver)
+        // fails to typecheck against it too. An anonymous `object :
+        // Action<TaskExecutionGraph>` sidesteps every one of those
+        // resolutions — there is only one candidate left to mean.
+        project.gradle.taskGraph.whenReady(object : Action<TaskExecutionGraph> {
+            override fun execute(graph: TaskExecutionGraph) {
+                if (!graph.hasTask(reportTask.get())) return
+                project.plugins.withId("org.jetbrains.kotlin.plugin.compose") {
+                    ComposeCompilerWiring.configure(project)
+                }
+                // `upToDateWhen { false }` + `cacheIf { false }`, not
+                // `doNotTrackState`: see AndroidWiring's own former comment
+                // (now folded in here) — `doNotTrackState` made the Kotlin
+                // compile task fail outright ("Changes are not tracked,
+                // unable determine incremental changes"), because Kotlin's
+                // own incremental compiler expects task-history tracking to
+                // stay available even when Gradle's up-to-date check is
+                // bypassed.
+                val compileTask = project.tasks.findByName(kotlinCompileTaskName(resolvedVariant.get()))
+                if (compileTask != null) {
+                    compileTask.outputs.upToDateWhen { false }
+                    compileTask.outputs.cacheIf { false }
+                }
+            }
+        })
     }
 
     /**

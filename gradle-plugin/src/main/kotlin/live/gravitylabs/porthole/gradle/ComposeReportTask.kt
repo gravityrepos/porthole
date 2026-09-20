@@ -26,19 +26,19 @@ import java.time.Instant
 import javax.inject.Inject
 
 /**
- * True exactly when `portholeComposeReport` — this module's own task
- * instance, since Gradle task names in `startParameter.taskNames` are not
- * project-qualified when run as `./gradlew portholeComposeReport` from the
- * module directory, but are (`:sample:portholeComposeReport`) from the root —
- * is one of the tasks this Gradle invocation actually asked for. Shared by
- * [ComposeCompilerWiring] (gates whether to touch the `composeCompiler {}`
- * DSL at all) and [AndroidWiring] (gates whether to disable the resolved
- * variant's Kotlin compile task's own caching — see that file's own comment
- * for why that second gate has to exist too).
+ * `portholeComposeReport`'s own task name. Whether it was actually
+ * *requested* this invocation is no longer answered by a string match
+ * against this constant (D4, QA GRA-69): an earlier version of this file
+ * had a `composeReportRequested(project): Boolean` here, checking
+ * `project.gradle.startParameter.taskNames` for this literal string — which
+ * a Gradle task-name abbreviation (`./gradlew :sample:pCR`) never satisfies
+ * even though the task genuinely runs, letting the report task parse and
+ * re-fingerprint a *previous* run's stale `.txt` output as though it were
+ * fresh. [PortholePlugin.registerComposeReportTask] now gates on
+ * `project.gradle.taskGraph.whenReady { graph.hasTask(reportTask) }` — a
+ * check against the already-abbreviation-resolved execution graph — instead;
+ * see that function's own KDoc.
  */
-internal fun composeReportRequested(project: Project): Boolean =
-    project.gradle.startParameter.taskNames.any { it == TASK_NAME || it.endsWith(":$TASK_NAME") }
-
 internal const val TASK_NAME = "portholeComposeReport"
 
 /**
@@ -119,16 +119,36 @@ internal fun kotlinCompileTaskName(variant: String): String = "compile" + varian
  */
 abstract class PortholeComposeReportTask : DefaultTask() {
 
-    @get:InputFile
+    /**
+     * D5 (QA): `@Internal`, not `@InputFile` — a strict `@InputFile` makes
+     * Gradle refuse to even start this task when the file does not exist
+     * yet ("file does not exist"), which ran *before* [generate]'s own
+     * "compose-compiler reports were not actually enabled" diagnostic ever
+     * got a chance to — the better error, and the one this task exists to
+     * give, was unreachable. [reportFiles] below is the real tracked input;
+     * these three exist only so [generate] knows which exact paths to read.
+     */
+    @get:Internal
     abstract val composablesTxt: RegularFileProperty
 
-    /** Optional: some future compose-compiler release might stop emitting it. See `ComposeReportParser`'s own KDoc for what it buys when present. */
-    @get:InputFiles
-    @get:Optional
+    @get:Internal
     abstract val composablesCsv: RegularFileProperty
 
-    @get:InputFile
+    @get:Internal
     abstract val classesTxt: RegularFileProperty
+
+    /**
+     * The real `@InputFiles` for [composablesTxt]/[composablesCsv]/
+     * [classesTxt] — a `ConfigurableFileCollection`, which (unlike a
+     * `RegularFileProperty` marked `@InputFile`) does not require any of its
+     * entries to exist. Whatever is actually there gets hashed for
+     * up-to-date purposes; a build where reports were never enabled sees an
+     * empty collection, and this task still runs and gives its own honest
+     * diagnostic rather than Gradle's generic one.
+     */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val reportFiles: ConfigurableFileCollection
 
     @get:Input
     abstract val variant: Property<String>
@@ -222,6 +242,7 @@ abstract class PortholeComposeReportTask : DefaultTask() {
                             "mutable" to p.mutable,
                             "stable" to p.stable,
                             "type" to p.type,
+                            "stability" to p.stability,
                         )
                     },
                 )

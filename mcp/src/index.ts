@@ -57,9 +57,11 @@ import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, de
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
 import {
+  explainNotRestartable,
   explainNotSkippable,
   explainSkippableButUnstable,
   joinComposableNode,
+  staleJoinNote,
   type ComposeJoin,
 } from "./composeReport.js";
 import { captureScreenshot } from "./screenshot.js";
@@ -2642,28 +2644,71 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         joined: true;
         enclosingFunction: string;
         module: string;
+        generatedAt: string;
+        gitHead: string | null;
+        kotlinVersion: string;
+        stale: false;
         skippable: boolean;
-        stale: boolean;
+        restartable: boolean;
         notSkippableReason?: string;
+        notRestartableReason?: string;
         skippableButUnstableReason?: string;
       }
-    | { joined: false; reason: string; candidates?: Array<{ module: string; packageName: string | null }> };
+    | {
+        // D6: a stale match never carries `skippable` — the report's own
+        // verdict may no longer be true of the current source — only that a
+        // report was found, how old it is, and that it disagrees with the
+        // tree right now.
+        joined: true;
+        enclosingFunction: string;
+        module: string;
+        generatedAt: string;
+        gitHead: string | null;
+        kotlinVersion: string;
+        stale: true;
+        staleNote: string;
+      }
+    | {
+        joined: false;
+        reason: string;
+        candidates?: Array<{ module: string; packageName: string | null; signature: string }>;
+        declarationPackage?: string | null;
+      };
 
   function composeReportNodeInfo(nodeName: string): ComposeReportNodeInfo | undefined {
     const join: ComposeJoin = joinComposableNode(nodeName);
     if (join.matched) {
-      return {
-        joined: true,
+      const common = {
         enclosingFunction: join.enclosingFunction,
         module: join.report.module,
+        generatedAt: join.report.generatedAt,
+        gitHead: join.report.gitHead,
+        kotlinVersion: join.report.kotlinVersion,
+      };
+      if (join.stale) {
+        return { ...common, joined: true, stale: true, staleNote: staleJoinNote(join.report) };
+      }
+      const notSkippableReason = explainNotSkippable(join);
+      const notRestartableReason = explainNotRestartable(join);
+      const skippableButUnstableReason = explainSkippableButUnstable(join);
+      return {
+        ...common,
+        joined: true,
+        stale: false,
         skippable: join.composable.skippable,
-        stale: join.stale,
-        ...(!join.stale ? { notSkippableReason: explainNotSkippable(join) ?? undefined } : {}),
-        ...(!join.stale ? { skippableButUnstableReason: explainSkippableButUnstable(join) ?? undefined } : {}),
+        restartable: join.composable.restartable,
+        ...(notSkippableReason ? { notSkippableReason } : {}),
+        ...(notRestartableReason ? { notRestartableReason } : {}),
+        ...(skippableButUnstableReason ? { skippableButUnstableReason } : {}),
       };
     }
     if (join.reason === "no report entry matched" || join.reason === "matched more than one report entry") {
-      return { joined: false, reason: join.reason, ...(join.candidates ? { candidates: join.candidates } : {}) };
+      return {
+        joined: false,
+        reason: join.reason,
+        ...(join.candidates ? { candidates: join.candidates } : {}),
+        ...(join.declarationPackage !== undefined ? { declarationPackage: join.declarationPackage } : {}),
+      };
     }
     return undefined;
   }

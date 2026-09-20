@@ -64,6 +64,20 @@ internal object ComposeReportParser {
         val mutable: Boolean,
         val stable: Boolean,
         val type: String,
+        /**
+         * The compiler's own word — `"stable"`, `"unstable"`, `"runtime"` or
+         * `"uncertain"` — kept alongside [stable] (QA B1 fix, GRA-69):
+         * `stable` alone collapses `"runtime"`/`"uncertain"` into the same
+         * bucket as a proven `"unstable"`, which is fine for "does this
+         * property make the class unstable" but not for explaining *why* —
+         * `mcp/src/composeReport.ts`'s `stabilityReason` needs to prefer a
+         * property the compiler actually proved unstable over one it merely
+         * could not resolve (an interface field, `runtime val dao:
+         * CartStore`), and needs to tell either apart from a `var` whose own
+         * type reads `"stable"` but whose *mutability* is what the compiler
+         * is actually objecting to (`RowHighlight`'s own `tappedAt`).
+         */
+        val stability: String,
     )
 
     data class ClassEntry(
@@ -103,17 +117,56 @@ internal object ComposeReportParser {
      * annotation list, not English prose) and would be a strange thing to
      * defend against at the cost of a brittler regex.
      */
-    private val COMPOSABLE_HEADER = Regex("""^(.*?)fun\s+([A-Za-z_$][\w$.]*)\($""")
+    private val COMPOSABLE_HEADER_OPEN = Regex("""^(.*?)fun\s+([A-Za-z_$][\w$.]*)\($""")
+
+    /**
+     * D3 (QA): a zero-parameter composable is emitted whole on one line —
+     * `restartable skippable fun QaNoArgs()`, no separate parameter block
+     * and no separate closing line at all — which [COMPOSABLE_HEADER_OPEN]
+     * (anchored on a line ending in a bare `(`) never matches, silently
+     * dropping every such entry (measured: 21 real composables in the
+     * fixture's own `.txt`, 20 parsed, before this). Checked first, since a
+     * genuine open header never also ends in `)`.
+     */
+    private val COMPOSABLE_HEADER_EMPTY = Regex("""^(.*?)fun\s+([A-Za-z_$][\w$.]*)\(\)(?::\s*.+)?$""")
 
     /** `  unused unstable items: List<CartItem>` — `unused` is optional, the stability word is not. */
     private val COMPOSABLE_PARAM = Regex("""^\s+(unused\s+)?(stable|unstable|runtime|uncertain)\s+([^:]+):\s*(.+?)\s*$""")
+
+    /**
+     * D2 (QA): a parameter with a default value is rendered
+     * `n: Int = @static 1` or `holder: RowHighlight? = @dynamic RowHighlight()`
+     * — `@static`/`@dynamic` is the compiler's own note on whether the
+     * default expression is a compile-time constant, not part of the type.
+     * `modifier: Modifier = Modifier` is this shape on nearly every real
+     * composable, so leaving it unstripped left the type unusable for
+     * `findClass`'s lookup on the MCP side (`Modifier = Modifier` is never a
+     * class name) on the single most common parameter in any real app.
+     * Splitting on the first literal `" = "` is safe: nothing in a type
+     * string itself contains a bare `=` — that character only ever appears
+     * here as this separator.
+     */
+    private fun stripDefaultValue(typeAndMaybeDefault: String): String = typeAndMaybeDefault.substringBefore(" = ").trim()
 
     private fun parseComposablesTxt(text: String): List<TxtEntry> {
         val lines = text.lines()
         val out = mutableListOf<TxtEntry>()
         var i = 0
         while (i < lines.size) {
-            val header = COMPOSABLE_HEADER.find(lines[i])
+            val emptyHeader = COMPOSABLE_HEADER_EMPTY.find(lines[i])
+            if (emptyHeader != null) {
+                val mods = emptyHeader.groupValues[1]
+                out += TxtEntry(
+                    name = emptyHeader.groupValues[2],
+                    restartable = Regex("""\brestartable\b""").containsMatchIn(mods),
+                    skippable = Regex("""\bskippable\b""").containsMatchIn(mods),
+                    parameters = emptyList(),
+                )
+                i++
+                continue
+            }
+
+            val header = COMPOSABLE_HEADER_OPEN.find(lines[i])
             if (header == null) {
                 i++
                 continue
@@ -130,7 +183,7 @@ internal object ComposeReportParser {
                 COMPOSABLE_PARAM.find(lines[i])?.let { p ->
                     params += Parameter(
                         name = p.groupValues[3].trim(),
-                        type = p.groupValues[4].trim(),
+                        type = stripDefaultValue(p.groupValues[4]),
                         stable = p.groupValues[2] == "stable",
                         unused = p.groupValues[1].isNotBlank(),
                     )
@@ -248,6 +301,7 @@ internal object ComposeReportParser {
                             mutable = p.groupValues[2] == "var",
                             stable = p.groupValues[1] == "stable",
                             type = p.groupValues[4].trim(),
+                            stability = p.groupValues[1],
                         )
                     }
                 }

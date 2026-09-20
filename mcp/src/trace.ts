@@ -7,7 +7,13 @@ import { startupFindingsOf } from "./startup.js";
 // (a lookup, and two prose builders) so this file's own recompose-hotspot
 // block gains a handful of lines rather than a second copy of the join
 // logic — see composeReport.ts's own doc comment for the whole strategy.
-import { explainNotSkippable, explainSkippableButUnstable, joinComposableNode } from "./composeReport.js";
+import {
+  explainNotRestartable,
+  explainNotSkippable,
+  explainSkippableButUnstable,
+  joinComposableNode,
+  staleJoinNote,
+} from "./composeReport.js";
 
 /**
  * Turning a recorded run into something worth reading.
@@ -859,29 +865,58 @@ export function findingsOf(
         : undefined;
 
       // -- GRA-69: join against the compose compiler's own report ---------
-      // `explainNotSkippable`/`explainSkippableButUnstable` are the two
-      // outcomes the ticket asks findings to tell apart; a third — matched
-      // but neither (every parameter stable) or not matched at all — leaves
-      // this finding exactly as it read before this ticket: `id:
-      // "recompose-hotspot"`, `severity: "note"`, the plain ordering detail.
+      // `explainNotSkippable` is the one outcome that promotes; QA (D1)
+      // added `explainNotRestartable` for a shape that used to be
+      // misdescribed as "restartable but not skippable" when it was
+      // neither — an `inline`/`@NonRestartableComposable` composable, which
+      // both report `restartable: false`. `explainSkippableButUnstable` is
+      // the third, still-not-promoted outcome. A fourth possibility — matched
+      // but none of the above (every parameter stable), or not matched at
+      // all — leaves this finding exactly as it read before this ticket:
+      // `id: "recompose-hotspot"`, `severity: "note"`, the plain ordering
+      // detail.
       const join = joinComposableNode(hottest[0]);
       const notSkippable = join.matched && !join.stale ? explainNotSkippable(join) : null;
+      const notRestartable =
+        join.matched && !join.stale && !notSkippable ? explainNotRestartable(join) : null;
       const skippableButUnstable =
-        join.matched && !join.stale && !notSkippable ? explainSkippableButUnstable(join) : null;
+        join.matched && !join.stale && !notSkippable && !notRestartable
+          ? explainSkippableButUnstable(join)
+          : null;
+      // D6: `generatedAt`/`gitHead` ride along either way — "say how old,
+      // and against which source state" applies to a fresh join too, not
+      // only a refused one. A stale join never carries `skippable` at all:
+      // the report's own verdict may no longer be true of the current
+      // source, so the field most likely to be quoted as fact is the one
+      // dropped, not merely left unused.
       const composeReportEvidence = join.matched
-        ? {
-            enclosingFunction: join.enclosingFunction,
-            module: join.report.module,
-            skippable: join.composable.skippable,
-            stale: join.stale,
-          }
+        ? join.stale
+          ? {
+              enclosingFunction: join.enclosingFunction,
+              module: join.report.module,
+              stale: true as const,
+              generatedAt: join.report.generatedAt,
+              gitHead: join.report.gitHead,
+            }
+          : {
+              enclosingFunction: join.enclosingFunction,
+              module: join.report.module,
+              stale: false as const,
+              skippable: join.composable.skippable,
+              restartable: join.composable.restartable,
+              generatedAt: join.report.generatedAt,
+              gitHead: join.report.gitHead,
+            }
         : undefined;
+      const staleNote = join.matched && join.stale ? staleJoinNote(join.report) : null;
       const id = notSkippable
         ? "recompose-not-skippable"
-        : skippableButUnstable
-          ? "recompose-skippable-but-unstable"
-          : "recompose-hotspot";
-      const detail = [orderingDetail, notSkippable ?? skippableButUnstable]
+        : notRestartable
+          ? "recompose-not-restartable"
+          : skippableButUnstable
+            ? "recompose-skippable-but-unstable"
+            : "recompose-hotspot";
+      const detail = [orderingDetail, notSkippable ?? notRestartable ?? skippableButUnstable ?? staleNote]
         .filter((s): s is string => Boolean(s))
         .join(" — ");
       // -- end GRA-69 -------------------------------------------------------

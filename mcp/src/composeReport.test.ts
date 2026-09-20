@@ -9,6 +9,7 @@ import { resetSourceIndexForTests, setClockForTests } from "./sources.js";
 import {
   currentSourceFingerprint,
   enclosingFunctionName,
+  explainNotRestartable,
   explainNotSkippable,
   explainSkippableButUnstable,
   findComposeReportPaths,
@@ -17,6 +18,7 @@ import {
   setComposeReportClockForTests,
   staleness,
   type ComposeJoin,
+  type ComposeReportClass,
   type ComposeReportComposable,
   type ComposeReportFile,
 } from "./composeReport.js";
@@ -154,19 +156,21 @@ describe("currentSourceFingerprint", () => {
    * runs — verified by comparing this function's output, run against this
    * repo's own real `sample/` module, against the fingerprint a real Gradle
    * build actually wrote into `sample/build/porthole/compose-report.json`
-   * (captured 2026-09-20, `git rev-parse HEAD` `b2477c1` plus GRA-69's own
-   * `RowHighlight`/`LeakyRow` edit — see `composeReportFixtures/PROVENANCE.md`
-   * on the Gradle-plugin side for the matching half of this proof). If this
-   * ever goes red on an unrelated PR, the two implementations have drifted —
-   * a real bug, not a fixture that needs a bump — unless `sample/`'s own
-   * `.kt` sources genuinely changed, which is exactly the case this pin
-   * exists to force a human to notice and re-verify against a fresh
-   * `./gradlew :sample:portholeComposeReport` run.
+   * (re-captured for GRA-69's QA pass, `git rev-parse HEAD` `943f68a` plus
+   * this pass's own `HighlightBadge` addition — AC3's isolated fixture for
+   * the live emulator loop, see `Screens.kt`'s own KDoc on it — and the
+   * `stability`/`Property` shape change; see `composeReportFixtures/
+   * PROVENANCE.md` on the Gradle-plugin side for the matching half of this
+   * proof). If this ever goes red on an unrelated PR, the two
+   * implementations have drifted — a real bug, not a fixture that needs a
+   * bump — unless `sample/`'s own `.kt` sources genuinely changed, which is
+   * exactly the case this pin exists to force a human to notice and
+   * re-verify against a fresh `./gradlew :sample:portholeComposeReport` run.
    */
   it("matches the real Gradle-computed fingerprint for this repo's own sample module", () => {
     const sampleRoot = path.join(WORKTREE_ROOT, "sample");
     expect(currentSourceFingerprint(sampleRoot)).toBe(
-      "1bc2ebe0281d8c2b86b1900161605640abe9526aeadc60a15c433893ee091c15",
+      "86a55d9abadb21be06ac2465b49ffbefd3b6ad9f35fa58880280f426ebb2e374",
     );
   });
 });
@@ -326,7 +330,8 @@ describe("joinComposableNode", () => {
     const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
     expect(explanation).toBe(
       "`LeakyRow` is restartable but not skippable: parameter `highlight: RowHighlight` is unstable. " +
-        "`RowHighlight` is unstable because it has a `var` property (`tappedAt`).",
+        "`RowHighlight` is unstable because it has a `var` property (`tappedAt`). Annotate it " +
+        "`@Immutable`/`@Stable`, or make the property `val`.",
     );
     expect(explainSkippableButUnstable(join as ComposeJoin & { matched: true })).toBeNull();
   });
@@ -410,12 +415,16 @@ describe("joinComposableNode", () => {
     expect(join.matched).toBe(false);
     if (join.matched) throw new Error("expected no match");
     expect(join.reason).toBe("matched more than one report entry");
+    // `signature` (B1 nit, QA) is what would tell two same-module,
+    // same-package overloads apart — both zero-parameter here, so both
+    // read "()", but the field is always present.
     expect(join.candidates).toEqual(
       expect.arrayContaining([
-        { module: "app", packageName: "com.a" },
-        { module: "other", packageName: "com.b" },
+        { module: "app", packageName: "com.a", signature: "()" },
+        { module: "other", packageName: "com.b", signature: "()" },
       ]),
     );
+    expect(join.declarationPackage).toBeNull();
   });
 
   it("narrows to one candidate by the resolved file's own package declaration", () => {
@@ -444,6 +453,69 @@ describe("joinComposableNode", () => {
     expect(join.matched).toBe(true);
     if (!join.matched) throw new Error("expected a match");
     expect(join.report.module).toBe("app");
+  });
+
+  it("B1 (QA blocker): a single same-named candidate in the WRONG package is refused, not joined — the realistic multi-module shape where only one module ran the report", () => {
+    // The exact bug: `com.example.feature.ItemRow` is where the label
+    // actually resolves (that module never ran portholeComposeReport —
+    // realistic: only the app module has). `com.example.app`'s own report
+    // happens to have an unrelated `ItemRow` too. Before the fix,
+    // `narrowToOne` returned this single candidate unconditionally the
+    // moment there was only one, never checking its package against the
+    // declaration's own — joining the wrong composable and handing back a
+    // parameter list that does not exist on the one that actually
+    // recomposed. Mutation: delete the `if (packageName)` branch in
+    // `narrowToOne` (restore `if (candidates.length === 1) return
+    // candidates[0]` first) and this test starts asserting `matched: true`
+    // against the wrong module.
+    const root = temporaryRoot();
+    write(
+      root,
+      "feature/src/main/kotlin/com/example/feature/ItemRow.kt",
+      "package com.example.feature\n@Composable\nfun ItemRow() { Modifier.portholeNode(\"Cart.ItemRow\") }\n",
+    );
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        module: "app",
+        composables: [
+          composable({
+            name: "ItemRow",
+            packageName: "com.example.app",
+            skippable: false,
+            parameters: [{ name: "totallyUnrelated", type: "SomethingElse", stable: false, unused: false }],
+          }),
+        ],
+      }),
+    );
+    // Deliberately no report at all under feature/ — that module has never
+    // run portholeComposeReport, which is the whole point of the fixture.
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(false);
+    if (join.matched) throw new Error("expected no match — joining com.example.app's ItemRow would be wrong");
+    expect(join.reason).toBe("no report entry matched");
+    expect(join.declarationPackage).toBe("com.example.feature");
+    expect(join.candidates).toEqual([
+      { module: "app", packageName: "com.example.app", signature: "(totallyUnrelated: SomethingElse)" },
+    ]);
+  });
+
+  it("a single candidate is still accepted when the declaration's own package could not be determined at all", () => {
+    // The narrow half of "when the declaration is known" (QA's own
+    // parenthetical) — no `package` line in this file at all, so there is
+    // nothing to check the one candidate against, and refusing it too would
+    // regress every single-module, default-package project this already
+    // worked for.
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun ItemRow() { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(root, "app", baseReport({ composables: [composable({ name: "ItemRow", packageName: "com.example.app" })] }));
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(true);
   });
 
   it("refuses to join against a stale report rather than joining silently", () => {
@@ -489,5 +561,305 @@ describe("compose-report cache", () => {
     resetSourceIndexForTests(); // the source-name index has its own TTL; only the report cache is under test
     const third = joinComposableNode("Cart.ItemRow");
     expect(third.matched).toBe(true);
+  });
+});
+
+/**
+ * B2 (QA blocker): `CartViewModel`'s own real `classes.txt` block, copied
+ * verbatim from `gradle-plugin/src/test/resources/composeReportFixtures/
+ * sample_roomDebug-classes.txt` — the exact shape that made the old
+ * `stabilityReason` (picks the *first* `var`, full stop) pick
+ * `lastResponse$delegate` — a `stable var` backed by `MutableState<String>`,
+ * a recognised Compose-observable delegate that is never the real cause —
+ * over `api: CartApi`, the field the compiler actually proved unstable.
+ */
+const CART_VIEW_MODEL: ComposeReportClass = {
+  name: "CartViewModel",
+  stable: false,
+  runtimeStability: "Unstable",
+  properties: [
+    { name: "dao", mutable: false, stable: false, stability: "runtime", type: "CartStore" },
+    { name: "api", mutable: false, stable: false, stability: "unstable", type: "CartApi" },
+    { name: "cartId", mutable: false, stable: true, stability: "stable", type: "String" },
+    { name: "lastResponse$delegate", mutable: true, stable: true, stability: "stable", type: "MutableState<String>" },
+    { name: "promoCode$delegate", mutable: true, stable: true, stability: "stable", type: "MutableState<String>" },
+    { name: "tick$delegate", mutable: true, stable: true, stability: "stable", type: "MutableIntState" },
+    { name: "animating$delegate", mutable: true, stable: true, stability: "stable", type: "MutableState<Boolean>" },
+    { name: "scopedReads$delegate", mutable: true, stable: true, stability: "stable", type: "MutableState<Boolean>" },
+    { name: "items", mutable: false, stable: false, stability: "unstable", type: "StateFlow<List<CartItem>>" },
+    { name: "status", mutable: false, stable: false, stability: "unstable", type: "MutableStateFlow<String>" },
+    { name: "statusFlow", mutable: false, stable: false, stability: "unstable", type: "StateFlow<String>" },
+    { name: "ktor", mutable: false, stable: false, stability: "unstable", type: "KtorApi" },
+  ],
+};
+
+describe("B2 (QA blocker): stabilityReason against CartViewModel's real fixture", () => {
+  it("names api: CartApi — a proven-unstable val — never a stable, delegate-backed var", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun Controls(viewModel: CartViewModel) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [
+          composable({
+            name: "Controls",
+            skippable: false,
+            parameters: [{ name: "viewModel", type: "CartViewModel", stable: false, unused: false }],
+          }),
+        ],
+        classes: [CART_VIEW_MODEL],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(true);
+    if (!join.matched) throw new Error("expected a match");
+    const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
+    // Mutation quoted: `cls.properties.find((p) => p.mutable)` in place of
+    // the current `find((p) => p.mutable && !isRecognizedStateDelegate(p))`
+    // is the one-line change that makes this assertion fail — it would pick
+    // `lastResponse$delegate` again and print "has a `var` property
+    // (`lastResponse`)" instead.
+    expect(explanation).toContain("has a property of unstable type `CartApi` (`api`)");
+    expect(explanation).not.toContain("var");
+    expect(explanation).not.toContain("lastResponse");
+    expect(explanation).not.toContain("$delegate");
+  });
+
+  it("prefers a proven-unstable field over one the compiler only calls runtime/uncertain", () => {
+    // Same fixture, every genuinely `"unstable"` field removed (`api`,
+    // `items`, `status`, `statusFlow`, `ktor`) — only `dao: CartStore`
+    // ("runtime": the compiler cannot see through the interface) is left to
+    // explain CartViewModel's own instability, so the honest, hedged
+    // sentence is the only one this can truthfully say.
+    const withoutApi: ComposeReportClass = {
+      ...CART_VIEW_MODEL,
+      properties: CART_VIEW_MODEL.properties.filter((p) => p.stability !== "unstable"),
+    };
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun Controls(viewModel: CartViewModel) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [
+          composable({
+            name: "Controls",
+            skippable: false,
+            parameters: [{ name: "viewModel", type: "CartViewModel", stable: false, unused: false }],
+          }),
+        ],
+        classes: [withoutApi],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(true);
+    if (!join.matched) throw new Error("expected a match");
+    const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
+    expect(explanation).toContain("dao: CartStore");
+    expect(explanation).toContain("could not be determined at compile time");
+  });
+});
+
+describe("D1 (QA): a non-restartable composable is never described as restartable but not skippable", () => {
+  it("explainNotSkippable returns null for restartable: false, skippable: false — the inline/@NonRestartableComposable shape", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\ninline fun ProbeInline(items: List<String>) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [
+          composable({
+            name: "ProbeInline",
+            restartable: false,
+            skippable: false,
+            parameters: [{ name: "items", type: "List<String>", stable: false, unused: false }],
+          }),
+        ],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(true);
+    if (!join.matched) throw new Error("expected a match");
+    // Mutation quoted: removing the `if (!composable.restartable) return
+    // null;` guard from explainNotSkippable is what makes this assertion
+    // fail — it would go back to claiming "is restartable but not
+    // skippable" about a composable the compiler never called restartable.
+    expect(explainNotSkippable(join as ComposeJoin & { matched: true })).toBeNull();
+  });
+
+  it("explainNotRestartable describes it truthfully instead, and is null for a restartable composable", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\ninline fun ProbeInline(items: List<String>) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [composable({ name: "ProbeInline", restartable: false, skippable: false })],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    expect(join.matched).toBe(true);
+    if (!join.matched) throw new Error("expected a match");
+    const explanation = explainNotRestartable(join as ComposeJoin & { matched: true });
+    expect(explanation).toContain("`ProbeInline` is not restartable");
+    expect(explanation).toContain("always recomposes together with whatever composed it");
+
+    const restartableJoin: ComposeJoin & { matched: true } = {
+      ...(join as ComposeJoin & { matched: true }),
+      composable: { ...join.composable, restartable: true },
+    };
+    expect(explainNotRestartable(restartableJoin)).toBeNull();
+  });
+});
+
+describe("D7 (QA): owned vs foreign unstable types get different remedies", () => {
+  it("owned — the type has its own entry in a report under the root — gets the annotate/val remedy", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun LeakyRow(highlight: RowHighlight) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [
+          composable({
+            name: "LeakyRow",
+            skippable: false,
+            parameters: [{ name: "highlight", type: "RowHighlight", stable: false, unused: false }],
+          }),
+        ],
+        classes: [
+          {
+            name: "RowHighlight",
+            stable: false,
+            runtimeStability: "Unstable",
+            properties: [{ name: "tappedAt", mutable: true, stable: true, stability: "stable", type: "Long" }],
+          },
+        ],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    if (!join.matched) throw new Error("expected a match");
+    const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
+    expect(explanation).toContain("Annotate it `@Immutable`/`@Stable`, or make the property `val`.");
+  });
+
+  it("foreign — no report anywhere mentions the type — gets the stabilityConfigurationFile remedy, not a bare 'is unstable'", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun LeakyRow(items: List<CartItem>) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        composables: [
+          composable({
+            name: "LeakyRow",
+            skippable: false,
+            parameters: [{ name: "items", type: "List<CartItem>", stable: false, unused: false }],
+          }),
+        ],
+        classes: [], // CartItem/List never shows up in any report — a foreign, library-shaped type
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    if (!join.matched) throw new Error("expected a match");
+    // Mutation quoted: before D7's fix, an unmatched `findClass` produced no
+    // second sentence at all — this assertion is what "a bare 'is unstable'
+    // with no remedy" fails.
+    const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
+    expect(explanation).toContain(
+      "`List` was not compiled with the Compose compiler in this build; declare it stable in a " +
+        "stability configuration file (compose compiler `stabilityConfigurationFile`).",
+    );
+  });
+
+  it("owned in a DIFFERENT module's report than the composable's own still counts as owned", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/Screens.kt", '@Composable\nfun LeakyRow(highlight: RowHighlight) { Modifier.portholeNode("Cart.ItemRow") }\n');
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        module: "app",
+        composables: [
+          composable({
+            name: "LeakyRow",
+            skippable: false,
+            parameters: [{ name: "highlight", type: "RowHighlight", stable: false, unused: false }],
+          }),
+        ],
+        classes: [], // RowHighlight is declared in a different module's report
+      }),
+    );
+    writeReport(
+      root,
+      "core/design",
+      baseReport({
+        module: "design",
+        composables: [],
+        classes: [
+          {
+            name: "RowHighlight",
+            stable: false,
+            runtimeStability: "Unstable",
+            properties: [{ name: "tappedAt", mutable: true, stable: true, stability: "stable", type: "Long" }],
+          },
+        ],
+      }),
+    );
+    useProjectRoot(root);
+
+    const join = joinComposableNode("Cart.ItemRow");
+    if (!join.matched) throw new Error("expected a match");
+    const explanation = explainNotSkippable(join as ComposeJoin & { matched: true });
+    expect(explanation).toContain("Annotate it `@Immutable`/`@Stable`");
+    expect(explanation).not.toContain("stabilityConfigurationFile");
+  });
+});
+
+describe("D8 (QA): the source fingerprint is cached per moduleRoot, not recomputed per node", () => {
+  it("a second staleness() call within the TTL reuses the cached fingerprint rather than re-walking the tree", () => {
+    const root = temporaryRoot();
+    write(root, "app/src/main/kotlin/A.kt", "class A\n");
+    const report: ComposeReportFile = {
+      reportPath: path.join(root, "app/build/porthole/compose-report.json"),
+      moduleRoot: path.join(root, "app"),
+      generatedAt: "2026-09-19T00:00:00.000Z",
+      variant: "debug",
+      module: "app",
+      kotlinVersion: "2.1.0",
+      gitHead: "abc123",
+      sourceFingerprint: currentSourceFingerprint(path.join(root, "app")),
+      composables: [],
+      classes: [],
+    };
+
+    let now = 1_000;
+    setComposeReportClockForTests(() => now);
+    expect(staleness(report).stale).toBe(false);
+
+    // The tree changes, but well inside the TTL — a cached fingerprint,
+    // still describing the tree as it was, must be what a second call
+    // reuses, not a fresh (and now different) walk.
+    write(root, "app/src/main/kotlin/A.kt", "class A { val x = 1 }\n");
+    now += 1_000;
+    expect(staleness(report).stale).toBe(false);
+
+    // Past the TTL, a fresh walk finally notices the real change.
+    now += 10_000;
+    expect(staleness(report).stale).toBe(true);
   });
 });
