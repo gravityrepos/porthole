@@ -15,6 +15,26 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- A slow HTTP call now says which part was slow. `installPorthole()` reports
+  OkHttp's own `EventListener` phase breakdown (`dns`, `connect`,
+  `secureConnect`, `requestHeaders`, `requestBody`, `responseHeaders`,
+  `responseBody` — each already the time that phase itself took, summing to
+  within a few ms of the call's own `elapsedMs`), connection reuse, protocol
+  and real request/response byte counts (not a payload, and never a fake
+  zero for a request with no body) — present whether or not `BodyCapture` is
+  on. It reads back whatever `EventListener`/`EventListenerFactory` the
+  builder already had configured and chains onto it, so an app with its own
+  listener keeps receiving every callback rather than going dark the moment
+  `installPorthole()` is added. `findings` gains `http-call-slow` at
+  `warning` for a call at or past 3000ms, attributed to the dominant phase
+  and joined against the device's own most recent `network` event, so a call
+  that ran on cellular says so. `inflight`'s `recentHttp` is now window-aware
+  (the standard `sinceMs`/`from`/`to`, `limit` defaulting to the old "last
+  25"), so quoting a finding's `window` can reach a call older than the
+  default would otherwise return. Ktor gets none of this — its plugin API
+  sits above every engine, with no phase, reuse, protocol or byte-count hook
+  any engine agrees on — and the OkHttp engine remains the documented way to
+  get it anyway (GRA-66).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

@@ -438,6 +438,34 @@ internal data class HttpCall(
     val responseHeaders: Map<String, String> = emptyMap(),
     val requestBody: BodyPreview? = null,
     val responseBody: BodyPreview? = null,
+    /**
+     * GRA-66: OkHttp's own `EventListener` timings, only the phases actually
+     * observed — `dns`, `connect`, `secureConnect`, `requestHeaders`,
+     * `requestBody`, `responseHeaders`, `responseBody`, each the time *that
+     * phase itself* took (not cumulative), so summing every key here should
+     * land within a few ms of [elapsedMs]. Empty for a call this collector
+     * has no `EventListener` timings for at all — a Ktor call with no OkHttp
+     * engine underneath (see `KtorPorthole`'s own doc comment for why that
+     * boundary is real, not an oversight), or one still in flight.
+     */
+    val phases: Map<String, Long> = emptyMap(),
+    /**
+     * True when this call reused a pooled connection from OkHttp's own
+     * `ConnectionPool` — the tell is that `connectStart` never fired for it,
+     * so it structurally has no `dns`/`connect`/`secureConnect` phase of its
+     * own. Always `false` for a call [phases] has nothing to say about.
+     */
+    val reused: Boolean = false,
+    /** `Connection.protocol()`, e.g. `h2` or `http/1.1` — null before a connection is actually acquired, or for a call `phases` has nothing to say about. */
+    val protocol: String? = null,
+    /**
+     * Bytes actually written for the request body, from
+     * `EventListener.requestBodyEnd` — null for a request with no body
+     * (a GET, say), never a fake zero standing in for "not measured."
+     */
+    val requestBytes: Long? = null,
+    /** Bytes actually read for the response body, from `EventListener.responseBodyEnd` — same null-means-no-body rule as [requestBytes]. */
+    val responseBytes: Long? = null,
 )
 
 /**

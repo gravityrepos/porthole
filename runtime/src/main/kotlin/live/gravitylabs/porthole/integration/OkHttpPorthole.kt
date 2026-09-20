@@ -7,11 +7,14 @@ import live.gravitylabs.porthole.Porthole
 import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.protocol.BodyPreview
 import okhttp3.Call
+import okhttp3.Connection
 import okhttp3.EventListener
+import okhttp3.Handshake
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
@@ -20,6 +23,7 @@ import okio.BufferedSink
 import okio.ForwardingSink
 import okio.buffer
 import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 
@@ -39,15 +43,34 @@ object OkHttpPorthole {
     /**
      * Installs the porthole on a builder.
      *
-     * A client can hold exactly one event listener factory, and the builder does
-     * not expose the one already set, so pass yours in [existing] if you have
-     * one and it will be called through to.
+     * A client can hold exactly one event listener factory: `eventListener()`
+     * and `eventListenerFactory()` are mutually exclusive on
+     * [OkHttpClient.Builder] and whichever was called last wins, silently. If
+     * the app already set one before reaching this call, simply calling
+     * [OkHttpClient.Builder.eventListenerFactory] here would replace it —
+     * turning the app's own listener dark with nothing in the API to say why.
+     *
+     * [existing] is the explicit override for a caller that already knows its
+     * own factory (or is installing [eventListenerFactory] directly, with no
+     * builder in hand at all). Left `null` — the common case now — this reads
+     * the builder's *own* current factory instead of asking the caller to
+     * hand it back: [OkHttpClient.Builder] does not expose its
+     * `eventListenerFactory` field itself (it is `internal`, mangled on the
+     * JVM, unreachable from outside OkHttp's own module), but the
+     * [OkHttpClient] it builds does, publicly. `build()` here is a cheap
+     * snapshot of whatever the builder holds so far — it does not consume or
+     * lock the builder, which keeps configuring normally afterward — and
+     * whatever it returns (the app's own factory, or OkHttp's own
+     * `EventListener.NONE`-producing default when nothing was set) becomes
+     * the delegate [PortholeEventListener] calls through on every callback,
+     * so an app with its own listener keeps receiving every one of them.
      */
     fun OkHttpClient.Builder.installPorthole(
         existing: EventListener.Factory? = null,
         bodies: BodyCapture = BodyCapture.Off,
     ): OkHttpClient.Builder {
-        eventListenerFactory(PortholeEventListener.factory(existing))
+        val delegate = existing ?: build().eventListenerFactory
+        eventListenerFactory(PortholeEventListener.factory(delegate))
         // Always added, even with bodies off. The interceptor is the only place
         // that runs on the thread doing the IO, so it is the only place that can
         // answer "did this block the UI"; with capture off it does nothing else.
@@ -329,7 +352,75 @@ internal class TeeRequestBody(
     }
 }
 
+/**
+ * GRA-66: DNS, connect, secure connect, header/body write and read timings,
+ * connection reuse, protocol and byte counts — everything [EventListener]
+ * itself can see, one call at a time.
+ *
+ * One instance per call: OkHttp's own contract for [EventListener.Factory]
+ * is `create(call)` once per [Call], never reused across calls, so the phase
+ * timestamps below are plain instance fields, not a map keyed by call the
+ * way [Porthole.inflight]'s own [live.gravitylabs.porthole.collect.InflightCollector]
+ * has to keep (it outlives any one call). `@Volatile` because OkHttp's own
+ * contract only promises these callbacks run one at a time for a given call
+ * — never that they run on the *same* thread throughout it (a redirect can
+ * resume its next leg on a different connection's thread) — so a plain field
+ * write is not guaranteed visible to a later read without it.
+ *
+ * `connect` and `secureConnect` are one pair that needs care: OkHttp fires
+ * `secureConnectStart`/`secureConnectEnd` *between* `connectStart` and
+ * `connectEnd`, so a naive `connectEnd - connectStart` would already include
+ * the TLS handshake, and adding `secureConnectMs` on top would double-count
+ * it. `connectMs` is therefore closed at `secureConnectStart` when there is
+ * one (the raw TCP portion only) and left for `connectEnd`/`connectFailed`
+ * to close otherwise (a plain HTTP connect, where there is no TLS phase to
+ * subtract).
+ *
+ * `responseHeaders` is the other: measured empirically (a MockWebServer
+ * response delayed with `setHeadersDelay`, `HttpPhasesTest`'s own "phase
+ * breakdown sums to the call's own elapsed time" test), OkHttp does *not*
+ * call `responseHeadersStart` until the response has actually started
+ * arriving — the wait for a slow server elapses *before* that callback
+ * fires, silently, in the gap between finishing the request and
+ * `responseHeadersStart`. Timing this phase from `responseHeadersStart`
+ * itself would therefore report a slow server as instant, which is the one
+ * failure this whole feature exists to catch. `waitStartNanos`
+ * is set from `requestHeadersEnd`/`requestBodyEnd` instead — the instant the
+ * request actually finished sending, which is genuinely where the wait
+ * begins — and only read, never written, from `responseHeadersStart`.
+ */
 internal class PortholeEventListener(private val delegate: EventListener?) : EventListener() {
+
+    @Volatile private var dnsStartNanos: Long? = null
+    @Volatile private var connectStartNanos: Long? = null
+    @Volatile private var secureConnectStartNanos: Long? = null
+    @Volatile private var requestHeadersStartNanos: Long? = null
+    @Volatile private var requestBodyStartNanos: Long? = null
+    @Volatile private var waitStartNanos: Long? = null
+    @Volatile private var responseBodyStartNanos: Long? = null
+
+    @Volatile private var dnsMs: Long? = null
+    @Volatile private var connectMs: Long? = null
+    @Volatile private var secureConnectMs: Long? = null
+    @Volatile private var requestHeadersMs: Long? = null
+    @Volatile private var requestBodyMs: Long? = null
+    @Volatile private var responseHeadersMs: Long? = null
+    @Volatile private var responseBodyMs: Long? = null
+
+    /**
+     * Whether a `connectStart` has fired since the last `connectionAcquired`
+     * — the tell for [reused]: a pooled connection is handed back at
+     * `connectionAcquired` with no `dnsStart`/`connectStart` of its own,
+     * while a fresh one always runs both first. Reset after each
+     * `connectionAcquired` rather than left latched, so a call that retries
+     * onto a *second*, genuinely new connection after an initial pooled one
+     * (or vice versa) is not misjudged by whichever attempt happened first.
+     */
+    @Volatile private var connectAttempted: Boolean = false
+    @Volatile private var reused: Boolean = false
+    @Volatile private var protocolName: String? = null
+    @Volatile private var requestBytes: Long? = null
+    @Volatile private var responseBytes: Long? = null
 
     override fun callStart(call: Call) {
         delegate?.callStart(call)
@@ -339,17 +430,93 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
 
     override fun dnsStart(call: Call, domainName: String) {
         delegate?.dnsStart(call, domainName)
+        dnsStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "dns")
+    }
+
+    override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
+        delegate?.dnsEnd(call, domainName, inetAddressList)
+        dnsMs = elapsedMs(dnsStartNanos)
     }
 
     override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
         delegate?.connectStart(call, inetSocketAddress, proxy)
+        connectAttempted = true
+        connectStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "connecting")
+    }
+
+    override fun secureConnectStart(call: Call) {
+        delegate?.secureConnectStart(call)
+        // See this class's own doc comment: this is where the raw TCP
+        // portion of `connect` ends, before TLS's own phase begins.
+        connectMs = elapsedMs(connectStartNanos)
+        secureConnectStartNanos = System.nanoTime()
+    }
+
+    override fun secureConnectEnd(call: Call, handshake: Handshake?) {
+        delegate?.secureConnectEnd(call, handshake)
+        secureConnectMs = elapsedMs(secureConnectStartNanos)
+    }
+
+    override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) {
+        delegate?.connectEnd(call, inetSocketAddress, proxy, protocol)
+        // Only for a plain (non-TLS) connect: a TLS one already closed
+        // connectMs at secureConnectStart, and overwriting it here would
+        // fold the whole handshake back into it.
+        if (connectMs == null) connectMs = elapsedMs(connectStartNanos)
+    }
+
+    override fun connectFailed(
+        call: Call,
+        inetSocketAddress: InetSocketAddress,
+        proxy: Proxy,
+        protocol: Protocol?,
+        ioe: IOException,
+    ) {
+        delegate?.connectFailed(call, inetSocketAddress, proxy, protocol, ioe)
+        if (connectMs == null) connectMs = elapsedMs(connectStartNanos)
+    }
+
+    override fun connectionAcquired(call: Call, connection: Connection) {
+        delegate?.connectionAcquired(call, connection)
+        reused = !connectAttempted
+        connectAttempted = false
+        protocolName = runCatching { connection.protocol().toString() }.getOrNull()
     }
 
     override fun requestHeadersStart(call: Call) {
         delegate?.requestHeadersStart(call)
+        requestHeadersStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "headers")
+    }
+
+    override fun requestHeadersEnd(call: Call, request: Request) {
+        delegate?.requestHeadersEnd(call, request)
+        requestHeadersMs = elapsedMs(requestHeadersStartNanos)
+        // See this class's own doc comment on `waitStartNanos`:
+        // tentatively, the wait for a response begins here — overwritten in
+        // requestBodyEnd below when this request turns out to have a body.
+        waitStartNanos = System.nanoTime()
+    }
+
+    override fun requestBodyStart(call: Call) {
+        delegate?.requestBodyStart(call)
+        requestBodyStartNanos = System.nanoTime()
+    }
+
+    override fun requestBodyEnd(call: Call, byteCount: Long) {
+        delegate?.requestBodyEnd(call, byteCount)
+        requestBodyMs = elapsedMs(requestBodyStartNanos)
+        requestBytes = byteCount
+        // The wait for a response cannot begin before the body finishes
+        // sending — moves the mark requestHeadersEnd set provisionally.
+        waitStartNanos = System.nanoTime()
+    }
+
+    override fun requestFailed(call: Call, ioe: IOException) {
+        delegate?.requestFailed(call, ioe)
+        if (requestBodyStartNanos != null && requestBodyMs == null) requestBodyMs = elapsedMs(requestBodyStartNanos)
     }
 
     override fun responseHeadersStart(call: Call) {
@@ -359,25 +526,70 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
         Porthole.inflight()?.httpPhase(call, "waiting")
     }
 
+    override fun responseHeadersEnd(call: Call, response: Response) {
+        delegate?.responseHeadersEnd(call, response)
+        responseHeadersMs = elapsedMs(waitStartNanos)
+    }
+
     override fun responseBodyStart(call: Call) {
         delegate?.responseBodyStart(call)
+        responseBodyStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "body")
+    }
+
+    override fun responseBodyEnd(call: Call, byteCount: Long) {
+        delegate?.responseBodyEnd(call, byteCount)
+        responseBodyMs = elapsedMs(responseBodyStartNanos)
+        responseBytes = byteCount
+    }
+
+    override fun responseFailed(call: Call, ioe: IOException) {
+        delegate?.responseFailed(call, ioe)
+        if (responseBodyStartNanos != null && responseBodyMs == null) {
+            responseBodyMs = elapsedMs(responseBodyStartNanos)
+        }
     }
 
     override fun callEnd(call: Call) {
         delegate?.callEnd(call)
+        reportPhases(call)
         Porthole.inflight()?.httpEnd(call, "done")
     }
 
     override fun callFailed(call: Call, ioe: IOException) {
         delegate?.callFailed(call, ioe)
+        reportPhases(call)
         Porthole.inflight()?.httpEnd(call, "failed", ioe.javaClass.simpleName + ": " + ioe.message)
     }
 
     override fun canceled(call: Call) {
         delegate?.canceled(call)
+        reportPhases(call)
         Porthole.inflight()?.httpEnd(call, "canceled")
     }
+
+    /**
+     * Reported before [live.gravitylabs.porthole.collect.InflightCollector.httpEnd]
+     * finalises the call — that method reads whatever
+     * [live.gravitylabs.porthole.collect.InflightCollector.httpPhases] last set,
+     * so the order between the two calls at each of the three call sites above
+     * matters and is not incidental.
+     */
+    private fun reportPhases(call: Call) {
+        val phases = buildMap {
+            dnsMs?.let { put("dns", it) }
+            connectMs?.let { put("connect", it) }
+            secureConnectMs?.let { put("secureConnect", it) }
+            requestHeadersMs?.let { put("requestHeaders", it) }
+            requestBodyMs?.let { put("requestBody", it) }
+            responseHeadersMs?.let { put("responseHeaders", it) }
+            responseBodyMs?.let { put("responseBody", it) }
+        }
+        Porthole.inflight()?.httpPhases(call, phases, reused, protocolName, requestBytes, responseBytes)
+    }
+
+    private fun elapsedMs(startNanos: Long?): Long? =
+        startNanos?.let { (System.nanoTime() - it) / 1_000_000 }
 
     companion object {
         fun factory(delegate: EventListener.Factory?): EventListener.Factory =

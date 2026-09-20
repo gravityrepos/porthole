@@ -463,6 +463,83 @@ function stillOpenFinding(
   };
 }
 
+// -------------------------------------------------------------------
+// GRA-66: http-call-slow's own helpers. Kept together, and next to the
+// finding itself rather than scattered, for the same "delimited block"
+// reason the finding's own comment gives.
+// -------------------------------------------------------------------
+
+/**
+ * A pragmatic threshold, not a platform-defined one — there is no vitals-style
+ * line for a network call the way `startup-slow` has Android vitals' 5s
+ * "excessive cold start" figure to borrow. 3 seconds is the number Google's
+ * own RAIL guidance already treats as the point a wait stops feeling like
+ * part of a sequence of steps and starts feeling like a wait in its own
+ * right — a round, defensible floor for "the phase named here is worth
+ * reading," not a number to promise a latency SLA against.
+ */
+const HTTP_SLOW_THRESHOLD_MS = 3_000;
+
+/**
+ * The `phases` object OkHttpPorthole's `http_end` event carries (GRA-66) —
+ * only the phases actually observed, each already the time *that phase
+ * itself* took (see `OkHttpPorthole.kt`'s own doc comment on why `connect`
+ * and `secureConnect` do not double-count), so summing every value here
+ * lands within a few ms of the call's own `elapsedMs`. Empty for a call
+ * with nothing to report — a Ktor call with no OkHttp engine underneath, or
+ * one from a runtime built before this field existed.
+ */
+function phasesOf(data: Record<string, unknown>): Record<string, number> {
+  const raw = data.phases;
+  if (raw == null || typeof raw !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    const ms = num(value);
+    if (ms > 0) out[name] = ms;
+  }
+  return out;
+}
+
+/** The phase with the widest gap — "where to look first," the same job `dominantPhase` does on the runtime's own startup event. `undefined` when there is nothing to attribute to at all. */
+function dominantPhaseOf(phases: Record<string, number>): string | undefined {
+  let name: string | undefined;
+  let worst = -1;
+  for (const [phase, ms] of Object.entries(phases)) {
+    if (ms > worst) {
+      worst = ms;
+      name = phase;
+    }
+  }
+  return name;
+}
+
+/**
+ * The device's own `network` state (`DeviceCollector`'s `transport`/
+ * `metered`/`validated`, carried on a `device` event whose `data.kind` is
+ * `"network"`) in force at or before `atMs` — the last such event that had
+ * already happened, the same "state at a moment" read `resolveProfile`
+ * already does for the device profile. `undefined` when the window has no
+ * network event at all yet (a session before the first `onCapabilitiesChanged`
+ * callback, or a runtime older than the network event itself).
+ */
+function networkAt(
+  events: DeviceEvent[],
+  atMs: number,
+): { transport: string; metered: boolean; validated: boolean } | undefined {
+  let best: DeviceEvent | undefined;
+  for (const event of events) {
+    if (event.event !== "device" || str(event.data.kind) !== "network") continue;
+    if (event.t > atMs) continue;
+    if (!best || event.t > best.t) best = event;
+  }
+  if (!best) return undefined;
+  return {
+    transport: str(best.data.transport),
+    metered: best.data.metered === "true" || best.data.metered === true,
+    validated: best.data.validated === "true" || best.data.validated === true,
+  };
+}
+
 export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
@@ -543,6 +620,52 @@ export function findingsOf(
       detail: `${str(first.data.method)} ${str(first.data.url)} → ${str(first.data.status) || str(first.data.error)}`,
       count: failed.length,
       window: { from: first.startedAt ?? first.endedAt, to: first.endedAt },
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // GRA-66: http-call-slow — which phase a slow call actually spent its
+  // time in, plus whatever the device's own `network` events say about
+  // the connection it ran over. Delimited so branches editing trace.ts
+  // in parallel do not collide with this section.
+  // -------------------------------------------------------------------
+  const slow = http.filter(isCompleted).filter((c) => c.ms >= HTTP_SLOW_THRESHOLD_MS);
+  if (slow.length > 0) {
+    const worst = slow.reduce((a, b) => (b.ms > a.ms ? b : a));
+    const phases = phasesOf(worst.data);
+    const dominant = dominantPhaseOf(phases);
+    const network = networkAt(events, worst.startedAt ?? worst.endedAt ?? 0);
+    const onCellular = network?.transport === "cellular";
+    findings.push({
+      id: "http-call-slow",
+      severity: "warning",
+      confidence: "observed",
+      title:
+        `${str(worst.data.method)} ${str(worst.data.url)} took ${worst.ms}ms` +
+        (dominant ? ` — mostly ${dominant}` : "") +
+        (onCellular ? " (on cellular)" : ""),
+      detail:
+        (dominant
+          ? `${phases[dominant]}ms of ${worst.ms}ms was ${dominant}.`
+          : "No single phase dominated — the EventListener never reported a phase breakdown for " +
+            "this call (a Ktor call with no OkHttp engine underneath has none to report; see " +
+            "KtorPorthole's own doc comment).") +
+        (onCellular
+          ? ` The device was on a metered cellular connection at the time.`
+          : network && network.metered
+            ? " The device was on a metered connection at the time."
+            : ""),
+      count: slow.length,
+      evidence: {
+        method: str(worst.data.method),
+        url: str(worst.data.url),
+        elapsedMs: worst.ms,
+        ...(dominant ? { phases, dominantPhase: dominant } : {}),
+        reused: worst.data.reused === true || worst.data.reused === "true",
+        ...(worst.data.protocol != null ? { protocol: str(worst.data.protocol) } : {}),
+        ...(network ? { network } : {}),
+      },
+      window: { from: worst.startedAt ?? worst.endedAt, to: worst.endedAt },
     });
   }
 

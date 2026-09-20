@@ -947,6 +947,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     "db-on-main-thread": { tool: "blocking", why: "the queries, their SQL and how long each took" },
     "main-thread-stall": { tool: "blocking", why: "the stack the main thread was sitting in" },
     "http-failed": { tool: "inflight", why: "the failed calls with status and body previews" },
+    "http-call-slow": {
+      tool: "inflight",
+      why: "recentHttp's own phase breakdown, byte counts and headers for the call",
+    },
     "frames-dropped": { tool: "frames", why: "which phase dominated the janky frames" },
     "blocking-gc": {
       tool: "timeline",
@@ -1391,7 +1395,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "the cold launch (`originKind: \"fork\"`): a warm/hot relaunch's `totalMs` starts from the " +
         "relaunched Activity's own onCreate/onStart, already inside the system's own launch work, " +
         "not the launch request `am start -W` (and Android vitals) measure from — which is also why " +
-        "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.",
+        "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.\n\n" +
+        "`http-call-slow` (GRA-66) fires at warning for a call whose own elapsed time was at least " +
+        "3000ms — a pragmatic floor, not a platform-defined one, close to the point Google's own " +
+        "RAIL guidance treats a wait as a wait rather than a step in a sequence — and attributes it " +
+        "to whichever OkHttp phase (dns/connect/secureConnect/requestHeaders/requestBody/" +
+        "responseHeaders/responseBody) took the largest share, when the runtime reported one at " +
+        "all: a Ktor call with no OkHttp engine underneath has no phase breakdown to attribute to, " +
+        "and says so rather than guessing. Joins the device's own most recent `network` event in " +
+        "force when the call started, so a call that ran on a metered cellular connection says so " +
+        "instead of just looking slow for no stated reason.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
@@ -2533,16 +2546,37 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       description:
         "Open HTTP calls with the phase each is stuck in, database queries currently executing and " +
         "the thread running them, and enqueued or running WorkManager jobs. This is the tool for " +
-        "'why is this screen still spinning'.\n\n" +
-        "Also returns recentHttp: the last 25 finished calls with status, headers and — when the " +
-        "app opted in via BodyCapture — request and response body previews. A body with text:null " +
-        "carries an omittedReason saying why it was not captured (disabled, wrong content type, " +
-        "one-shot stream); that is different from the call having had no body at all.",
-      inputSchema: {},
+        "'why is this screen still spinning'. `http`/`queries`/`work` are always the live set — " +
+        "what is happening right now — and ignore the window below entirely.\n\n" +
+        "Also returns recentHttp: finished calls with status, headers, OkHttp's own phase " +
+        "breakdown (dns/connect/secureConnect/requestHeaders/requestBody/responseHeaders/" +
+        "responseBody, each already the time that phase itself took), connection reuse, protocol, " +
+        "byte counts, and — when the app opted in via BodyCapture — request and response body " +
+        "previews. A body with text:null carries an omittedReason saying why it was not captured " +
+        "(disabled, wrong content type, one-shot stream); that is different from the call having " +
+        "had no body at all. `phases`/`reused`/`protocol`/`requestBytes`/`responseBytes` are only " +
+        "ever present for a call OkHttp's own EventListener actually instrumented — empty for a " +
+        "Ktor call with no OkHttp engine underneath (GRA-66; see KtorPorthole's own doc comment " +
+        "for why that boundary is real).\n\n" +
+        "GRA-66: recentHttp is now window-aware, the standard sinceMs/from/to below — quote a " +
+        "finding's own `window` to reach a call `http-call-slow` named, even one older than the " +
+        "default `limit` (25) would otherwise return.",
+      inputSchema: {
+        ...windowShape,
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(200)
+          .optional()
+          .describe("Most recent N finished calls inside the window. Default 25."),
+      },
       annotations: { readOnlyHint: true },
     },
-    async (): Promise<ToolResult> =>
-      call<{
+    async ({ sinceMs, from, to, since, limit }): Promise<ToolResult> => {
+      const resolved = await resolveWindowSince({ sinceMs, from, to, since });
+      const windowArgs = resolved ? { from: resolved.from, to: resolved.to } : { sinceMs, from, to };
+      return call<{
         http: Array<{ method: string; url: string; phase: string; elapsedMs: number }>;
         queries: Array<{ sql: string; kind: string; elapsedMs: number; thread: string }>;
         work: Array<{ name: string; state: string }>;
@@ -2552,7 +2586,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           status: number | null;
           elapsedMs: number;
         }>;
-      }>("inflight", {}, (flight) => {
+      }>("inflight", { ...windowArgs, limit }, (flight) => {
         const parts: string[] = [];
         if (flight.http.length) {
           const worst = flight.http[0];
@@ -2579,7 +2613,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           );
         }
         return parts.length ? parts.join("; ") : "Nothing in flight.";
-      }),
+      });
+    },
   );
 
   server.registerTool(

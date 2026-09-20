@@ -703,6 +703,113 @@ describe("findingsOf", () => {
   });
 });
 
+describe("findingsOf: http-call-slow (GRA-66)", () => {
+  const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
+
+  /** A completed http span carrying OkHttpPorthole's own `http_end` shape. */
+  function slowCall(
+    ms: number,
+    over: Record<string, unknown> = {},
+  ): DeviceEvent[] {
+    return span("http", "a", 0, ms, {
+      method: "GET",
+      url: "https://api.example.com/cart",
+      status: 200,
+      ...over,
+    });
+  }
+
+  it("says nothing for a call under the threshold", () => {
+    expect(find(slowCall(2_999)).some((f) => f.id === "http-call-slow")).toBe(false);
+  });
+
+  it("fires at the threshold and above, at warning, observed", () => {
+    const finding = find(slowCall(3_000)).find((f) => f.id === "http-call-slow");
+    expect(finding).toMatchObject({ severity: "warning", confidence: "observed" });
+  });
+
+  it("attributes to the phase with the largest duration", () => {
+    const events = slowCall(4_000, {
+      phases: { dns: 20, connect: 30, requestHeaders: 5, responseHeaders: 3_900, responseBody: 45 },
+    });
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.title).toContain("mostly responseHeaders");
+    expect(finding?.detail).toContain("3900ms of 4000ms was responseHeaders");
+    expect(finding?.evidence?.dominantPhase).toBe("responseHeaders");
+    expect(finding?.evidence?.phases).toEqual({
+      dns: 20,
+      connect: 30,
+      requestHeaders: 5,
+      responseHeaders: 3_900,
+      responseBody: 45,
+    });
+  });
+
+  it("says so honestly when there is no phase breakdown at all -- a Ktor call, say", () => {
+    const finding = find(slowCall(3_500)).find((f) => f.id === "http-call-slow");
+    expect(finding?.title).not.toContain("mostly");
+    expect(finding?.detail).toContain("No single phase dominated");
+    expect(finding?.evidence?.phases).toBeUndefined();
+    expect(finding?.evidence?.dominantPhase).toBeUndefined();
+  });
+
+  it("reports only the single slowest call as the representative, but counts every slow one", () => {
+    const events = [
+      ...span("http", "a", 0, 3_100, { method: "GET", url: "https://api.example.com/a", status: 200 }),
+      ...span("http", "b", 5_000, 9_000, { method: "GET", url: "https://api.example.com/b", status: 200 }),
+    ];
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.count).toBe(2);
+    expect(finding?.title).toContain("took 4000ms"); // the worse of the two (b, 4000ms)
+    expect(finding?.evidence?.url).toBe("https://api.example.com/b");
+  });
+
+  it("names a fast call's connection reuse and protocol in the evidence when present", () => {
+    const events = slowCall(3_200, { reused: "true", protocol: "h2" });
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.evidence?.reused).toBe(true);
+    expect(finding?.evidence?.protocol).toBe("h2");
+  });
+
+  // -- joining the device's own network events --------------------------------
+
+  it("says the call ran on cellular when the device's own network event names it, in force before the call", () => {
+    const events = [
+      event("device", 0, { kind: "network", transport: "cellular", metered: "true", validated: "true" }),
+      ...slowCall(3_100),
+    ];
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.title).toContain("(on cellular)");
+    expect(finding?.detail).toContain("metered cellular connection");
+    expect(finding?.evidence?.network).toEqual({ transport: "cellular", metered: true, validated: true });
+  });
+
+  it("does not claim cellular when the device's own network event says wifi", () => {
+    const events = [
+      event("device", 0, { kind: "network", transport: "wifi", metered: "false", validated: "true" }),
+      ...slowCall(3_100),
+    ];
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.title).not.toContain("cellular");
+    expect(finding?.evidence?.network).toEqual({ transport: "wifi", metered: false, validated: true });
+  });
+
+  it("ignores a network event that arrives after the call started -- not in force yet", () => {
+    const events = [
+      ...slowCall(3_100),
+      event("device", 100_000, { kind: "network", transport: "cellular", metered: "true", validated: "true" }),
+    ];
+    const finding = find(events).find((f) => f.id === "http-call-slow");
+    expect(finding?.evidence?.network).toBeUndefined();
+  });
+
+  it("says nothing about the network at all when the session never saw one", () => {
+    const finding = find(slowCall(3_100)).find((f) => f.id === "http-call-slow");
+    expect(finding?.evidence?.network).toBeUndefined();
+    expect(finding?.title).not.toContain("cellular");
+  });
+});
+
 // GRA-200: findingsOf is deliberately selective (see its own comment on
 // exit reasons) -- alsoInWindowOf is the other half, an inventory of the
 // same events rather than a second judgement about them.
