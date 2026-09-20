@@ -328,9 +328,25 @@ export interface AdbResult {
   output: string;
 }
 
+/**
+ * Spawn options for launching `binary`. Production adb is `adb.exe` on
+ * Windows and a plain executable elsewhere, and needs nothing. A batch file
+ * is different: since the CVE-2024-27980 hardening, Node refuses to spawn a
+ * `.cmd`/`.bat` without `shell: true` and fails with `spawn EINVAL` — which
+ * is exactly what the test fakes in `src/testing/fakeAdb.ts` and
+ * `fakeScreencapAdb.ts` are on Windows, and why every adb-driven test went
+ * red on the Windows CI leg while passing on the other two. Enabling the
+ * shell only for that file shape keeps the real `adb.exe` path untouched.
+ */
+export function spawnOptionsFor<T extends object>(binary: string, base?: T): T & { shell?: boolean } {
+  const batch = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+  return { ...(base ?? ({} as T)), ...(batch ? { shell: true } : {}) };
+}
+
 export function runAdb(args: string[], serial?: string): AdbResult {
   const prefix = serial ? ["-s", serial] : [];
-  const result = spawnSync(findAdb(), [...prefix, ...args], { encoding: "utf8" });
+  const adbBinary = findAdb();
+  const result = spawnSync(adbBinary, [...prefix, ...args], spawnOptionsFor(adbBinary, { encoding: "utf8" as const }));
 
   if (result.error) {
     return {
@@ -457,7 +473,7 @@ export function runAdbAsync(args: string[], options: RunAdbAsyncOptions = {}): P
     // with no third argument at all is what every real, non-test call makes
     // (production behaviour is unchanged either way, since Node's own
     // default is already "inherit process.env").
-    const child = env ? spawn(binary, fullArgs, { env }) : spawn(binary, fullArgs);
+    const child = spawn(binary, fullArgs, spawnOptionsFor(binary, env ? { env } : {}));
 
     const ticker = setInterval(() => {
       if (!settled) onProgress(Date.now() - start, fullArgs);

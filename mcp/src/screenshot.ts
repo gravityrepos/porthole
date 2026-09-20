@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { PNG } from "pngjs";
 import * as jpeg from "jpeg-js";
-import { findAdb } from "./adb.js";
+import { findAdb, spawnOptionsFor } from "./adb.js";
 
 /**
  * GRA-63: "the agent can see the screen". `adb exec-out screencap -p` is one
@@ -79,7 +79,7 @@ export function captureRawScreenshot(options: RawCaptureOptions = {}): Promise<R
     // `env` only passed through when given, same as adb.ts's `runAdbAsync` —
     // `spawn(binary, args)` with no third argument already inherits
     // `process.env`, which is every real (non-test) caller's behaviour.
-    const child = env ? spawn(binary, args, { env }) : spawn(binary, args);
+    const child = spawn(binary, args, spawnOptionsFor(binary, env ? { env } : {}));
 
     const timer = setTimeout(() => {
       if (settled) return;
