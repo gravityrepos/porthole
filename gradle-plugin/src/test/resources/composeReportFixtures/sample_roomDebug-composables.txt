@@ -1,0 +1,26 @@
+restartable skippable scheme("[androidx.compose.ui.UiComposable]") fun HomeScreen(
+  stable onOpenCart: Function1<String, Unit>
+)
+restartable scheme("[androidx.compose.ui.UiComposable]") fun CartScreen(
+  unstable viewModel: CartViewModel
+)
+restartable scheme("[androidx.compose.ui.UiComposable]") fun Controls(
+  unstable viewModel: CartViewModel
+)
+restartable scheme("[androidx.compose.ui.UiComposable]") fun LeakyRow(
+  stable item: CartItem
+  stable tick: Int
+  stable onBump: Function0<Unit>
+  unstable highlight: RowHighlight
+)
+restartable skippable scheme("[androidx.compose.ui.UiComposable]") fun ScopedRow(
+  stable item: CartItem
+  stable tick: Function0<Int>
+  stable onBump: Function0<Unit>
+)
+restartable scheme("[androidx.compose.ui.UiComposable]") fun RowBody(
+  stable item: CartItem
+  stable tick: Int
+  stable onBump: Function0<Unit>
+  unstable highlight: RowHighlight
+)

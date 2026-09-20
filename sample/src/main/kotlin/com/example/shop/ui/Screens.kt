@@ -68,6 +68,11 @@ fun CartScreen(viewModel: CartViewModel) = PortholeScreen("Cart") {
     // porthole can say this anonymous state is the app's and unregistered.
     var lastTapped by remember { mutableStateOf<CartItem?>(null) }
 
+    // GRA-69: deliberately unstable — see RowHighlight's own KDoc below. One
+    // instance, shared across every row, so LeakyRow keeps taking it as a
+    // parameter on every recomposition rather than only the tapped row.
+    val rowHighlight = remember { RowHighlight() }
+
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -96,13 +101,19 @@ fun CartScreen(viewModel: CartViewModel) = PortholeScreen("Cart") {
                 } else {
                     // The bug: the row reads `tick` directly, so every row
                     // recomposes on every frame while the animation runs.
+                    // GRA-69: also the fixture for `portholeComposeReport` —
+                    // `highlight` is RowHighlight, an unstable type, so this
+                    // is the composable a stale/fresh report should call out
+                    // as restartable-but-not-skippable.
                     LeakyRow(
                         item,
                         tick = viewModel.tick,
                         onBump = {
                             lastTapped = item
+                            rowHighlight.tappedAt = System.currentTimeMillis()
                             viewModel.bumpQuantity(item)
                         },
+                        highlight = rowHighlight,
                     )
                 }
             }
@@ -162,10 +173,24 @@ private fun Controls(viewModel: CartViewModel) {
     }
 }
 
+/**
+ * GRA-69: deliberately unstable — a `var` property gives the Compose
+ * compiler no equality it can trust, so any composable that takes one as a
+ * parameter cannot be proven skippable no matter how rarely it actually
+ * changes. This is the sample's fixture for `portholeComposeReport`: with
+ * strong skipping off (see that task's own KDoc for why the report forces
+ * it off), [LeakyRow] reports as restartable but not skippable because of
+ * this parameter, and this class reports unstable because it has a `var`.
+ * The out-of-scope fix (per GRA-69's own ticket) would be `@Immutable`, or
+ * splitting the mutable field out into a `MutableState` the compiler can
+ * see — neither is applied here on purpose.
+ */
+class RowHighlight(var tappedAt: Long = 0L)
+
 @Composable
-private fun LeakyRow(item: CartItem, tick: Int, onBump: () -> Unit) {
+private fun LeakyRow(item: CartItem, tick: Int, onBump: () -> Unit, highlight: RowHighlight) {
     Card(modifier = Modifier.fillMaxWidth().portholeNode("Cart.ItemRow")) {
-        RowBody(item, tick, onBump)
+        RowBody(item, tick, onBump, highlight)
     }
 }
 
@@ -187,13 +212,17 @@ private fun ScopedRow(item: CartItem, tick: () -> Int, onBump: () -> Unit) {
 }
 
 @Composable
-private fun RowBody(item: CartItem, tick: Int, onBump: () -> Unit) {
+private fun RowBody(item: CartItem, tick: Int, onBump: () -> Unit, highlight: RowHighlight) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("${item.name} x${item.qty}")
+        // Read every recomposition, same as pulse(tick) below — evaluating a
+        // `var` on an unstable holder is exactly the runtime shape the
+        // compiler's own "not skippable" verdict on this parameter is about.
+        val recentlyTapped = System.currentTimeMillis() - highlight.tappedAt < 500
+        Text((if (recentlyTapped) "• " else "") + "${item.name} x${item.qty}")
         Text(pulse(tick))
         Button(onClick = onBump) { Text("+") }
     }

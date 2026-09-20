@@ -80,6 +80,12 @@ ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 # for the gradle-plugin build
 agp-api = { module = "com.android.tools.build:gradle-api", version.ref = "agp" }
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+# GRA-69: portholeComposeReport reads (and, when requested, configures) the
+# same composeCompiler {} extension `compose-compiler` (the plugin alias, in
+# [plugins] below) registers on a consuming module — compileOnly, same
+# reasoning as agp-api: the consumer always brings its own copy by applying
+# that plugin, this only needs its types to compile against.
+compose-compiler-gradle-plugin = { module = "org.jetbrains.kotlin:compose-compiler-gradle-plugin", version.ref = "kotlin" }
 
 [plugins]
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

@@ -1,0 +1,62 @@
+unstable class ShopApplication {
+  unstable var api: CartApi
+  runtime var store: CartStore
+  <runtime stability> = Unstable
+}
+unstable class CartApi {
+  unstable val server: MockWebServer
+  unstable val ready: CountDownLatch
+  unstable val client: OkHttpClient
+  <runtime stability> = Unstable
+}
+stable class CartItem {
+  stable val id: String
+  stable val cartId: String
+  stable val name: String
+  stable val qty: Int
+  stable val priceCents: Int
+  stable val addedAt: Long
+  <runtime stability> = Stable
+}
+unstable class KtorApi {
+  unstable val client: HttpClient
+  <runtime stability> = Unstable
+}
+unstable class SyncCartWorker {
+  unstable val ownClient: OkHttpClient
+  <runtime stability> = Unstable
+}
+unstable class CartViewModel {
+  runtime val dao: CartStore
+  unstable val api: CartApi
+  stable val cartId: String
+  stable var lastResponse$delegate: MutableState<String>
+  stable var promoCode$delegate: MutableState<String>
+  stable var tick$delegate: MutableIntState
+  stable var animating$delegate: MutableState<Boolean>
+  stable var scopedReads$delegate: MutableState<Boolean>
+  unstable val items: StateFlow<List<CartItem>>
+  unstable val status: MutableStateFlow<String>
+  unstable val statusFlow: StateFlow<String>
+  unstable val ktor: KtorApi
+  <runtime stability> = Unstable
+}
+stable class MainActivity {
+  <runtime stability> = Stable
+}
+unstable class RowHighlight {
+  stable var tappedAt: Long
+  <runtime stability> = Unstable
+}
+stable class CartItemRow {
+  stable val id: String
+  stable val cartId: String
+  stable val name: String
+  stable val qty: Int
+  stable val priceCents: Int
+  stable val addedAt: Long
+  <runtime stability> = Stable
+}
+stable class CartDatabase {
+  <runtime stability> = Stable
+}

@@ -53,6 +53,12 @@ import {
 import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
+import {
+  explainNotSkippable,
+  explainSkippableButUnstable,
+  joinComposableNode,
+  type ComposeJoin,
+} from "./composeReport.js";
 import { captureScreenshot } from "./screenshot.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
@@ -2322,6 +2328,51 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
   );
 
+  // -- GRA-69: per-node compose-report join, `recompositions`' own -----------
+  //
+  // `composeReport.ts` owns the join itself; this is only the shape one
+  // node's result takes on the wire, and the "when is it even worth
+  // mentioning" call — the same off-entirely-when-there-is-nothing-to-say
+  // rule `where` already follows (sources.ts's own doc comment), extended
+  // to composeReport: omitted when the feature is off, when no report has
+  // ever been generated, or when the label simply never resolved to
+  // source, since none of those is a fact about *this composable* worth
+  // repeating on every node in the list. Present, with `joined: false` and
+  // `reason: "no report entry matched"` (or "matched more than one report
+  // entry", with `candidates`), for the two outcomes GRA-69's own ticket
+  // names explicitly: "never join a wrong function — an unjoined node says
+  // 'no report entry matched' with the candidates."
+  type ComposeReportNodeInfo =
+    | {
+        joined: true;
+        enclosingFunction: string;
+        module: string;
+        skippable: boolean;
+        stale: boolean;
+        notSkippableReason?: string;
+        skippableButUnstableReason?: string;
+      }
+    | { joined: false; reason: string; candidates?: Array<{ module: string; packageName: string | null }> };
+
+  function composeReportNodeInfo(nodeName: string): ComposeReportNodeInfo | undefined {
+    const join: ComposeJoin = joinComposableNode(nodeName);
+    if (join.matched) {
+      return {
+        joined: true,
+        enclosingFunction: join.enclosingFunction,
+        module: join.report.module,
+        skippable: join.composable.skippable,
+        stale: join.stale,
+        ...(!join.stale ? { notSkippableReason: explainNotSkippable(join) ?? undefined } : {}),
+        ...(!join.stale ? { skippableButUnstableReason: explainSkippableButUnstable(join) ?? undefined } : {}),
+      };
+    }
+    if (join.reason === "no report entry matched" || join.reason === "matched more than one report entry") {
+      return { joined: false, reason: join.reason, ...(join.candidates ? { candidates: join.candidates } : {}) };
+    }
+    return undefined;
+  }
+
   server.registerTool(
     "recompositions",
     {
@@ -2375,6 +2426,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           count: number;
           triggeredBy: Array<{ key: string; count: number }>;
           where?: Where;
+          // GRA-69, filled in below by the augment step.
+          composeReport?: ComposeReportNodeInfo;
         }>;
         totalNodes?: number;
         truncated?: boolean;
@@ -2408,7 +2461,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           ...report,
           nodes: report.nodes.map((node) => {
             const where = whereForName(node.name);
-            return where ? { ...node, where } : node;
+            // GRA-69: every node, not only the busiest one — an agent asking
+            // about a specific composable by name wants this even when it
+            // is nowhere near the top of the list. composeReportNodeInfo()
+            // omits the key entirely for the common "no report yet" case;
+            // see that function's own comment for exactly when it speaks up.
+            const composeReport = composeReportNodeInfo(node.name);
+            return { ...node, ...(where ? { where } : {}), ...(composeReport ? { composeReport } : {}) };
           }),
         }),
       );

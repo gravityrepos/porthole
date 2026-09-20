@@ -21,9 +21,19 @@ version = libs.versions.porthole.get()
 val generateVersion = tasks.register("generatePortholeVersion") {
     val version = project.version.toString()
     val uiPackage = "@gravitylabsllc/porthole"
+    // GRA-69: the Kotlin version `compose-report.json`'s own `kotlinVersion`
+    // field records — this plugin's own build-time Kotlin, matching
+    // `gradle/libs.versions.toml`'s `kotlin` entry, generated the same way
+    // and for the same reason [PORTHOLE_VERSION] is: it is supplementary
+    // metadata for a human reading the report, not something the join
+    // itself depends on (`sourceFingerprint` is), so it is not worth a
+    // second compileOnly coupling to Kotlin Gradle Plugin's own extension
+    // API just to introspect the *consumer's* Kotlin version instead.
+    val kotlinVersion = libs.versions.kotlin.get()
     val outputDir = layout.buildDirectory.dir("generated/version")
 
     inputs.property("version", version)
+    inputs.property("kotlinVersion", kotlinVersion)
     outputs.dir(outputDir)
 
     doLast {
@@ -35,11 +45,12 @@ val generateVersion = tasks.register("generatePortholeVersion") {
             // Copyright 2026 Gravity Labs
             // SPDX-License-Identifier: Apache-2.0
             //
-            // Generated from `porthole` in gradle/libs.versions.toml. Do not edit.
+            // Generated from `porthole`/`kotlin` in gradle/libs.versions.toml. Do not edit.
             package live.gravitylabs.porthole.gradle
 
             internal const val PORTHOLE_VERSION: String = "$version"
             internal const val PORTHOLE_UI_PACKAGE: String = "$uiPackage"
+            internal const val PORTHOLE_KOTLIN_VERSION: String = "$kotlinVersion"
 
             """.trimIndent(),
         )
@@ -107,6 +118,11 @@ dependencies {
     // plugin only touches the stable variant API. Verified to compile against
     // both AGP 8 and AGP 9; the compatibility test runs it against both.
     compileOnly(libs.agp.api)
+    // GRA-69: same reasoning, for the same "a consumer always brings its own
+    // copy" pattern — portholeComposeReport only touches this when the
+    // consumer's own module has applied `compose-compiler`
+    // (ComposeCompilerWiring's own KDoc explains the isolation this buys).
+    compileOnly(libs.compose.compiler.gradle.plugin)
 
     testImplementation("junit:junit:4.13.2")
     // java-gradle-plugin, which kotlin-dsl brings, puts the plugin under test

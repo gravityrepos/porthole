@@ -439,6 +439,12 @@ regenerated after editing `.mcp.json` by hand:
 | `portholeTraceProcessor` | fetches and verifies Perfetto's `trace_processor`, once | you want it ahead of time, or `-Pporthole.refresh=true` to re-fetch it |
 | `portholeUi` | forwards the port itself, serves the UI, opens your browser, and keeps running until you stop it | you already installed and connected, and only want the timeline again |
 
+A sixth task, `portholeComposeReport`, is deliberately not in this table or
+in `portholeStart`'s own five — it is not part of getting connected, it is a
+standalone, opt-in diagnostic (enables the Compose compiler's own reports,
+parses them) that only runs, and only costs anything, when named directly:
+see [A recomposition hotspot says why it is not skippable](#a-recomposition-hotspot-says-why-it-is-not-skippable).
+
 `portholeUi` and the npm CLI it launches are the same thing, so without the
 plugin applied — or without Gradle at all — this does what `portholeUi` does:
 
@@ -826,6 +832,102 @@ Off entirely — no `where` key at all, not merely an unresolved one —
 whenever `PORTHOLE_PROJECT_ROOT` is unset: resolving source locations
 against whatever `cwd` happens to be is a worse outcome than saying
 nothing, since nothing confirms that directory is this project at all.
+
+## A recomposition hotspot says why it is not skippable
+
+`recompose-hotspot` has always been able to say a composable recomposed a
+lot, and loosely, what state it recomposed near — "ordering, not proof", in
+its own words (see [Capturing a run with nobody watching](#capturing-a-run-with-nobody-watching)).
+It has never been able to say *why* that is worth fixing, because nothing a
+device can observe proves a composable is not skippable — that is a fact
+about the compiled code, not about anything that happened at runtime. The
+Kotlin Compose compiler already computes it, with reports enabled: per
+composable, whether it is restartable and skippable; per parameter, whether
+it is stable and, for a class, why not. `portholeComposeReport` turns that
+on, and `recompositions`/`findings` join a hot node against what it says.
+
+```
+$ ./gradlew :sample:portholeComposeReport -Pporthole.variant=roomDebug
+[porthole] wrote 6 composable(s), 10 class(es) to sample/build/porthole/compose-report.json
+```
+
+**The task.** `portholeComposeReport` sets `composeCompiler {
+reportsDestination }` on the resolved debug variant and forces classic
+(non-strong) skipping for that one recompile — never for the app's real
+build — then parses the compiler's own `*-composables.txt`/`*-classes.txt`
+(plus its `*-composables.csv`, read only for the fully-qualified name the
+`.txt` never carries) into `build/porthole/compose-report.json`. Two
+decisions worth knowing before you reach for it:
+
+- **It costs nothing until you ask for it.** The `composeCompiler {}` DSL is
+  only touched when `portholeComposeReport` is actually named on the command
+  line — an ordinary `assembleDebug` or `test` run never enables reports and
+  never pays the extra recompile they cost. There is no separate variant for
+  this; asking for the report is what opts into the cost, once, for that run.
+- **Strong skipping is forced off for this recompile, on purpose.** Kotlin
+  2.1's compose compiler defaults strong skipping to *on*, under which a
+  composable with an unstable parameter still reports `skippable: true` — it
+  falls back to comparing identity instead of failing to skip at all, so the
+  one signal this whole feature joins against never fires under the modern
+  default. Forced off here, and only here, the report shows the classic
+  verdict instead: whether stabilising a parameter would let the composable
+  skip at all, which is the fact worth knowing even for an app that ships
+  with strong skipping on — a caller-side `List` rebuilt every recomposition
+  still fails strong skipping's own identity check in practice, just less
+  visibly.
+
+**Staleness.** The report carries a `sourceFingerprint` — a SHA-256 over
+every `.kt` file under the module's `src/`, sorted by path, hashing content
+rather than mtime (a checkout or a CI cache restore touches mtimes for
+reasons that have nothing to do with whether the code changed). The MCP
+server recomputes the same hash over the live tree before joining against a
+report and **refuses the join outright** when the two disagree, rather than
+joining against a parameter that may already have been fixed — the same
+"say how old, and against which source state" the report's own `generatedAt`
+and `gitHead` fields answer for a human reading it directly.
+
+**What joins, and what does not.** A `recompose` event carries the string
+literal given to `PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`,
+never `LeakyRow`. The compiler's report is keyed by the enclosing Kotlin
+function's own name, having never heard of the label. The join reuses
+[`where`](#what-happened-while-you-were-not-looking)'s own source index to
+resolve the label to `{path, line}`, then reads the nearest `fun` declaration
+at or before that line the same tolerant, one-regex-per-line way `where`
+resolves everything else — never a real parser, and never a guess: a label
+that does not resolve, a function name absent from every loaded report, or a
+same-named function in two modules with no package to narrow by all read as
+unjoined, with the candidates named when there was more than one, rather than
+picking one and being wrong under everyone's nose.
+
+`findings` promotes what it finds: a hotspot that joins to a composable the
+compiler marked restartable-but-not-skippable is reported at `warning` —
+above the plain, ordering-only note it used to be — with the reason in the
+compiler's own words:
+
+> `LeakyRow` recomposed 900 times, and `LeakyRow` is not skippable: parameter
+> `highlight: RowHighlight` is unstable. `RowHighlight` is unstable because
+> it has a `var` property (`tappedAt`).
+
+A hotspot that joins to a composable the compiler marked skippable, but
+whose parameter is still unstable, is a different, less urgent problem —
+busy, not broken — and is reported as its own kind of finding, at the
+ordinary `note` severity, never promoted above the first case. A hotspot
+that does not join at all — the common case for a project that has never run
+`portholeComposeReport`, or where `PORTHOLE_PROJECT_ROOT` is unset — reads
+exactly as it always has. `recompositions` carries the same join per node,
+not only the busiest one, so an agent asking about a specific composable by
+name gets the compiler's own reasoning even when it is nowhere near the top
+of the count.
+
+**Multi-module.** `PORTHOLE_PROJECT_ROOT` is a Gradle root, and a Gradle
+root can have any number of modules with Compose UI, each producing its own
+`build/porthole/compose-report.json` once `portholeComposeReport` has run on
+it. The server finds every one of them under the root — bounded to
+`<module>/build/porthole/`, never recursing further into a `build`
+directory's own output — and joins against the union: a composable declared
+in a library module is exactly as joinable as one in the app module, and a
+same-named composable in two different modules' reports is exactly the
+ambiguous case the join above already refuses to guess between.
 
 ## Sessions on disk
 
