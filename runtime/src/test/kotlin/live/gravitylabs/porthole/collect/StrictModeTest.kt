@@ -7,6 +7,7 @@ import android.os.StrictMode
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import live.gravitylabs.porthole.Porthole
+import live.gravitylabs.porthole.makeDebuggableForTest
 import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
@@ -373,6 +374,7 @@ class StrictModeTest {
         val threadBefore = StrictMode.getThreadPolicy().toString()
         val vmBefore = StrictMode.getVmPolicy().toString()
 
+        app.makeDebuggableForTest()
         Porthole.install(app, port = 0)
         try {
             assertEquals(
@@ -388,6 +390,7 @@ class StrictModeTest {
 
     @Test
     fun `setup always has an opinion about strict mode, even off`() {
+        app.makeDebuggableForTest()
         Porthole.install(app, port = 0)
         try {
             val entry = Setup.report().single { it.name == "strictmode" }

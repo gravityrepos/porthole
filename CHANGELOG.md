@@ -522,6 +522,14 @@ PR that makes the change, not after the fact.
   in time returns a plain error naming the timeout rather than a partial
   tree or a hung socket. Both `semantics_tree` and the `accessibility` tool
   go through this path (GRA-239).
+- `hello`'s `debuggable` field was a literal `true`, not a read of
+  `ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE` — a build type
+  named in `debugBuildTypes` but not actually `isDebuggable` (a `staging`
+  QA build, say) opened the socket, started every collector, and reported
+  itself debuggable regardless. The runtime now reads the real flag before
+  anything else in `install()` runs, and refuses to start on a build that
+  is not debuggable: no socket, no collectors, one `Log.w` line naming the
+  build type and why (GRA-240).
 
 ## [0.2.2] - 2026-09-16
 

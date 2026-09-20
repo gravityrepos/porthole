@@ -6,6 +6,7 @@ import android.app.Application
 import live.gravitylabs.porthole.Porthole
 import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.installPorthole
+import live.gravitylabs.porthole.makeDebuggableForTest
 import live.gravitylabs.porthole.protocol.HttpCall
 import okhttp3.Call
 import okhttp3.Connection
@@ -71,6 +72,7 @@ class HttpPhasesTest {
     fun setUp() {
         server = MockWebServer()
         server.start()
+        app.makeDebuggableForTest()
         Porthole.install(app, port = 0)
     }
 

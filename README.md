@@ -264,6 +264,18 @@ The plugin puts `runtime` on your debug build types and `runtime-noop` on
 everything else, and generates the `porthole_port` resource so the port is
 configured in exactly one place.
 
+**Naming a build type in `debugBuildTypes` is not the same as marking it
+`isDebuggable = true`.** They are two different AGP concepts that usually
+line up — `debug` is both, by convention — but do not have to: a `staging`
+type used for QA builds can be named here to get the real `runtime` artifact
+on the classpath, while still shipping with `isDebuggable = false`. The
+runtime checks the actual flag for itself at startup
+(`ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE`, not a literal),
+and if it is clear, it refuses to start: no socket, no collectors, one line
+at `Log.w` naming the build type and why. `debugBuildTypes` decides which
+build types are *eligible* to run the porthole; `isDebuggable` decides
+whether one of them actually does (GRA-240).
+
 `port` is **the host port the forward listens on**, not a port the device
 opens. Since GRA-199, the runtime binds no TCP port on the device at all: it
 listens on an Android abstract-namespace Unix socket named
@@ -2319,7 +2331,11 @@ reachability still requires `adb forward`. Either way, reaching the socket
 from off-device requires `adb forward`, which requires USB debugging
 authorisation. On top of that, the whole runtime is debug-only: release
 builds link the no-op artifact, which contains no socket, no collectors and
-no reflection.
+no reflection. That covers a *build type* nobody named in `debugBuildTypes`;
+for one that is named there but not actually `isDebuggable` (see
+[Setup](#setup)), the runtime itself checks `ApplicationInfo.FLAG_DEBUGGABLE`
+before doing anything else and refuses to start rather than assuming the
+name implies the flag (GRA-240).
 
 Log capture is the one collector that will happily forward whatever the app
 prints, including anything a developer logged that they should not have. It is

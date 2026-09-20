@@ -14,6 +14,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import live.gravitylabs.porthole.Porthole
+import live.gravitylabs.porthole.makeDebuggableForTest
 import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
@@ -513,6 +514,7 @@ class FrameWiringTest {
 
     @Test
     fun `Porthole install wires FrameCollector's first-draw callback into StartupCollector`() {
+        app.makeDebuggableForTest()
         Porthole.install(app, port = 0)
         try {
             val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
