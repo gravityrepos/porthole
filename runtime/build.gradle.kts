@@ -59,6 +59,7 @@ dependencies {
     compileOnly(libs.androidx.sqlite)
     compileOnly(libs.work.runtime)
     compileOnly(libs.ktor.client.core)
+    compileOnly(libs.androidx.activity)
 
     // The tee has to be exercised against a real client and a real socket:
     // whether it forwards bytes untouched is not something reading it proves.
@@ -79,6 +80,12 @@ dependencies {
     // ("androidx.work.WorkManager") is false under Robolectric and the whole
     // WorkManagerPorthole branch of install() never runs in any test.
     testImplementation(libs.work.runtime)
+
+    // Same reasoning as work-runtime just above, for GRA-60's
+    // ComponentActivityPorthole branch: androidx.activity is compileOnly in
+    // production, so without this StartupTest could never see
+    // classPresent("androidx.activity.ComponentActivity") come back true.
+    testImplementation(libs.androidx.activity)
 }
 
 // The published API is about twenty declarations, and most of them are

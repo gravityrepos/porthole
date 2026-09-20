@@ -43,6 +43,21 @@ androidx-startup = { module = "androidx.startup:startup-runtime", version.ref = 
 androidx-navigation-runtime = { module = "androidx.navigation:navigation-runtime", version.ref = "navigation" }
 androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigation" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity" }
+# The base artifact, not -compose: ComponentActivity and FullyDrawnReporter
+# live here. compileOnly is non-transitive (see the okio comment below), and
+# activity-compose alone would not put this on the compile classpath.
+#
+# No version.ref on purpose: `runtime`'s own compileOnly navigation-runtime
+# already pulls androidx.activity:activity in transitively, and AGP's
+# consistent-resolution strictly pins runtime's own compile classpath to
+# whatever version that transitive graph resolves to at build time
+# (1.7.0 as of navigation 2.8.6) — a version.ref here that disagreed with
+# it would conflict outright rather than simply losing a version-resolution
+# tie-break, since "strictly" refuses every other version, not just older
+# ones. Leaving this unversioned asks for whatever that resolution already
+# settled on, which — since FullyDrawnReporter is a 1.7.0 API — is already
+# new enough for what this module needs.
+androidx-activity = { module = "androidx.activity:activity" }
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleVm" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-foundation = { module = "androidx.compose.foundation:foundation" }
