@@ -767,6 +767,31 @@ are not, `findings` says so in the summary and leaves every finding
 unclassified rather than guessing — a `resolved` finding from a call that
 merely looked somewhere else would be a false all-clear.
 
+**`where`.** Every finding already carries the symbol that caused it — a
+stall's top stack frame, an exit's `topAppFrame`, a recomposition's
+composable name — and since the MCP server already runs inside the
+project's own checkout (`PORTHOLE_PROJECT_ROOT`, above), it can answer the
+question the agent would otherwise spend a turn on: which file is that. A
+finding whose evidence names something resolvable carries `where: { path,
+line, resolved: true }`, paths relative to the project root; one that
+cannot be resolved with confidence carries `resolved: false` and why —
+`"not found"` (nothing under the root has that name), `"ambiguous"` (more
+than one thing does — a stall in `CartViewModel.kt` is not enough in a
+multi-module app with two of them), or `"synthetic"` (the name is not a
+real source location at all — an obfuscated frame, a Compose-internal
+state key). The **rule is resolve, never diagnose**: `where` is a fact
+about where the evidence lives on disk, decided by whether a name matches
+under the project root, never a conclusion about the app's behaviour — it
+never changes a finding's `title`, `severity` or `detail`, and Porthole
+never opens the file to reason about what is in it. `blocking`,
+`recompositions` and `porthole_status`'s `exits` carry the same field for
+the same reason; the timeline UI shows it beside the evidence it explains,
+copy-ready; `porthole report` prints it under a resolved finding. Off
+entirely — no `where` key at all, not merely an unresolved one — whenever
+`PORTHOLE_PROJECT_ROOT` is unset: resolving source locations against
+whatever `cwd` happens to be is a worse outcome than saying nothing, since
+nothing confirms that directory is this project at all.
+
 ## Sessions on disk
 
 The MCP server's own memory is a process, and that process restarts more
