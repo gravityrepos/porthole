@@ -160,14 +160,14 @@ describe("windowsComparable", () => {
     ...over,
   });
 
-  it("is comparable when both the previous and the current call were since:\"last\"-shaped, regardless of how the windows line up", () => {
+  it('is comparable when both the previous and the current call were since:"last"-shaped, regardless of how the windows line up', () => {
     // Deliberately non-overlapping windows — this is the branch that must
     // NOT need overlap: two calls each picking up where the last left off.
     const previous = digest({ window: { from: 0, to: 100 }, sinceLast: true });
     expect(windowsComparable(previous, true, { from: 5_000, to: 5_100 })).toBe(true);
   });
 
-  it("is not comparable when only one side is since:\"last\" and the windows barely overlap", () => {
+  it('is not comparable when only one side is since:"last" and the windows barely overlap', () => {
     const previous = digest({ window: { from: 0, to: 100 }, sinceLast: false });
     expect(windowsComparable(previous, false, { from: 99, to: 200 })).toBe(false);
   });
@@ -210,7 +210,11 @@ describe("classify", () => {
   });
 
   it("marks a finding absent from the previous digest as new", () => {
-    const previous: FindingsDigest = { findings: [], window: { from: 0, to: 100 }, sinceLast: true };
+    const previous: FindingsDigest = {
+      findings: [],
+      window: { from: 0, to: 100 },
+      sinceLast: true,
+    };
     const current = [finding({ id: "b" })];
     const result = classify(current, previous, true, { from: 101, to: 200 });
     expect(result.counts).toEqual({ new: 1, ongoing: 0, resolved: 0 });
@@ -279,7 +283,10 @@ describe("buildBanner", () => {
 
   it("never exceeds the 240-character hard cap, truncating with '…and N more kinds'", () => {
     const many = Array.from({ length: 40 }, (_, i) =>
-      finding({ id: `k${i}`, title: `finding number ${i} with a moderately long descriptive title` }),
+      finding({
+        id: `k${i}`,
+        title: `finding number ${i} with a moderately long descriptive title`,
+      }),
     );
     const banner = buildBanner(many);
     expect(banner).not.toBeNull();
@@ -293,7 +300,10 @@ describe("buildBanner", () => {
     // pins the number the ruling named.
     expect(BANNER_MAX_CHARS).toBe(240);
     const many = Array.from({ length: 40 }, (_, i) =>
-      finding({ id: `k${i}`, title: `finding number ${i} with a moderately long descriptive title` }),
+      finding({
+        id: `k${i}`,
+        title: `finding number ${i} with a moderately long descriptive title`,
+      }),
     );
     const banner = buildBanner(many) as string;
     expect(banner.length).toBeLessThanOrEqual(240);
@@ -328,14 +338,14 @@ describe("GRA-55 acceptance criteria", () => {
     try {
       await rig.pushEvents([blocked(1_000)]);
 
-      const first = await rig.client.callTool("findings", {});
+      const first = await rig.client.callTool("findings", { detail: "normal" });
       expect(first.isError).toBeFalsy();
       const firstPayload = first.json as { findings: Array<{ id: string; status?: string }> };
       const firstFinding = firstPayload.findings.find((f) => f.id === "main-thread-stall");
       expect(firstFinding).toBeDefined();
       expect(firstFinding?.status).toBeUndefined(); // nothing to classify against yet
 
-      const second = await rig.client.callTool("findings", {});
+      const second = await rig.client.callTool("findings", { detail: "normal" });
       expect(second.isError).toBeFalsy();
       const secondPayload = second.json as {
         findings: Array<{ id: string; status?: string; delta?: number }>;
@@ -354,12 +364,12 @@ describe("GRA-55 acceptance criteria", () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([blocked(1_000)]);
-      const first = await rig.client.callTool("findings", {});
+      const first = await rig.client.callTool("findings", { detail: "normal" });
       expect(first.isError).toBeFalsy();
 
       // Something unrelated happens — the stall itself does not recur.
       await rig.pushEvents([{ event: "recompose", t: 2_000, data: { name: "Cart" } }]);
-      const second = await rig.client.callTool("findings", { since: "last" });
+      const second = await rig.client.callTool("findings", { detail: "normal", since: "last" });
       expect(second.isError).toBeFalsy();
       const secondPayload = second.json as {
         findings: Array<{ id: string; status?: string; previousCount?: number }>;
@@ -373,7 +383,7 @@ describe("GRA-55 acceptance criteria", () => {
 
       // Nothing new again — the third call must not re-report the same resolution.
       await rig.pushEvents([{ event: "recompose", t: 3_000, data: { name: "Cart" } }]);
-      const third = await rig.client.callTool("findings", { since: "last" });
+      const third = await rig.client.callTool("findings", { detail: "normal", since: "last" });
       const thirdPayload = third.json as { findings: Array<{ id: string; status?: string }> };
       expect(thirdPayload.findings.some((f) => f.id === "main-thread-stall")).toBe(false);
     } finally {
@@ -386,13 +396,13 @@ describe("GRA-55 acceptance criteria", () => {
     try {
       // Establish a baseline with no error yet — the very first call this
       // process makes to anything must not itself carry a banner.
-      const seed = await rig.client.callTool("porthole_status", {});
+      const seed = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(seed.text).not.toMatch(/⚠/);
 
       let t = 2_000;
       for (const tool of ["nav_state", "state", "semantics_tree"] as const) {
         await rig.pushEvents([blocked(t)]);
-        const result = await rig.client.callTool(tool, {});
+        const result = await rig.client.callTool(tool, { detail: "normal" });
         expect(result.text, `${tool} did not carry the banner for a new error`).toMatch(
           /⚠ Since your last call/,
         );
@@ -410,13 +420,13 @@ describe("GRA-55 acceptance criteria", () => {
   it("AC4: the banner never repeats an event", async () => {
     const rig = await buildRig();
     try {
-      await rig.client.callTool("porthole_status", {}); // seed
+      await rig.client.callTool("porthole_status", { detail: "normal" }); // seed
       await rig.pushEvents([blocked(3_000)]);
 
-      const first = await rig.client.callTool("nav_state", {});
+      const first = await rig.client.callTool("nav_state", { detail: "normal" });
       expect(first.text).toMatch(/⚠/);
 
-      const second = await rig.client.callTool("state", {});
+      const second = await rig.client.callTool("state", { detail: "normal" });
       expect(second.text).not.toMatch(/⚠/);
       const secondPayload = second.json as { sinceLast: unknown };
       expect(secondPayload.sinceLast).toBeNull();
@@ -425,15 +435,15 @@ describe("GRA-55 acceptance criteria", () => {
     }
   });
 
-  it("AC5: since: \"last\" on a first-ever call behaves exactly like today's default, and says so", async () => {
+  it('AC5: since: "last" on a first-ever call behaves exactly like today\'s default, and says so', async () => {
     const rigA = await buildRig();
     const rigB = await buildRig();
     try {
       await rigA.pushEvents([blocked(1_000)]);
       await rigB.pushEvents([blocked(1_000)]);
 
-      const withSince = await rigA.client.callTool("findings", { since: "last" });
-      const withoutAnyWindow = await rigB.client.callTool("findings", {});
+      const withSince = await rigA.client.callTool("findings", { detail: "normal", since: "last" });
+      const withoutAnyWindow = await rigB.client.callTool("findings", { detail: "normal" });
 
       expect(withSince.isError).toBeFalsy();
       expect(withoutAnyWindow.isError).toBeFalsy();
@@ -453,10 +463,10 @@ describe("GRA-55 acceptance criteria", () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([blocked(1_000)]);
-      const first = await rig.client.callTool("timeline", {});
+      const first = await rig.client.callTool("timeline", { detail: "normal" });
       expect(first.isError).toBeFalsy();
       expect(first.text).toMatch(/first call this session/i);
-      const second = await rig.client.callTool("timeline", {});
+      const second = await rig.client.callTool("timeline", { detail: "normal" });
       expect(second.isError).toBeFalsy();
       expect(second.text).not.toMatch(/first call this session/i);
     } finally {
@@ -477,11 +487,11 @@ describe("GRA-55 acceptance criteria", () => {
       await rig.pushEvents([blocked(1_000)]);
       // `timeline` advances the watermark's lastExaminedT without ever
       // recording a findings digest — the exact device shape.
-      const setup = await rig.client.callTool("timeline", {});
+      const setup = await rig.client.callTool("timeline", { detail: "normal" });
       expect(setup.isError).toBeFalsy();
 
       // Nothing new happens. The buffer still holds the one old event.
-      const result = await rig.client.callTool("findings", { since: "last" });
+      const result = await rig.client.callTool("findings", { detail: "normal", since: "last" });
       expect(result.isError).toBeFalsy();
       expect(result.text).not.toMatch(/first call this session/i);
       expect(result.text).not.toMatch(/crossed a threshold/i); // not "nothing crossed a threshold in the 0s examined"
@@ -508,12 +518,12 @@ describe("GRA-55 acceptance criteria", () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([blocked(1_000)]);
-      const first = await rig.client.callTool("findings", {});
+      const first = await rig.client.callTool("findings", { detail: "normal" });
       expect(first.isError).toBeFalsy();
       const firstPayload = first.json as { window: { from: number; to: number } };
       expect(firstPayload.window.from).toBe(firstPayload.window.to); // single event, zero-width
 
-      const second = await rig.client.callTool("findings", {});
+      const second = await rig.client.callTool("findings", { detail: "normal" });
       expect(second.isError).toBeFalsy();
       expect(second.text).not.toMatch(/nothing new/i);
       const secondPayload = second.json as { findings: Array<{ id: string; status?: string }> };
@@ -575,7 +585,11 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
     const timeline1 = new TimelineServer(device1, 0);
     devices.push(device1);
     timelines.push(timeline1);
-    const { server: server1 } = createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    const { server: server1 } = createPortholeServer({
+      device: device1,
+      timeline: timeline1,
+      version: "0.0.0-test",
+    });
     device1.start();
     await waitUntil(() => device1.hello !== null, 10_000);
 
@@ -586,7 +600,7 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
 
     const client1 = await connect(server1);
     clients.push(client1);
-    const first = await client1.callTool("findings", {});
+    const first = await client1.callTool("findings", { detail: "normal" });
     expect(first.isError).toBeFalsy();
     const firstPayload = first.json as { findings: Array<{ id: string }> };
     expect(firstPayload.findings.some((f) => f.id === "main-thread-stall")).toBe(true);
@@ -601,7 +615,11 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
     const timeline2 = new TimelineServer(device2, 0);
     devices.push(device2);
     timelines.push(timeline2);
-    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    const { server: server2 } = createPortholeServer({
+      device: device2,
+      timeline: timeline2,
+      version: "0.0.0-test",
+    });
     device2.start();
     await waitUntil(() => device2.hello !== null, 10_000);
     expect(timeline2.buffer().length).toBe(0); // the live ring really is empty — a fresh process
@@ -617,7 +635,7 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
 
     const client2 = await connect(server2);
     clients.push(client2);
-    const second = await client2.callTool("findings", { since: "last" });
+    const second = await client2.callTool("findings", { detail: "normal", since: "last" });
     expect(second.isError).toBeFalsy();
     const secondPayload = second.json as { findings: Array<{ id: string; status?: string }> };
     const resolved = secondPayload.findings.find((f) => f.id === "main-thread-stall");
@@ -659,7 +677,11 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
     const timeline1 = new TimelineServer(device1, 0);
     devices.push(device1);
     timelines.push(timeline1);
-    const { server: server1 } = createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    const { server: server1 } = createPortholeServer({
+      device: device1,
+      timeline: timeline1,
+      version: "0.0.0-test",
+    });
     device1.start();
     await waitUntil(() => device1.hello !== null, 10_000);
 
@@ -670,7 +692,7 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
 
     const client1 = await connect(server1);
     clients.push(client1);
-    const setup = await client1.callTool("timeline", {});
+    const setup = await client1.callTool("timeline", { detail: "normal" });
     expect(setup.isError).toBeFalsy();
 
     device1.stop();
@@ -682,18 +704,25 @@ describe("GRA-55 AC6: the watermark survives an MCP server restart", () => {
     const timeline2 = new TimelineServer(device2, 0);
     devices.push(device2);
     timelines.push(timeline2);
-    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    const { server: server2 } = createPortholeServer({
+      device: device2,
+      timeline: timeline2,
+      version: "0.0.0-test",
+    });
     device2.start();
     await waitUntil(() => device2.hello !== null, 10_000);
     expect(timeline2.buffer().length).toBe(0); // the live ring really is empty
 
     const client2 = await connect(server2);
     clients.push(client2);
-    const result = await client2.callTool("findings", { since: "last" });
+    const result = await client2.callTool("findings", { detail: "normal", since: "last" });
     expect(result.isError).toBeFalsy();
     expect(result.text).not.toMatch(/first call this session/i);
     expect(result.text).toMatch(/nothing new/i);
-    const payload = result.json as { eventsExamined: number; window: { from: number; to: number; ms: number } };
+    const payload = result.json as {
+      eventsExamined: number;
+      window: { from: number; to: number; ms: number };
+    };
     expect(payload.eventsExamined).toBe(0);
     expect(payload.window.ms).toBe(0);
   });
