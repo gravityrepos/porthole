@@ -156,8 +156,8 @@ describe("currentSourceFingerprint", () => {
    * runs — verified by comparing this function's output, run against this
    * repo's own real `sample/` module, against the fingerprint a real Gradle
    * build actually wrote into `sample/build/porthole/compose-report.json`
-   * (re-captured for GRA-72: `Screens.kt` gained the IconButton/tiny-target
-   * accessibility fixtures, re-verified against a fresh
+   * (re-captured for GRA-72's IconButton/tiny-target accessibility fixtures
+   * and GRA-64's `LeakFixture.kt` plus "Leak activity" button in `Screens.kt`, re-verified against a fresh
    * `./gradlew :sample:portholeComposeReport -Pporthole.variant=roomDebug`
    * run — see `composeReportFixtures/PROVENANCE.md` on the Gradle-plugin
    * side for the matching half of this proof, which is unaffected: that
@@ -171,7 +171,7 @@ describe("currentSourceFingerprint", () => {
   it("matches the real Gradle-computed fingerprint for this repo's own sample module", () => {
     const sampleRoot = path.join(WORKTREE_ROOT, "sample");
     expect(currentSourceFingerprint(sampleRoot)).toBe(
-      "1f08d5e0b5d902f0627e634e636801a50410a2ebc3e5d9b7ba6521a8a020eaaa",
+      "2744318fda3ce66b0173ffb47a0661b142a342d8a52c4adee499bcfba664b903",
     );
   });
 });

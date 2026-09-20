@@ -3,6 +3,7 @@
 package live.gravitylabs.porthole.collect
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -78,5 +79,23 @@ class RedactionTest {
     @Test
     fun `leaves a short statement untruncated`() {
         assertEquals("SELECT 1", Redaction.collapseSql("  SELECT 1  "))
+    }
+
+    // -- GRA-64: a LeakCanary trace goes through the same bounded path -------
+
+    @Test
+    fun `leaves a short leak trace untouched`() {
+        val trace = "com.example.shop.LeakyActivity instance\n" +
+            "Retaining 256.0 kB in 1 object"
+        assertEquals(trace, Redaction.leakTrace(trace))
+    }
+
+    @Test
+    fun `caps a very long leak trace and says so, the same shape collapseSql uses`() {
+        val long = "== leakcanary ==\n" + "x".repeat(10_000)
+        val capped = Redaction.leakTrace(long)
+
+        assertEquals(6003, capped.length)
+        assertTrue(capped.endsWith("..."))
     }
 }

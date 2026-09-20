@@ -348,6 +348,51 @@ PR that makes the change, not after the fact.
   README's recompositions caveat is rewritten, not softened; the full
   mechanism, measurements and version constraints are in
   `docs/spikes/GRA-70-recomposition-counts.md` (GRA-235).
+- LeakCanary's own leaks, delivered where the agent is already looking. If a
+  debug build already ships `com.squareup.leakcanary:leakcanary-android`
+  (compileOnly on the runtime side, floor 2.14 — no app code beyond the
+  dependency, since LeakCanary installs itself automatically), Porthole
+  hooks `LeakCanary.config.onHeapAnalyzedListener`, chaining onto whatever
+  listener was already there. Each leak becomes its own `leak` event — the
+  leaking object's class, retained heap size, how many occurrences this
+  heap dump found, and LeakCanary's own rendered trace text (redacted,
+  bounded, the same path as everything else) — and `findings` promotes an
+  application leak to `warning` with the retained size and the head of the
+  reference path, leaving a library leak LeakCanary already classifies as
+  known at `note`. `setup` gains a `leakcanary` row with three states:
+  absent (silent — never recommended, since it is a debug-only opt-in
+  dependency this project otherwise never suggests adding), present and
+  hooked, and present but the API this module compiled against did not
+  match (named explicitly, not the generic "not hooked" every other
+  integration falls back to). A heap dump pauses the whole VM for seconds,
+  long enough that the main-thread watchdog cannot tell it apart from a
+  real hang — that window is reconstructed from LeakCanary's own
+  `createdAtTimeMillis`/`dumpDurationMillis`, and a stall inside it is
+  reported as "heap dump by LeakCanary" at `note` rather than as a
+  `main-thread-stall` pointed at the app. The sample gets a
+  `debugImplementation` LeakCanary dependency and a deliberate,
+  clearly-marked Activity leak behind a "Leak activity" button (GRA-64).
+- Three more device-context signals, each a callback rather than a poll:
+  `PowerManager.addThermalStatusListener` (API 29+) reports every thermal
+  transition the instant it happens, with `getThermalHeadroom` (API 30+, a
+  10-second forecast) riding along where the platform supports it; every
+  Activity's `onCreate`/`onDestroy` now carries `isChangingConfigurations`
+  and whether a saved instance state came back — confirmed on a real device,
+  that flag is only ever true on the *destroy* half of a configuration-driven
+  recreate (a rotation, say), never on the incoming `onCreate`, so a rotation
+  is told apart from a process-death restore by whether a same-Activity
+  destroy immediately precedes the create, not by the create's own flag; and
+  the app's current permission grant set — one `checkSelfPermission` pass over
+  exactly the permissions the manifest declared — is reported at install and
+  again on every foreground transition, so a permission revoked while the
+  app was backgrounded shows up the next time it matters. All three ride the
+  same `Application.ActivityLifecycleCallbacks` `StartupCollector` and this
+  collector's own foreground/background tracking already register — no
+  second, competing observer. `findings` correlates a SEVERE-or-worse
+  thermal span sustained past ten seconds with any dropped frames inside
+  that same window into a `thermal-throttling` finding — `warning`,
+  `correlated` (never `observed`: two things sharing a window is ordering,
+  not proof one caused the other) (GRA-73).
 
 ### Changed
 

@@ -2176,6 +2176,10 @@ look.
 The timeline puts the main thread lane next to dropped frames, because a block
 and the frames it cost are the same event seen twice.
 
+A stall that lines up with a [LeakCanary](#leakcanary) heap dump is reported
+as that, at `note`, rather than as a `main-thread-stall` finding pointed at
+the app.
+
 ## StrictMode
 
 `db-on-main-thread` above only ever sees Room and SQLDelight going through the
@@ -2240,6 +2244,92 @@ violation and never a number that stopped moving early.
 Needs API 28 (`penaltyListener`, which hands the violation over as an object
 instead of a log line). Below that, `strictMode.set(true)` installs nothing
 at all — no log-scraping fallback — and the `setup` tool says why.
+
+## LeakCanary
+
+LeakCanary already finds the leak and already writes the trace. What it does
+not do is put either one where an agent already looks — its own notification
+and on-device UI, not the timeline. If your app already ships it:
+
+```kotlin
+debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
+```
+
+No app code beyond the dependency. LeakCanary installs its own
+`ContentProvider` and starts watching automatically, the same
+zero-configuration shape `ComponentActivity`'s own `fullyDrawnReporter` gets
+for [startup](#startup); Porthole hooks the one seam it offers for "a heap
+was analyzed" — `LeakCanary.config.onHeapAnalyzedListener` — chaining onto
+whatever listener was already there, the same way every other integration
+here chains rather than replaces.
+
+Each leak LeakCanary classifies becomes its own event: the leaking object's
+class, the retained heap size, how many separate occurrences this one heap
+dump found, and LeakCanary's own rendered trace text. `findings` promotes an
+application leak — an app-code reference holding a dead Activity, Fragment or
+View — to `warning`, with the retained size and the head of the reference
+path; a library leak LeakCanary already recognizes and classifies as a known,
+framework-side defect stays a `note`.
+
+**Absent means silence, not a recommendation.** `setup` never suggests adding
+LeakCanary — it is a debug-only, opt-in dependency, and this project's `setup`
+tool otherwise only ever names a gap in something you already shipped. If it
+is present but its own API does not match what Porthole compiled against
+(floor: leakcanary-android 2.14), `setup` says exactly that — present but
+signature mismatch — rather than the generic "not hooked" every other
+integration falls back to.
+
+**A heap dump is not a stall, and `blocking` says so.** LeakCanary pauses the
+whole VM for the dump itself, sometimes for seconds — long enough that the
+main-thread watchdog cannot tell that pause apart from a real hang once the
+process resumes. Reconstructed from LeakCanary's own `createdAtTimeMillis`
+and `dumpDurationMillis`, that window is matched against any stall reported
+inside it: a stall LeakCanary's own dump caused is reported as exactly
+that — "heap dump by LeakCanary", `note`, not the app's defect — instead of
+becoming a `main-thread-stall` finding pointed at the wrong culprit.
+
+## Thermal, activity lifecycle and permissions
+
+Three more device-context signals, each a callback rather than a poll —
+nothing here is on a timer.
+
+**Thermal.** `PowerManager.addThermalStatusListener` (API 29+) reports every
+transition the platform itself declares — `none` through `shutdown` — the
+instant it happens, with `getThermalHeadroom` (API 30+, a 10-second forecast)
+riding along when the platform supports it. This is the app's own,
+timeline-correlated half of thermal state; [`system_context`](#system-traces)
+is the other half — a live, on-demand snapshot pulled from the device's own
+thermal sensors over `adb shell`, useful for "what is the device doing right
+now" in a way a stream of past transitions is not. `findings` correlates the
+two only loosely: a SEVERE-or-worse span sustained past ten seconds, with
+dropped frames inside that same window, becomes a `thermal-throttling`
+finding — `warning`, and deliberately `correlated`, never `observed`. Two
+things sharing a window is ordering, not proof one caused the other, and this
+finding's own wording says so: it reports what coincided, not what caused
+what.
+
+**Activity lifecycle.** Every Activity's `onCreate`/`onDestroy` is reported
+with `isChangingConfigurations` and whether a saved instance state came back.
+Confirmed on a real device: `isChangingConfigurations` is only ever true on
+the *destroy* event — the framework sets it on the outgoing instance during a
+configuration-driven recreate (a rotation, say) and never on the incoming
+one's own `onCreate`, whatever caused it to run. So the tell for "rotation vs
+process restore" is not that flag on `create` at all — it is whether a
+`destroy` event for the same Activity, `isChangingConfigurations` true,
+immediately precedes it in the same session. A rotation always has one; a
+process-death restore (`onCreate` alone, with a saved state) never does,
+because the old process — and its own `onDestroy` call — is already gone.
+Wired into the same `Application.ActivityLifecycleCallbacks`
+[`StartupCollector`](#startup) and this collector's own foreground/background
+tracking already register — exactly one registration for the whole app, not a
+second, competing observer that would double-count the same callbacks.
+
+**Permissions.** The current grant set — one `checkSelfPermission` pass over
+exactly the permissions the manifest declared, read from `PackageManager`
+rather than a fixed list — reported once at install and again on every
+foreground transition. A permission revoked while the app was backgrounded
+(Settings, or `adb shell pm revoke`) is invisible to the process until the OS
+hands control back to it, which is exactly when the next check runs.
 
 ## Startup
 

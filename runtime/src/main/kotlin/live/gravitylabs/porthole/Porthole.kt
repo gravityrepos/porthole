@@ -31,6 +31,7 @@ import live.gravitylabs.porthole.collect.SemanticsCollector
 import live.gravitylabs.porthole.collect.SnapshotWatcher
 import live.gravitylabs.porthole.collect.StateCollector
 import live.gravitylabs.porthole.collect.Window
+import live.gravitylabs.porthole.integration.LeakCanaryPorthole
 import live.gravitylabs.porthole.integration.WorkManagerPorthole
 import live.gravitylabs.porthole.protocol.BlockingReport
 import live.gravitylabs.porthole.protocol.FrameReport
@@ -226,6 +227,16 @@ object Porthole {
             memory.start()
             collectors += "memory"
             if (deviceContext.install(app)) collectors += "device"
+
+            // GRA-64: LeakCanaryPorthole.install() does its own classpath
+            // probe before touching a single LeakCanary type — the same
+            // presence-gate shape as WorkManager just above — and returns
+            // false, silently, for an app that never added
+            // leakcanary-android. Setup.recordLeakCanary is only ever
+            // called from inside it, never unconditionally here, which is
+            // what keeps "absent" meaning no setup entry at all rather than
+            // a present-but-false one (see that method's own doc comment).
+            if (LeakCanaryPorthole.install(ring)) collectors += "leakcanary"
             if (exitInfo.install(app)) collectors += "exit_info"
             if (autoWire.install(app)) collectors += "autowire"
 
@@ -392,6 +403,7 @@ object Porthole {
             s.autoWire.stop()
             s.watchdog.stop()
             s.strictMode?.stop()
+            LeakCanaryPorthole.uninstall()
             s.recompositions.stop()
             s.compositionTree.stop(s.app)
             s.nav?.unregister()
