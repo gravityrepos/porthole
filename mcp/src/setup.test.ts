@@ -142,6 +142,22 @@ describe("SNIPPETS stay in sync with README.md (GRA-65 EM: 'keep in sync by test
   const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
   const normalizedReadme = normalize(readme);
 
+  // GRA-228 QA (S2): the loop below generates its own test cases from
+  // `Object.entries(SNIPPETS)`, so an emptied SNIPPETS silently generates
+  // zero tests — a green suite with nothing actually checked — and an
+  // empty-string snippet passes `toContain("")` trivially, since every
+  // string contains the empty string. Neither failure mode shows up as a
+  // red test; this one pins the shape the loop depends on, outside the
+  // loop, so removing an entry (or emptying its snippet) fails here even
+  // when the generated per-entry test it would have produced is simply
+  // gone rather than failing.
+  it("covers all five integrations, each with a real, non-empty snippet", () => {
+    expect(Object.keys(SNIPPETS)).toHaveLength(5);
+    for (const [name, snippet] of Object.entries(SNIPPETS)) {
+      expect(snippet.trim().length, `${name}'s snippet must not be empty`).toBeGreaterThan(0);
+    }
+  });
+
   for (const [name, snippet] of Object.entries(SNIPPETS)) {
     it(`${name}'s snippet is the line README.md actually documents`, () => {
       // Mutation this catches: hand-editing a SNIPPETS entry (or
