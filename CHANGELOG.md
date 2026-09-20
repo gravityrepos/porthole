@@ -87,25 +87,37 @@ PR that makes the change, not after the fact.
   (GRA-57).
 
 - A slow HTTP call now says which part was slow. `installPorthole()` reports
-  OkHttp's own `EventListener` phase breakdown (`dns`, `connect`,
-  `secureConnect`, `requestHeaders`, `requestBody`, `responseHeaders`,
+  OkHttp's own `EventListener` phase breakdown (`queued`, `dns`, `connect`,
+  `secureConnect`, `dispatch`, `requestHeaders`, `requestBody`, `waiting`,
   `responseBody` — each already the time that phase itself took, summing to
-  within a few ms of the call's own `elapsedMs`), connection reuse, protocol
-  and real request/response byte counts (not a payload, and never a fake
-  zero for a request with no body) — present whether or not `BodyCapture` is
-  on. It reads back whatever `EventListener`/`EventListenerFactory` the
-  builder already had configured and chains onto it, so an app with its own
-  listener keeps receiving every callback rather than going dark the moment
-  `installPorthole()` is added. `findings` gains `http-call-slow` at
-  `warning` for a call at or past 3000ms, attributed to the dominant phase
-  and joined against the device's own most recent `network` event, so a call
-  that ran on cellular says so. `inflight`'s `recentHttp` is now window-aware
-  (the standard `sinceMs`/`from`/`to`, `limit` defaulting to the old "last
-  25"), so quoting a finding's `window` can reach a call older than the
-  default would otherwise return. Ktor gets none of this — its plugin API
-  sits above every engine, with no phase, reuse, protocol or byte-count hook
-  any engine agrees on — and the OkHttp engine remains the documented way to
-  get it anyway (GRA-66).
+  within a few ms of the call's own `elapsedMs`; `dns`/`connect` sum every
+  attempt a call made, a route failover included, with `connectAttempts`
+  saying how many), connection reuse, protocol and real request/response
+  byte counts (not a payload, and never a fake zero for a request with no
+  body) — present whether or not `BodyCapture` is on. It reads back
+  whatever `EventListener`/`EventListenerFactory` the builder already had
+  configured and chains onto it — all 29 callbacks OkHttp's own
+  `EventListener` declares, `connectionReleased` included — so an app with
+  its own listener keeps receiving every one rather than going dark the
+  moment `installPorthole()` is added; that read-back is now guarded
+  against the `IllegalStateException` a momentarily-invalid builder can
+  throw from it, and the one call order it cannot fix on its own (the app's
+  own listener set *after* `installPorthole()`) is caught at the first
+  request and reported as an `okhttp-listener` entry from `setup`.
+  `findings` gains `http-call-slow` at `warning` for a call at or past
+  3000ms, named `mostly <phase>` only when that phase is actually at least
+  half the call's own time (otherwise `largest phase: <phase> (Nms of
+  Mms)`, honest about how little it explains) and joined against the
+  device's own most recent `network` event, so a call that ran on cellular
+  says so. `inflight`'s `recentHttp` is now window-aware (the standard
+  `sinceMs`/`from`/`to`, `limit` defaulting to the old "last 25", the
+  buffer itself now 200 deep so a finding's `window` can still reach a call
+  older than the default returns) — with only the newest 25 keeping their
+  body previews, so the deeper buffer does not multiply memory spent on
+  bodies nobody asked to keep that far back. Ktor gets none of the phase/
+  reuse/protocol/byte-count work — its plugin API sits above every engine,
+  with no hook any engine agrees on — and the OkHttp engine remains the
+  documented way to get it anyway (GRA-66).
 - `portholeComposeReport` enables the Kotlin compose compiler's own metrics
   for the debug variant (only when actually requested — an ordinary
   `assembleDebug`/`test` build never pays the extra compile cost), and

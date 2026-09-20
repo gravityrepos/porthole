@@ -1453,8 +1453,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "Every integration the runtime can see: on the classpath or not, instrumented or not, each " +
         "with the runtime's own hint when there is something to do about it — the same data the " +
         "timeline UI's setup panel shows, including the `socket` entry (did the loopback socket " +
-        "bind) and the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
-        "policy REPLACES the app's own rather than chaining it).\n\n" +
+        "bind), the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
+        "policy REPLACES the app's own rather than chaining it), and — present only when it actually " +
+        "happened — an `okhttp-listener` entry (GRA-66 F10): the app called its own " +
+        "`eventListener()`/`eventListenerFactory()` *after* `installPorthole()` on the same builder, " +
+        "which silently replaced Porthole's own factory (OkHttp's own last-call-wins) even though " +
+        "`installPorthole()` itself already reported this client wired. Its hint says the fix: call " +
+        "`installPorthole()` after the app's own listener, not before.\n\n" +
         "For each integration that is present but unwired, this also gives the exact line to add " +
         "and names which lanes and tools go dark without it — ranked so the gap that leaves the " +
         "most dark comes first. A fully-instrumented project gets an explicit 'everything present " +
@@ -1522,13 +1527,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "`am start -W`'s TotalTime always reads larger than this tool's `totalMs` for the same launch.\n\n" +
         "`http-call-slow` (GRA-66) fires at warning for a call whose own elapsed time was at least " +
         "3000ms — a pragmatic floor, not a platform-defined one, close to the point Google's own " +
-        "RAIL guidance treats a wait as a wait rather than a step in a sequence — and attributes it " +
-        "to whichever OkHttp phase (dns/connect/secureConnect/requestHeaders/requestBody/" +
-        "responseHeaders/responseBody) took the largest share, when the runtime reported one at " +
-        "all: a Ktor call with no OkHttp engine underneath has no phase breakdown to attribute to, " +
-        "and says so rather than guessing. Joins the device's own most recent `network` event in " +
-        "force when the call started, so a call that ran on a metered cellular connection says so " +
-        "instead of just looking slow for no stated reason.\n\n" +
+        "RAIL guidance treats a wait as a wait rather than a step in a sequence — and names whichever " +
+        "OkHttp phase (queued/dns/connect/secureConnect/dispatch/requestHeaders/requestBody/" +
+        "waiting/responseBody) took the largest share, when the runtime reported one at all: a Ktor " +
+        "call with no OkHttp engine underneath has no phase breakdown to attribute to, and says so " +
+        "rather than guessing. Called 'mostly `<phase>`' only when that phase actually is at least " +
+        "half of the call's own elapsed time — phases need not sum to it (queueing behind " +
+        "`maxRequestsPerHost` and OkHttp's own exchange setup do, as `queued`/`dispatch`, but a redirect " +
+        "or an auth-challenge retry's own request/response phases describe only the final leg) — " +
+        "below that line it says 'largest phase: `<phase>` (Nms of Mms)' instead, honest about how " +
+        "little of the call the largest phase actually explains. Joins the device's own most recent " +
+        "`network` event in force when the call started, so a call that ran on a metered cellular " +
+        "connection says so instead of just looking slow for no stated reason.\n\n" +
         "`ringSnapshot` (present only on an error-severity finding, only while `system_trace_start` " +
         "has a ring running): a fresh snapshot of it, pulled without blocking this call — a path and " +
         "byte count once it lands, or `{ inProgress: true }` on the call that kicked it off or is " +
@@ -2947,18 +2957,26 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "'why is this screen still spinning'. `http`/`queries`/`work` are always the live set — " +
         "what is happening right now — and ignore the window below entirely.\n\n" +
         "Also returns recentHttp: finished calls with status, headers, OkHttp's own phase " +
-        "breakdown (dns/connect/secureConnect/requestHeaders/requestBody/responseHeaders/" +
-        "responseBody, each already the time that phase itself took), connection reuse, protocol, " +
-        "byte counts, and — when the app opted in via BodyCapture — request and response body " +
-        "previews. A body with text:null carries an omittedReason saying why it was not captured " +
-        "(disabled, wrong content type, one-shot stream); that is different from the call having " +
-        "had no body at all. `phases`/`reused`/`protocol`/`requestBytes`/`responseBytes` are only " +
-        "ever present for a call OkHttp's own EventListener actually instrumented — empty for a " +
-        "Ktor call with no OkHttp engine underneath (GRA-66; see KtorPorthole's own doc comment " +
-        "for why that boundary is real).\n\n" +
+        "breakdown (queued/dns/connect/secureConnect/dispatch/requestHeaders/requestBody/waiting/" +
+        "responseBody, each already the time that phase itself took — queued and dispatch close the " +
+        "two gaps that otherwise went unattributed, dispatcher queueing before any network activity " +
+        "and OkHttp's own exchange setup once a connection exists), connection reuse, protocol, " +
+        "connectAttempts (present only past 1 — a failover, not an ordinary connect), byte counts, " +
+        "and — when the app opted in via BodyCapture — request and response body previews. A body " +
+        "with text:null carries an omittedReason saying why it was not captured (disabled, wrong " +
+        "content type, one-shot stream); that is different from the call having had no body at all. " +
+        "`phases`/`reused`/`protocol`/`requestBytes`/`responseBytes` are only ever present for a call " +
+        "OkHttp's own EventListener actually instrumented — empty for a Ktor call with no OkHttp " +
+        "engine underneath (GRA-66; see KtorPorthole's own doc comment for why that boundary is " +
+        "real). `dns`/`connect` sum every attempt a call made (a route failover included); " +
+        "requestHeaders/requestBody/waiting/responseBody describe only the call's *final* leg — a " +
+        "redirect or an auth-challenge retry re-runs its own, and each overwrites the last — while " +
+        "elapsedMs still spans every leg.\n\n" +
         "GRA-66: recentHttp is now window-aware, the standard sinceMs/from/to below — quote a " +
         "finding's own `window` to reach a call `http-call-slow` named, even one older than the " +
-        "default `limit` (25) would otherwise return.",
+        "default `limit` (25) would otherwise return. Only the newest 25 calls keep their body " +
+        "previews, whatever `limit` is asked for — an older entry still has every other field, just " +
+        "not the body.",
       inputSchema: {
         ...windowShape,
         limit: z
