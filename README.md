@@ -1008,11 +1008,16 @@ and who was holding it, needing only the `dalvik` atrace category
 at once — where the main thread ran (core, cluster, frequency) and who else
 wanted the same cores in the same window — and is the one question here that
 is `correlated` rather than `observed`: it never claims the placement caused
-the window's own finding, and stays silent entirely unless the main thread
-spent a material share of the window on a little core or throttled below a
-fraction of max frequency, specifically so an idle device sitting on a desk
-does not generate a finding out of a few milliseconds of ordinary
-housekeeping.
+the window's own finding, and stays silent entirely unless the main thread's
+running time on a little core, or at a throttled frequency, cleared 5% of
+the *window's own duration* — not an absolute number of milliseconds,
+specifically so a device that is genuinely idle does not generate a finding
+out of the same few milliseconds of ordinary housekeeping just because the
+window happened to be short (a fixed millisecond floor survives only as a
+secondary minimum once that share is cleared). "Throttled" is judged against
+a different threshold for a little core than a big or medium one, because
+the two run at very different fractions of their own max frequency under
+perfectly ordinary load.
 
 Both need `trace_processor_shell`, Perfetto's own query engine and a large
 platform-specific binary that is not bundled with Porthole: it would multiply
@@ -2121,8 +2126,9 @@ and fingerprint checked the trace half directly: `perfetto --app
 com.example.shop` is accepted and honoured — a real capture carried `porthole:
 http`, `recompose` and `screen` slices with real durations, and it still
 worked when the app process predated the tracing session. All five curated
-`ask_system_trace` questions answered on the first try, returning six
-differentiated findings and none empty, including 31ms of main-thread
+`ask_system_trace` questions (the five that existed at the time) answered on
+the first try, returning six differentiated findings and none empty,
+including 31ms of main-thread
 runnable-but-not-scheduled that Porthole's own collectors cannot see. The
 trace's own `App Deadline Missed` (119.47ms) matched the frame Porthole
 independently reported at `totalMs: 125`. An earlier report of this device

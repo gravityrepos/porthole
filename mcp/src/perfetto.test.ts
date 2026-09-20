@@ -428,19 +428,63 @@ describe("interpret: trace-lock-contention (GRA-61)", () => {
  * criterion this exists to satisfy: no finding on a trace from an idle
  * device on a desk, plugged into power. These rows stand in for that case
  * and for a busy one, both hand-built (see fixtures/stdout/PROVENANCE.md).
+ *
+ * QA's wave-merge pass found three defects the fixtures above did not catch,
+ * all now covered directly: 61-A (a null frequency sample read as 0Hz),
+ * 61-B (the materiality floor was absolute ms, not a share of the window),
+ * 61-C (one frequency threshold for every core class, when big and little
+ * cores run at very different fractions of their own max under ordinary
+ * load).
  */
 describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
   it("stays quiet on an idle device: brief, low-duty-cycle running time on a little core", () => {
-    // A real idle-but-not-asleep device: the main thread wakes briefly for
-    // housekeeping, most of it on a little core, but only a couple of
-    // milliseconds total in this window — below MATERIAL_RUNNING_MS.
+    // QA's own reproducer: 40ms of housekeeping in a 10s window — the
+    // absolute floor this replaced (15ms) would have fired on this, because
+    // 40ms clears an absolute floor regardless of how long the window was.
     const idle: Rows = {
       cpu: [
-        { kind: "main_thread", core: "0", cluster_type: "little", dur: "2000000", avg_freq: "700000", max_freq: "1800000", process_name: null, COUNT: null },
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "40000000", avg_freq: "700000", max_freq: "1800000", process_name: null, COUNT: null },
         { kind: "other", core: null, cluster_type: null, dur: "500000", avg_freq: null, max_freq: null, process_name: "system_server", COUNT: "3" },
       ],
     };
-    expect(interpret(idle).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+    expect(interpret(idle, undefined, 10_000).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+  });
+
+  it("fires on the same shape of running time once it is a material share of a shorter window", () => {
+    // QA's paired case: the same kind of little-core running time, 400ms in
+    // a 2s window — 20% of the window, well past WINDOW_FRACTION.
+    const busy: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "400000000", avg_freq: "1500000", max_freq: "1800000", process_name: null, COUNT: null },
+      ],
+    };
+    const finding = interpret(busy, undefined, 2_000).find((f) => f.id === "trace-cpu-placement");
+    expect(finding).toBeDefined();
+    expect(finding?.title).toContain("little core");
+  });
+
+  it("stays quiet without windowMs, even for rows that would otherwise clearly qualify (61-B)", () => {
+    // A caller exercising interpret() directly, without going through
+    // askTrace — the one place windowMs comes from. Cannot assess
+    // materiality, so this must not guess.
+    const wouldFire: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "500000000", avg_freq: "900000", max_freq: "1800000", process_name: null, COUNT: null },
+      ],
+    };
+    expect(interpret(wouldFire).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+  });
+
+  it("keeps MATERIAL_RUNNING_MS as a secondary floor once the window fraction is cleared", () => {
+    // 10ms of 100ms clears WINDOW_FRACTION (10%) easily, but 10ms of actual
+    // running time is still noise on its own — the floor this replaced
+    // survives as a secondary check for exactly this degenerate case.
+    const tinyWindow: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "10000000", avg_freq: "900000", max_freq: "1800000", process_name: null, COUNT: null },
+      ],
+    };
+    expect(interpret(tinyWindow, undefined, 100).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
   });
 
   it("stays quiet when running time is material but neither on a little core nor throttled", () => {
@@ -451,7 +495,7 @@ describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
         { kind: "main_thread", core: "4", cluster_type: "big", dur: "150000000", avg_freq: "2700000", max_freq: "2800000", process_name: null, COUNT: null },
       ],
     };
-    expect(interpret(fine).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+    expect(interpret(fine, undefined, 1_000).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
   });
 
   it("fires when the main thread spent a material share of the window on a little core", () => {
@@ -462,7 +506,7 @@ describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
         { kind: "other", core: null, cluster_type: null, dur: "95000000", avg_freq: null, max_freq: null, process_name: "system_server", COUNT: "42" },
       ],
     };
-    const finding = interpret(busy).find((f) => f.id === "trace-cpu-placement");
+    const finding = interpret(busy, undefined, 1_000).find((f) => f.id === "trace-cpu-placement");
     expect(finding).toBeDefined();
     expect(finding?.confidence).toBe("correlated");
     expect(finding?.spanning).toBe(true);
@@ -479,9 +523,60 @@ describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
         { kind: "main_thread", core: "4", cluster_type: "big", dur: "100000000", avg_freq: "800000", max_freq: "2800000", process_name: null, COUNT: null },
       ],
     };
-    const finding = interpret(throttled).find((f) => f.id === "trace-cpu-placement");
+    const finding = interpret(throttled, undefined, 1_000).find((f) => f.id === "trace-cpu-placement");
     expect(finding).toBeDefined();
     expect(finding?.title).toContain("% of max frequency");
+  });
+
+  /**
+   * 61-A. Reproduces QA's exact row shape: a main_thread row with a
+   * substantial dur and no frequency sample at all (avg_freq null, the
+   * correct SQL answer to "nothing in cpu_frequency_counters was in force
+   * before this interval started" — see main_by_cpu's own comment). Before
+   * the fix, `n(null)` read as 0 and the weighted average collapsed to
+   * "ran at 0% of max frequency for 200ms", which both fabricates a reading
+   * nothing in the trace supports and fires the gate on it.
+   */
+  it("treats a fully-unsampled core as unknown frequency, not 0Hz (61-A)", () => {
+    const unsampled: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "4", cluster_type: "big", dur: "200000000", avg_freq: null, max_freq: "2800000", process_name: null, COUNT: null },
+      ],
+    };
+    const finding = interpret(unsampled, undefined, 1_000).find((f) => f.id === "trace-cpu-placement");
+    expect(finding).toBeUndefined();
+  });
+
+  /**
+   * 61-C. A big core sitting at 55% of its own max is a governor doing
+   * perfectly ordinary work, not a throttle reading — QA's own example of
+   * the false positive the single 0.6 threshold produced. A little core at
+   * the same 55% is a real throttle reading for that core class.
+   */
+  it("does not flag a big core at a moderate, healthy 55% of max frequency (61-C)", () => {
+    const moderateBigCore: Rows = {
+      cpu: [
+        { kind: "main_thread", core: "4", cluster_type: "big", dur: "200000000", avg_freq: "1540000", max_freq: "2800000", process_name: null, COUNT: null },
+      ],
+    };
+    expect(interpret(moderateBigCore, undefined, 1_000).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+  });
+
+  it("flags a little core at the same 55% of its own max, and only via the frequency reading", () => {
+    const throttledLittleCore: Rows = {
+      cpu: [
+        // The majority of running time on a fast big core keeps onLittleCore
+        // false, so a finding here can only come from the little core's own
+        // low-frequency reading — proving the per-class threshold fires
+        // independently of the little-core-share gate, not alongside it.
+        { kind: "main_thread", core: "4", cluster_type: "big", dur: "800000000", avg_freq: "2700000", max_freq: "2800000", process_name: null, COUNT: null },
+        { kind: "main_thread", core: "0", cluster_type: "little", dur: "200000000", avg_freq: "990000", max_freq: "1800000", process_name: null, COUNT: null },
+      ],
+    };
+    const finding = interpret(throttledLittleCore, undefined, 2_000).find((f) => f.id === "trace-cpu-placement");
+    expect(finding).toBeDefined();
+    expect(finding?.title).toContain("% of max frequency");
+    expect(finding?.title).not.toContain("little core for"); // not the onLittleCore branch
   });
 
   it("names nothing else when nothing else was contending, without inventing a process", () => {
@@ -490,13 +585,13 @@ describe("interpret: trace-cpu-placement, the gate (GRA-61)", () => {
         { kind: "main_thread", core: "0", cluster_type: "little", dur: "100000000", avg_freq: "900000", max_freq: "1800000", process_name: null, COUNT: null },
       ],
     };
-    const finding = interpret(busyAlone).find((f) => f.id === "trace-cpu-placement");
+    const finding = interpret(busyAlone, undefined, 1_000).find((f) => f.id === "trace-cpu-placement");
     expect(finding?.detail).toContain("Nothing else was contending");
     expect(finding?.evidence?.worstOtherProcess).toBeUndefined();
   });
 
   it("claims nothing when asked about nothing", () => {
-    expect(interpret({ cpu: [] }).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
+    expect(interpret({ cpu: [] }, undefined, 1_000).find((f) => f.id === "trace-cpu-placement")).toBeUndefined();
   });
 });
 
