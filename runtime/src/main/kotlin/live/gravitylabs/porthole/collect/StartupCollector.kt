@@ -135,6 +135,8 @@ internal class StartupCollector(private val ring: EventRing) {
         var onCreateMs: Long? = null
         var onStartMs: Long? = null
         var onResumeMs: Long? = null
+        /** QA 60-B: recorded here too, not only on the cold launch's own [reportFullyDrawnAt] — see [onReportFullyDrawn]. */
+        var reportFullyDrawnMs: Long? = null
     }
 
     fun install(app: Application): Boolean {
@@ -252,17 +254,26 @@ internal class StartupCollector(private val ring: EventRing) {
      * either way, not a real one.
      */
     private fun onPendingLaunchFrame(launch: PendingLaunch, atMs: Long) {
+        val reportFullyDrawnMs: Long?
         synchronized(lock) {
             if (pendingLaunch !== launch) return
             pendingLaunch = null
+            reportFullyDrawnMs = launch.reportFullyDrawnMs
         }
         val timestamps = StartupAssembly.Timestamps(
             originMs = launch.originMs,
-            originAssumed = false,
+            // QA 60-C: `originAssumed`'s own contract (see [StartupAssembly.Timestamps]'s
+            // doc comment) is "not the real fork time" — which a pending
+            // launch's origin never is, by construction (there is no fork
+            // for a warm or hot relaunch). `false` here was dishonest by
+            // that same contract, not merely inconsistent with it.
+            originAssumed = true,
+            originKind = StartupAssembly.OriginKind.ACTIVITY,
             activityOnCreateMs = launch.onCreateMs,
             activityOnStartMs = launch.onStartMs,
             activityOnResumeMs = launch.onResumeMs,
             firstFrameMs = atMs,
+            reportFullyDrawnMs = reportFullyDrawnMs,
         )
         ring.emit(EventKinds.STARTUP, StartupAssembly.toEvent(timestamps), at = nowMs())
     }
@@ -315,7 +326,18 @@ internal class StartupCollector(private val ring: EventRing) {
      * wins; both are the same fact observed two different ways.
      */
     fun onReportFullyDrawn() {
-        synchronized(lock) { if (reportFullyDrawnAt == null) reportFullyDrawnAt = nowMs() }
+        synchronized(lock) {
+            if (reportFullyDrawnAt == null) reportFullyDrawnAt = nowMs()
+            // QA 60-B: a later Activity's own reportFullyDrawn() call — see
+            // [attachFullyDrawnReporter]'s doc comment on why this is wired
+            // to every Activity, not only the process's first — used to land
+            // nowhere once the cold event had already emitted, so a warm/hot
+            // launch that genuinely did report was indistinguishable from
+            // one that never did. `pendingLaunch` is non-null only while a
+            // warm/hot launch is still in flight, so this can never
+            // misattribute a report to the wrong one of the two.
+            pendingLaunch?.let { if (it.reportFullyDrawnMs == null) it.reportFullyDrawnMs = nowMs() }
+        }
         // Beats the grace window rather than waiting the rest of it out —
         // only meaningful once the first frame has already scheduled emit().
         if (firstFrameAt != null) {
@@ -332,6 +354,7 @@ internal class StartupCollector(private val ring: EventRing) {
         val timestamps = StartupAssembly.Timestamps(
             originMs = originMs,
             originAssumed = originAssumed,
+            originKind = StartupAssembly.OriginKind.FORK,
             onCreateEntryMs = onCreateEntryAt,
             onCreateExitMs = onCreateExitAt,
             activityOnCreateMs = activityOnCreateAt,
@@ -365,6 +388,19 @@ internal class StartupCollector(private val ring: EventRing) {
 internal object StartupAssembly {
 
     /**
+     * QA 60-C: what kind of instant [Timestamps.originMs] actually is —
+     * carried on the wire (`toEvent`'s `originKind`) because the MCP side
+     * needs it to decide which launches a vitals-shaped threshold can
+     * honestly be applied to at all, not only whether the number looks big.
+     */
+    internal object OriginKind {
+        /** The process fork — the one cold launch gets this. */
+        const val FORK = "fork"
+        /** The relaunched Activity's own first lifecycle callback — every warm/hot launch. */
+        const val ACTIVITY = "activity"
+    }
+
+    /**
      * One launch's raw material. Every field but [originMs] is nullable
      * because a real launch may not have all of them — a warm or hot start
      * never gets an `onCreate*` pair, an app that never calls
@@ -374,8 +410,17 @@ internal object StartupAssembly {
      */
     internal data class Timestamps(
         val originMs: Long,
-        /** True when [originMs] is a fallback (see [StartupCollector]'s own doc comment), not the real fork time. */
+        /**
+         * True when [originMs] cannot be read as the precise instant its own
+         * [originKind] promises: for [OriginKind.FORK], only the Robolectric
+         * fallback case (see [StartupCollector]'s own doc comment); for
+         * [OriginKind.ACTIVITY], always — a lifecycle-callback timestamp is a
+         * real measurement of its own moment, but it is never the launch
+         * request the system (and `am start -W`) time from, which is what
+         * this flag is about, not whether the reading itself is trustworthy.
+         */
         val originAssumed: Boolean = false,
+        val originKind: String = OriginKind.FORK,
         val onCreateEntryMs: Long? = null,
         val onCreateExitMs: Long? = null,
         val activityOnCreateMs: Long? = null,
@@ -448,6 +493,7 @@ internal object StartupAssembly {
             put("classification", JsonPrimitive(classify(timestamps)))
             put("originMs", JsonPrimitive(timestamps.originMs))
             put("originAssumed", JsonPrimitive(timestamps.originAssumed))
+            put("originKind", JsonPrimitive(timestamps.originKind))
             timestamps.onCreateEntryMs?.let { put("onCreateEntryMs", JsonPrimitive(it)) }
             timestamps.onCreateExitMs?.let { put("onCreateExitMs", JsonPrimitive(it)) }
             timestamps.activityOnCreateMs?.let { put("activityOnCreateMs", JsonPrimitive(it)) }
