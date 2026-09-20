@@ -7,6 +7,7 @@ import path from "node:path";
 import type { DeviceEvent } from "./device.js";
 import { compareMetrics } from "./report.js";
 import { resetSourceIndexForTests } from "./sources.js";
+import { currentSourceFingerprint, resetComposeReportCacheForTests } from "./composeReport.js";
 import {
   alsoInWindowOf,
   alsoInWindowSentence,
@@ -1237,5 +1238,230 @@ describe("GRA-201: findings carry where when source resolution is on", () => {
     expect(onWhere).toBeDefined();
     expect(offWhere).toBeUndefined();
     expect(onRest).toEqual(offRest);
+  });
+});
+
+describe("GRA-69: recompose-hotspot joins the compose compiler report", () => {
+  const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
+  const hot = (label: string) =>
+    Array.from({ length: 150 }, (_, i) => event("recompose", i, { name: label }));
+
+  let root: string;
+  let savedProjectRoot: string | undefined;
+
+  function writeReport(modulePath: string, report: Record<string, unknown>): void {
+    const file = path.join(root, modulePath, "build/porthole/compose-report.json");
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(report));
+  }
+
+  beforeEach(() => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    resetComposeReportCacheForTests();
+    root = mkdtempSync(path.join(tmpdir(), "porthole-trace-compose-report-"));
+    process.env.PORTHOLE_PROJECT_ROOT = root;
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+    else process.env.PORTHOLE_PROJECT_ROOT = savedProjectRoot;
+    resetSourceIndexForTests();
+    resetComposeReportCacheForTests();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("promotes a not-skippable hotspot to a warning, above the bare-count note it would otherwise be", () => {
+    mkdirSync(path.join(root, "app/src/main/kotlin"), { recursive: true });
+    writeFileSync(
+      path.join(root, "app/src/main/kotlin/Screens.kt"),
+      "package com.example.shop.ui\n" +
+        "@Composable\n" +
+        "fun LeakyRow(highlight: RowHighlight) {\n" +
+        '  Modifier.portholeNode("Cart.ItemRow")\n' +
+        "}\n",
+    );
+    writeReport("app", {
+      generatedAt: "now",
+      variant: "debug",
+      module: "app",
+      kotlinVersion: "2.1.0",
+      gitHead: "abc",
+      sourceFingerprint: currentSourceFingerprint(path.join(root, "app")),
+      composables: [
+        {
+          name: "LeakyRow",
+          packageName: "com.example.shop.ui",
+          restartable: true,
+          skippable: false,
+          parameters: [{ name: "highlight", type: "RowHighlight", stable: false, unused: false }],
+        },
+      ],
+      classes: [
+        {
+          name: "RowHighlight",
+          stable: false,
+          runtimeStability: "Unstable",
+          properties: [{ name: "tappedAt", mutable: true, stable: true, type: "Long" }],
+        },
+      ],
+    });
+
+    const finding = find(hot("Cart.ItemRow")).find((f) => f.id === "recompose-not-skippable");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.confidence).toBe("correlated");
+    expect(finding?.detail).toContain("`LeakyRow` is restartable but not skippable");
+    expect(finding?.detail).toContain("`RowHighlight` is unstable because it has a `var` property (`tappedAt`)");
+    expect(finding?.evidence).toMatchObject({
+      composable: "Cart.ItemRow",
+      composeReport: { enclosingFunction: "LeakyRow", module: "app", skippable: false, stale: false },
+    });
+
+    // The promotion, proven by sort order rather than by severity alone:
+    // a not-skippable hotspot has to sort ahead of an ordinary warning-free
+    // note, which `findingsOf`'s severity ordering already guarantees for
+    // `error`/`warning`/`note` — this just confirms `recompose-not-skippable`
+    // actually lands in the `warning` bucket that promotion relies on.
+    const order = find(hot("Cart.ItemRow")).map((f) => f.severity);
+    expect(order[0]).toBe("warning");
+
+    // No "recompose-hotspot" note alongside it — the join replaces the
+    // finding's id/severity rather than adding a second finding.
+    expect(find(hot("Cart.ItemRow")).some((f) => f.id === "recompose-hotspot")).toBe(false);
+  });
+
+  it("reports a skippable-but-unstable hotspot differently from a not-skippable one — same note severity, different id and text", () => {
+    mkdirSync(path.join(root, "app/src/main/kotlin"), { recursive: true });
+    writeFileSync(
+      path.join(root, "app/src/main/kotlin/Screens.kt"),
+      '@Composable\nfun Busy(items: List<String>) { Modifier.portholeNode("Cart.ItemRow") }\n',
+    );
+    writeReport("app", {
+      generatedAt: "now",
+      variant: "debug",
+      module: "app",
+      kotlinVersion: "2.1.0",
+      gitHead: "abc",
+      sourceFingerprint: currentSourceFingerprint(path.join(root, "app")),
+      composables: [
+        {
+          name: "Busy",
+          packageName: null,
+          restartable: true,
+          skippable: true,
+          parameters: [{ name: "items", type: "List<String>", stable: false, unused: false }],
+        },
+      ],
+      classes: [],
+    });
+
+    const findings = find(hot("Cart.ItemRow"));
+    const finding = findings.find((f) => f.id === "recompose-skippable-but-unstable");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("note"); // never promoted above a genuine not-skippable finding
+    expect(finding?.detail).toContain("is skippable, but parameter `items: List<String>` is unstable");
+    expect(findings.some((f) => f.id === "recompose-not-skippable")).toBe(false);
+    expect(findings.some((f) => f.id === "recompose-hotspot")).toBe(false);
+  });
+
+  it("leaves the finding exactly as it was before this ticket when nothing joins", () => {
+    // No report anywhere under root, and no Screens.kt to resolve `where`
+    // against either — the ordinary "no compose report, no source root
+    // resolution" case most repos are in most of the time.
+    const finding = find(hot("Cart.ItemRow")).find((f) => f.id === "recompose-hotspot");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("note");
+    expect(finding?.evidence).toEqual({ composable: "Cart.ItemRow" });
+  });
+
+  it("refuses to promote a hotspot against a stale report — same as no join at all", () => {
+    mkdirSync(path.join(root, "app/src/main/kotlin"), { recursive: true });
+    writeFileSync(
+      path.join(root, "app/src/main/kotlin/Screens.kt"),
+      '@Composable\nfun LeakyRow() { Modifier.portholeNode("Cart.ItemRow") }\n',
+    );
+    writeReport("app", {
+      generatedAt: "now",
+      variant: "debug",
+      module: "app",
+      kotlinVersion: "2.1.0",
+      gitHead: "abc",
+      sourceFingerprint: "stale-fingerprint-that-never-matches",
+      composables: [{ name: "LeakyRow", packageName: null, restartable: true, skippable: false, parameters: [] }],
+      classes: [],
+    });
+
+    const finding = find(hot("Cart.ItemRow")).find((f) => f.id === "recompose-hotspot");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("note");
+    // Never promoted, and never built into prose (see explainNotSkippable's
+    // own guard in composeReport.ts) — but a stale match is still worth
+    // saying so about, transparently, rather than reading identically to
+    // "there is no report at all": `stale: true` is the fact that answers
+    // "say how old and against which source state" (GRA-69's own wording)
+    // without ever letting a stale report change severity or title.
+    expect(finding?.evidence).toEqual({
+      composable: "Cart.ItemRow",
+      composeReport: { enclosingFunction: "LeakyRow", module: "app", skippable: false, stale: true },
+    });
+  });
+
+  it("proves the join changes when the report changes — fixture-driven, in place of a live emulator loop (GRA-69 AC)", () => {
+    mkdirSync(path.join(root, "app/src/main/kotlin"), { recursive: true });
+    writeFileSync(
+      path.join(root, "app/src/main/kotlin/Screens.kt"),
+      "@Composable\n" +
+        "fun LeakyRow(highlight: RowHighlight) {\n" +
+        '  Modifier.portholeNode("Cart.ItemRow")\n' +
+        "}\n",
+    );
+    const write = (highlightStable: boolean) =>
+      writeReport("app", {
+        generatedAt: "now",
+        variant: "debug",
+        module: "app",
+        kotlinVersion: "2.1.0",
+        gitHead: "abc",
+        sourceFingerprint: currentSourceFingerprint(path.join(root, "app")),
+        composables: [
+          {
+            name: "LeakyRow",
+            packageName: null,
+            restartable: true,
+            // A composable's skippability follows from its parameters'
+            // stability (see ComposeCompilerWiring.kt's own KDoc on why
+            // classic skipping is what the report forces); this fixture
+            // models that dependency explicitly rather than setting
+            // `skippable` and `stable` independently of one another, which
+            // the real compiler would never produce.
+            skippable: highlightStable,
+            parameters: [{ name: "highlight", type: "RowHighlight", stable: highlightStable, unused: false }],
+          },
+        ],
+        classes: [],
+      });
+
+    // Before the fix: RowHighlight is still an unstable var-holder, so
+    // LeakyRow is restartable but not skippable.
+    write(false);
+    const before = find(hot("Cart.ItemRow")).find((f) => f.id.startsWith("recompose-"));
+    expect(before?.id).toBe("recompose-not-skippable");
+    expect(before?.severity).toBe("warning");
+
+    // After the fix (@Immutable, or wrapping the mutable field in
+    // MutableState the compiler can see — out of this ticket's scope to
+    // actually apply, per GRA-69's own "out of scope" list, but its EFFECT
+    // on the join is exactly what this proves): `highlight` reports stable,
+    // LeakyRow reports skippable, and rebuilding the report changes the
+    // finding with no change to the recompose events themselves at all —
+    // the fixture-driven substitute for a live emulator before/after this
+    // ticket accepts in place of one (see GRA-69's Build section).
+    resetComposeReportCacheForTests();
+    write(true);
+    const after = find(hot("Cart.ItemRow")).find((f) => f.id.startsWith("recompose-"));
+    expect(after?.id).toBe("recompose-hotspot");
+    expect(after?.severity).toBe("note");
+    expect(after?.evidence).toMatchObject({ composeReport: { skippable: true } });
   });
 });

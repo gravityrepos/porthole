@@ -91,6 +91,30 @@ PR that makes the change, not after the fact.
   sits above every engine, with no phase, reuse, protocol or byte-count hook
   any engine agrees on — and the OkHttp engine remains the documented way to
   get it anyway (GRA-66).
+- `portholeComposeReport` enables the Kotlin compose compiler's own metrics
+  for the debug variant (only when actually requested — an ordinary
+  `assembleDebug`/`test` build never pays the extra compile cost), and
+  parses its `*-composables.txt`/`*-classes.txt`/`*-composables.csv` reports
+  into `build/porthole/compose-report.json`: per composable, whether it is
+  restartable and skippable and why each parameter is or is not stable; per
+  class, whether it is stable and, when not, whether that is because of a
+  `var` property or an unstable-typed field. `recompositions` and
+  `findings`' `recompose-hotspot` now join a high-count composable against
+  this report — by resolving its `portholeNode`/`PortholeScreen` label to
+  source (reusing GRA-201's own index) and reading the enclosing
+  `@Composable fun` from there, since the report is keyed by Kotlin function
+  name, never the label — and report the compiler's own reason in its own
+  words: `"LeakyRow is restartable but not skippable: parameter highlight:
+  RowHighlight is unstable. RowHighlight is unstable because it has a var
+  property (tappedAt)."` A hotspot that joins to a genuinely not-skippable
+  composable is promoted to `warning` (above the bare, ordering-only note it
+  used to be, and above one that IS skippable but still carries an unstable
+  parameter — busy, not broken, and reported under its own id); one that
+  does not join at all — no report, no source match, or more than one
+  same-named candidate with nothing to narrow by — reads exactly as it did
+  before this ticket, `id: "recompose-hotspot"`, never a guess. A report
+  older than the sources it describes is detected by a content fingerprint
+  and refused rather than joined silently (GRA-69).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

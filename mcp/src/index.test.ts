@@ -16,6 +16,7 @@ import type { ConnectionState } from "./device.js";
 import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 import { joinSummaryAndPayload } from "./index.js";
 import { resetSourceIndexForTests } from "./sources.js";
+import { currentSourceFingerprint, resetComposeReportCacheForTests } from "./composeReport.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -2680,6 +2681,127 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       await rig.close();
       withProjectRoot(savedProjectRoot);
       resetSourceIndexForTests();
+    }
+  });
+
+  it("recompositions joins the compose report and reports why LeakyRow is not skippable, in the compiler's own words (GRA-69)", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    resetComposeReportCacheForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const moduleRoot = path.join(FIXTURE_ROOT, "app");
+    const reportDir = path.join(moduleRoot, "build", "porthole");
+    mkdirSync(reportDir, { recursive: true });
+    const reportFile = path.join(reportDir, "compose-report.json");
+    writeFileSync(
+      reportFile,
+      JSON.stringify({
+        generatedAt: "now",
+        variant: "debug",
+        module: "app",
+        kotlinVersion: "2.1.0",
+        gitHead: "abc",
+        sourceFingerprint: currentSourceFingerprint(moduleRoot),
+        composables: [
+          {
+            name: "FixtureCartScreen",
+            packageName: "com.example.shop.ui",
+            restartable: true,
+            skippable: false,
+            parameters: [{ name: "modifier", type: "RowHighlight", stable: false, unused: false }],
+          },
+        ],
+        classes: [
+          {
+            name: "RowHighlight",
+            stable: false,
+            runtimeStability: "Unstable",
+            properties: [{ name: "tappedAt", mutable: true, stable: true, type: "Long" }],
+          },
+        ],
+      }),
+    );
+    const rig = await buildRig({
+      handlers: {
+        recompositions: () => ({
+          nodes: [{ name: "Fixture.PromoField", count: 900, triggeredBy: [] }],
+          totalNodes: 1,
+          truncated: false,
+          unattributedWrites: [],
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("recompositions", {});
+      expect(result.isError).toBeFalsy();
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      expect(nodes[0].composeReport).toMatchObject({
+        joined: true,
+        enclosingFunction: "FixtureCartScreen",
+        module: "app",
+        skippable: false,
+        stale: false,
+      });
+      expect((nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason).toContain(
+        "`FixtureCartScreen` is restartable but not skippable",
+      );
+      expect((nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason).toContain(
+        "`RowHighlight` is unstable because it has a `var` property (`tappedAt`)",
+      );
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+      rmSync(reportDir, { recursive: true, force: true });
+      resetComposeReportCacheForTests();
+    }
+  });
+
+  it("recompositions says 'no report entry matched' with candidates rather than guessing, when nothing matches", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    resetComposeReportCacheForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const moduleRoot = path.join(FIXTURE_ROOT, "app");
+    const reportDir = path.join(moduleRoot, "build", "porthole");
+    mkdirSync(reportDir, { recursive: true });
+    const reportFile = path.join(reportDir, "compose-report.json");
+    writeFileSync(
+      reportFile,
+      JSON.stringify({
+        generatedAt: "now",
+        variant: "debug",
+        module: "app",
+        kotlinVersion: "2.1.0",
+        gitHead: "abc",
+        sourceFingerprint: currentSourceFingerprint(moduleRoot),
+        composables: [
+          { name: "SomethingUnrelated", packageName: "com.example.shop.ui", restartable: true, skippable: true, parameters: [] },
+        ],
+        classes: [],
+      }),
+    );
+    const rig = await buildRig({
+      handlers: {
+        recompositions: () => ({
+          nodes: [{ name: "Fixture.PromoField", count: 900, triggeredBy: [] }],
+          totalNodes: 1,
+          truncated: false,
+          unattributedWrites: [],
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("recompositions", {});
+      expect(result.isError).toBeFalsy();
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      expect(nodes[0].composeReport).toEqual({ joined: false, reason: "no report entry matched" });
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+      rmSync(reportDir, { recursive: true, force: true });
+      resetComposeReportCacheForTests();
     }
   });
 

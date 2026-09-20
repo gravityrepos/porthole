@@ -58,7 +58,10 @@ describe("GRA-201 against the real sample app (multi-flavor, one module)", () =>
     expect(where).toEqual({
       resolved: true,
       path: "sample/src/main/kotlin/com/example/shop/ui/Screens.kt",
-      line: 83,
+      // GRA-69 added a few lines above this label (the RowHighlight fixture
+      // for portholeComposeReport's own join) — this line moving from 83 is
+      // exactly what the class doc comment above warns this test is for.
+      line: 88,
     });
   });
 

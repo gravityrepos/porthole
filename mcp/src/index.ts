@@ -56,6 +56,12 @@ import {
 import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, defaultScenarioName, validateScenario, writeSavedTrace } from "./save.js";
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
+import {
+  explainNotSkippable,
+  explainSkippableButUnstable,
+  joinComposableNode,
+  type ComposeJoin,
+} from "./composeReport.js";
 import { captureScreenshot } from "./screenshot.js";
 import { buildSetupReport, type SetupEntry } from "./setup.js";
 
@@ -1469,7 +1475,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "The other tools return measurements and leave the conclusion to you. This one draws the " +
         "conclusions the data actually supports, which is a shorter list than it looks: queries on " +
         "the main thread, stalls, failed calls, dropped frames, blocking collections, memory trims, " +
-        "retried jobs, recomposition hotspots.\n\n" +
+        "retried jobs, recomposition hotspots. A hotspot the Kotlin compose compiler's own report " +
+        "(`./gradlew portholeComposeReport`, not on by default) says is restartable but not " +
+        "skippable is promoted to a `warning` and names the unstable parameter and why, in the " +
+        "compiler's own words; one that is skippable but still carries an unstable parameter is a " +
+        "different, less urgent finding of its own, never promoted the same way.\n\n" +
         "`confidence` is load-bearing and worth repeating to whoever reads your answer. 'observed' " +
         "means the device reported it: a query ran on the main thread, a frame missed its deadline. " +
         "'correlated' means two things happened close together, which is ordering and not " +
@@ -2613,6 +2623,51 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     },
   );
 
+  // -- GRA-69: per-node compose-report join, `recompositions`' own -----------
+  //
+  // `composeReport.ts` owns the join itself; this is only the shape one
+  // node's result takes on the wire, and the "when is it even worth
+  // mentioning" call — the same off-entirely-when-there-is-nothing-to-say
+  // rule `where` already follows (sources.ts's own doc comment), extended
+  // to composeReport: omitted when the feature is off, when no report has
+  // ever been generated, or when the label simply never resolved to
+  // source, since none of those is a fact about *this composable* worth
+  // repeating on every node in the list. Present, with `joined: false` and
+  // `reason: "no report entry matched"` (or "matched more than one report
+  // entry", with `candidates`), for the two outcomes GRA-69's own ticket
+  // names explicitly: "never join a wrong function — an unjoined node says
+  // 'no report entry matched' with the candidates."
+  type ComposeReportNodeInfo =
+    | {
+        joined: true;
+        enclosingFunction: string;
+        module: string;
+        skippable: boolean;
+        stale: boolean;
+        notSkippableReason?: string;
+        skippableButUnstableReason?: string;
+      }
+    | { joined: false; reason: string; candidates?: Array<{ module: string; packageName: string | null }> };
+
+  function composeReportNodeInfo(nodeName: string): ComposeReportNodeInfo | undefined {
+    const join: ComposeJoin = joinComposableNode(nodeName);
+    if (join.matched) {
+      return {
+        joined: true,
+        enclosingFunction: join.enclosingFunction,
+        module: join.report.module,
+        skippable: join.composable.skippable,
+        stale: join.stale,
+        ...(!join.stale ? { notSkippableReason: explainNotSkippable(join) ?? undefined } : {}),
+        ...(!join.stale ? { skippableButUnstableReason: explainSkippableButUnstable(join) ?? undefined } : {}),
+      };
+    }
+    if (join.reason === "no report entry matched" || join.reason === "matched more than one report entry") {
+      return { joined: false, reason: join.reason, ...(join.candidates ? { candidates: join.candidates } : {}) };
+    }
+    return undefined;
+  }
+
   server.registerTool(
     "recompositions",
     {
@@ -2633,7 +2688,17 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "A key carrying 'holds' is anonymous state that was found holding one of the app's own " +
         "types, so it is definitely the app's and definitely unregistered — that one is worth " +
         "chasing. Its absence proves nothing: an unregistered Int is indistinguishable from a " +
-        "ripple, so most of the app's own unnamed state will not be flagged.",
+        "ripple, so most of the app's own unnamed state will not be flagged.\n\n" +
+        "'composeReport' (present only when it has something to say) joins each node against " +
+        "the Kotlin compose compiler's own report (run `./gradlew portholeComposeReport` first — " +
+        "it is not on by default, since enabling it costs a recompile): 'joined: true' names the " +
+        "enclosing composable function, whether the compiler itself calls it skippable, and, when " +
+        "it is not, 'notSkippableReason' quotes the compiler's own reason — an unstable parameter, " +
+        "and, for a class parameter, why that class is unstable. 'joined: false' with 'reason: " +
+        "\"no report entry matched\"' or '\"matched more than one report entry\"' (candidates " +
+        "listed) means the label could not be tied to one function with confidence — never a " +
+        "guess. A stale report ('stale: true' — its own source state has moved on) is still named " +
+        "but never used for a reason.",
       inputSchema: {
         screen: z
           .string()
@@ -2666,6 +2731,8 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           count: number;
           triggeredBy: Array<{ key: string; count: number }>;
           where?: Where;
+          // GRA-69, filled in below by the augment step.
+          composeReport?: ComposeReportNodeInfo;
         }>;
         totalNodes?: number;
         truncated?: boolean;
@@ -2699,7 +2766,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           ...report,
           nodes: report.nodes.map((node) => {
             const where = whereForName(node.name);
-            return where ? { ...node, where } : node;
+            // GRA-69: every node, not only the busiest one — an agent asking
+            // about a specific composable by name wants this even when it
+            // is nowhere near the top of the list. composeReportNodeInfo()
+            // omits the key entirely for the common "no report yet" case;
+            // see that function's own comment for exactly when it speaks up.
+            const composeReport = composeReportNodeInfo(node.name);
+            return { ...node, ...(where ? { where } : {}), ...(composeReport ? { composeReport } : {}) };
           }),
         }),
       );

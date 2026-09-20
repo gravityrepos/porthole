@@ -6,6 +6,8 @@ import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
 import org.gradle.kotlin.dsl.register
+import java.io.File
+import java.util.concurrent.Callable
 
 /**
  * Wires Porthole into an Android module.
@@ -46,6 +48,16 @@ class PortholePlugin : Plugin<Project> {
             wireAndRegister()
         }
 
+        // GRA-69: isolated in ComposeCompilerWiring for the same reason AGP
+        // types are isolated in AndroidWiring — `org.jetbrains.kotlin.plugin
+        // .compose` is the consumer's own choice to apply, not a dependency
+        // of this plugin. `plugins.withId` fires whenever that plugin is
+        // applied, whether that happens before or after this line, and does
+        // nothing at all on a module that never applies it.
+        target.plugins.withId("org.jetbrains.kotlin.plugin.compose") {
+            ComposeCompilerWiring.configureForReportIfRequested(target)
+        }
+
         // Delegated to [AndroidWiring], which is the only class here allowed to
         // name an AGP type. Nothing in this file may, or applying the plugin to
         // a project without the Android plugin fails while Gradle is still
@@ -53,17 +65,18 @@ class PortholePlugin : Plugin<Project> {
         target.plugins.withId("com.android.application") {
             once {
                 // Only an application module gets portholeStart (GRA-174):
-                // there is no install task on a library to depend on, so
-                // AndroidWiring.library below hands registerTasks no variant
-                // names at all and it registers nothing extra.
+                // there is no install task on a library to depend on. Every
+                // debug variant, application or library, gets
+                // portholeComposeReport (GRA-69) — see AndroidWiring.library's
+                // own KDoc for why that changed.
                 val debugVariants = AndroidWiring.application(target, extension)
-                registerTasks(target, extension, debugVariants)
+                registerTasks(target, extension, startVariants = debugVariants, composeReportVariants = debugVariants)
             }
         }
         target.plugins.withId("com.android.library") {
             once {
-                AndroidWiring.library(target, extension)
-                registerTasks(target, extension, debugVariants = null)
+                val debugVariants = AndroidWiring.library(target, extension)
+                registerTasks(target, extension, startVariants = null, composeReportVariants = debugVariants)
             }
         }
 
@@ -78,12 +91,21 @@ class PortholePlugin : Plugin<Project> {
     }
 
     /**
-     * [debugVariants] is non-null only for an application module (see
+     * [startVariants] is non-null only for an application module (see
      * [AndroidWiring.application]) and is what lets `portholeStart` exist at
      * all: a library module has no `install<Variant>` task, so there is
      * nothing for a start task to depend on and none is registered.
+     * [composeReportVariants] is never null (GRA-69): both
+     * [AndroidWiring.application] and [AndroidWiring.library] return their
+     * debug variant names now, so `portholeComposeReport` registers on
+     * either kind of module.
      */
-    private fun registerTasks(project: Project, extension: PortholeExtension, debugVariants: Provider<List<String>>?) {
+    private fun registerTasks(
+        project: Project,
+        extension: PortholeExtension,
+        startVariants: Provider<List<String>>?,
+        composeReportVariants: Provider<List<String>>,
+    ) {
         val adb = adbProvider(project)
         val connectionPath = project.layout.buildDirectory.file("porthole/connection.json")
 
@@ -145,13 +167,85 @@ class PortholePlugin : Plugin<Project> {
             )
         }
 
-        if (debugVariants != null) {
+        if (startVariants != null) {
             registerPortholeStart(
                 project = project,
-                variants = debugVariants,
+                variants = startVariants,
                 requestedVariant = project.providers.gradleProperty("porthole.variant"),
                 openUi = project.providers.gradleProperty("porthole.open").map { it != "false" },
             )
+        }
+
+        registerComposeReportTask(
+            project = project,
+            variants = composeReportVariants,
+            requestedVariant = project.providers.gradleProperty("porthole.variant"),
+        )
+    }
+
+    /**
+     * Registers `portholeComposeReport` (GRA-69), `dependsOn` the resolved
+     * variant's Kotlin compile task, computed lazily inside a [Callable] the
+     * same way [registerPortholeStart]'s own `dependsOn` is — `variants` is
+     * not populated until AGP has resolved every variant, well after this
+     * function returns, so [resolveComposeReportVariant] cannot run yet when
+     * this is called. `-Pporthole.variant` is the exact same property
+     * `portholeStart` already reads for the same ambiguous-variant case
+     * (GRA-174), not a second flag to learn.
+     */
+    private fun registerComposeReportTask(
+        project: Project,
+        variants: Provider<List<String>>,
+        requestedVariant: Provider<String>,
+    ) {
+        val reportsDir = File(project.projectDir, ComposeCompilerWiring.REPORTS_DIR)
+        val resolvedVariant = project.provider {
+            resolveComposeReportVariant(variants.get(), requestedVariant.orNull)
+        }
+        project.tasks.register<PortholeComposeReportTask>(TASK_NAME) {
+            group = GROUP
+            description = "Enables the compose compiler's metrics/reports for the debug variant, " +
+                "compiles it, and parses the result into build/porthole/compose-report.json."
+            dependsOn(Callable { listOf(kotlinCompileTaskName(resolvedVariant.get())) })
+
+            variant.set(resolvedVariant)
+            moduleName.set(project.name)
+            kotlinVersion.set(PORTHOLE_KOTLIN_VERSION)
+            moduleRoot.set(project.layout.projectDirectory)
+            // The whole module's src/ tree — see PortholeComposeReportTask's
+            // own KDoc ("Staleness") for why this is deliberately coarser
+            // than only the resolved variant's own source sets.
+            kotlinSources.setFrom(
+                project.fileTree(project.projectDir.resolve("src")) { include("**/*.kt") },
+            )
+            composablesTxt.set(
+                resolvedVariant.flatMap { v ->
+                    project.layout.file(
+                        project.provider {
+                            File(reportsDir, "${project.name}_$v-composables.txt")
+                        },
+                    )
+                },
+            )
+            composablesCsv.set(
+                resolvedVariant.flatMap { v ->
+                    project.layout.file(
+                        project.provider {
+                            File(reportsDir, "${project.name}_$v-composables.csv")
+                        },
+                    )
+                },
+            )
+            classesTxt.set(
+                resolvedVariant.flatMap { v ->
+                    project.layout.file(
+                        project.provider {
+                            File(reportsDir, "${project.name}_$v-classes.txt")
+                        },
+                    )
+                },
+            )
+            outputFile.set(project.layout.buildDirectory.file("porthole/compose-report.json"))
         }
     }
 

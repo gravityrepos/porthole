@@ -22,6 +22,8 @@ dist/capture.js
 dist/capture.js.map
 dist/cli.js
 dist/cli.js.map
+dist/composeReport.js
+dist/composeReport.js.map
 dist/device.js
 dist/device.js.map
 dist/devices.js
@@ -67,6 +69,7 @@ src/adb.ts
 src/args.ts
 src/capture.ts
 src/cli.ts
+src/composeReport.ts
 src/device.ts
 src/devices.ts
 src/eventKinds.ts

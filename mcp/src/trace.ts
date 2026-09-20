@@ -3,6 +3,11 @@
 import type { DeviceEvent } from "./device.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
 import { startupFindingsOf } from "./startup.js";
+// GRA-69: the compose-compiler-report join, kept to these two entry points
+// (a lookup, and two prose builders) so this file's own recompose-hotspot
+// block gains a handful of lines rather than a second copy of the join
+// logic — see composeReport.ts's own doc comment for the whole strategy.
+import { explainNotSkippable, explainSkippableButUnstable, joinComposableNode } from "./composeReport.js";
 
 /**
  * Turning a recorded run into something worth reading.
@@ -834,16 +839,57 @@ export function findingsOf(
       // `title`'s prose — `evidence.composable` gives `whereForName` (and
       // any other reader) the bare name without reparsing the sentence.
       const where = whereForName(hottest[0]);
+      const orderingDetail = trigger
+        ? `most often within a frame of ${trigger[0]} — ordering, not proof`
+        : undefined;
+
+      // -- GRA-69: join against the compose compiler's own report ---------
+      // `explainNotSkippable`/`explainSkippableButUnstable` are the two
+      // outcomes the ticket asks findings to tell apart; a third — matched
+      // but neither (every parameter stable) or not matched at all — leaves
+      // this finding exactly as it read before this ticket: `id:
+      // "recompose-hotspot"`, `severity: "note"`, the plain ordering detail.
+      const join = joinComposableNode(hottest[0]);
+      const notSkippable = join.matched && !join.stale ? explainNotSkippable(join) : null;
+      const skippableButUnstable =
+        join.matched && !join.stale && !notSkippable ? explainSkippableButUnstable(join) : null;
+      const composeReportEvidence = join.matched
+        ? {
+            enclosingFunction: join.enclosingFunction,
+            module: join.report.module,
+            skippable: join.composable.skippable,
+            stale: join.stale,
+          }
+        : undefined;
+      const id = notSkippable
+        ? "recompose-not-skippable"
+        : skippableButUnstable
+          ? "recompose-skippable-but-unstable"
+          : "recompose-hotspot";
+      const detail = [orderingDetail, notSkippable ?? skippableButUnstable]
+        .filter((s): s is string => Boolean(s))
+        .join(" — ");
+      // -- end GRA-69 -------------------------------------------------------
+
       findings.push({
-        id: "recompose-hotspot",
-        severity: "note",
+        id,
+        // A definitive compiler fact outranks the bare, ordering-only
+        // count — `warning`, not `note` — and outranks a busy-but-skippable
+        // composable too, which stays `note` (a different, less urgent
+        // problem: GRA-69's own wording). The severity sort in `findingsOf`
+        // below is what actually does the promoting; this is the one input
+        // it reads.
+        severity: notSkippable ? "warning" : "note",
         confidence: "correlated",
-        title: `${hottest[0]} recomposed ${hottest[1]} times`,
-        detail: trigger
-          ? `most often within a frame of ${trigger[0]} — ordering, not proof`
-          : undefined,
+        title: notSkippable
+          ? `${hottest[0]} recomposed ${hottest[1]} times, and ${join.matched ? join.enclosingFunction : hottest[0]} is not skippable`
+          : `${hottest[0]} recomposed ${hottest[1]} times`,
+        detail: detail || undefined,
         count: hottest[1],
-        evidence: { composable: hottest[0] },
+        evidence: {
+          composable: hottest[0],
+          ...(composeReportEvidence ? { composeReport: composeReportEvidence } : {}),
+        },
         // Scoped to the hottest component's own recompositions, not every
         // recompose in the run, so the window is as tight as the count it
         // labels rather than as wide as the whole capture.
