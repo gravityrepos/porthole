@@ -41,6 +41,7 @@ import live.gravitylabs.porthole.collect.DeviceCollector
 import live.gravitylabs.porthole.collect.ExitInfoCollector
 import live.gravitylabs.porthole.collect.MemoryCollector
 import live.gravitylabs.porthole.collect.Setup
+import live.gravitylabs.porthole.collect.StartupCollector
 import live.gravitylabs.porthole.protocol.DbPage
 import live.gravitylabs.porthole.protocol.DbTables
 import live.gravitylabs.porthole.protocol.EventFrame
@@ -107,6 +108,7 @@ object Porthole {
         val frames: FrameCollector,
         val memory: MemoryCollector,
         val deviceContext: DeviceCollector,
+        val startup: StartupCollector,
         val exitInfo: ExitInfoCollector,
         val autoWire: AutoWire,
         val watchdog: MainThreadWatchdog,
@@ -147,6 +149,11 @@ object Porthole {
             if (session != null) return
 
             val ring = EventRing(capacity = ringCapacityFromResources(app))
+            // Constructed before anything else below: GRA-60's origin and
+            // Application.onCreate-entry timestamps are both taken at
+            // construction, so every collector after this line pushes them
+            // later than they need to be.
+            val startup = StartupCollector(ring)
             val appPackages = appPackagesOf(app)
             val snapshots = SnapshotWatcher(ring, appPackages)
             val recompositions = RecompositionCollector(ring, snapshots)
@@ -170,7 +177,15 @@ object Porthole {
                 null
             }
 
-            if (frames.install(app)) collectors += "frames"
+            if (frames.install(app)) {
+                collectors += "frames"
+                // GRA-60: the only way StartupCollector learns "first frame
+                // drawn" is from this same listener — see FrameCollector's
+                // own `onFirstDraw` doc comment for why it is a plain field
+                // rather than something StartupCollector polls for.
+                frames.onFirstDraw = { atMs -> startup.onFirstFrame(atMs) }
+            }
+            if (startup.install(app)) collectors += "startup"
             watchdog.start()
             collectors += "main_thread"
 
@@ -246,6 +261,7 @@ object Porthole {
                 frames = frames,
                 memory = memory,
                 deviceContext = deviceContext,
+                startup = startup,
                 exitInfo = exitInfo,
                 autoWire = autoWire,
                 watchdog = watchdog,
@@ -286,6 +302,7 @@ object Porthole {
             s.frames.stop(s.app)
             s.memory.stop()
             s.deviceContext.stop(s.app)
+            s.startup.stop(s.app)
             s.exitInfo.stop()
             s.autoWire.stop()
             s.watchdog.stop()
@@ -371,6 +388,31 @@ object Porthole {
                 },
             ),
         )
+    }
+
+    /**
+     * Tells the `startup` event when the app considers itself fully drawn —
+     * everything on screen, not just the first frame.
+     *
+     * Android has no way for anything outside the app to observe a plain
+     * `Activity.reportFullyDrawn()` call: there is no listener for it, and
+     * the system's own logcat line naming it is written by `system_server`,
+     * under a different uid than the app's own — the same restriction
+     * [live.gravitylabs.porthole.collect.LogCollector]'s doc comment already
+     * describes for why that collector can only ever see the app's own
+     * output. Call this next to (or instead of) `Activity.reportFullyDrawn()`
+     * if you want the gap to first-fully-useful measured; skip it and
+     * `findings` says once, as a note, that it was never observed — which is
+     * an honest "we don't know", not a claim that the app is slow to draw.
+     *
+     * A no-op once the `startup` event has already been emitted (see
+     * `StartupCollector`'s grace window) — late is better than a second,
+     * contradictory event, but it is still late, so nothing here pretends
+     * otherwise.
+     */
+    @JvmStatic
+    fun reportFullyDrawn() {
+        session?.startup?.onReportFullyDrawn()
     }
 
     /** Give a [androidx.compose.runtime.State] a readable name. */

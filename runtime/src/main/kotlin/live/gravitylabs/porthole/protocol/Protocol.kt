@@ -202,6 +202,9 @@ internal object EventKinds {
 
     /** A periodic heap/native/RAM sample. MemoryCollector. */
     const val MEMORY = "memory"
+
+    /** One completed app launch, phases from process fork to first frame. StartupCollector. */
+    const val STARTUP = "startup"
 }
 
 /**

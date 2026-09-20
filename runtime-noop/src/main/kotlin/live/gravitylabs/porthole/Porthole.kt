@@ -63,4 +63,8 @@ object Porthole {
     @JvmStatic
     @JvmOverloads
     fun mark(label: String, detail: String? = null) = Unit
+
+    /** Release stand-in: there is no `startup` event to tell. */
+    @JvmStatic
+    fun reportFullyDrawn() = Unit
 }

@@ -52,6 +52,15 @@ internal class FrameCollector(private val ring: EventRing) {
     @Volatile private var handler: Handler? = null
     @Volatile private var frameIntervalNanos: Long = DEFAULT_INTERVAL_NANOS
 
+    /**
+     * [StartupCollector]'s hook onto "the first frame drawn" — fired at most
+     * once, the first time a frame with [FrameMetrics.FIRST_DRAW_FRAME] is
+     * observed, then cleared. A plain nullable field rather than a listener
+     * list: nothing else has ever needed this moment, and a second listener
+     * can be added the day a second caller does.
+     */
+    @Volatile var onFirstDraw: ((atMs: Long) -> Unit)? = null
+
     // Kept so stop() can hand the same object back to the Application. An
     // anonymous object registered inline is registered forever: nothing holds
     // it, so nothing can unregister it, and every install/shutdown cycle left
@@ -83,6 +92,11 @@ internal class FrameCollector(private val ring: EventRing) {
         thread?.quitSafely()
         thread = null
         handler = null
+        // Not a registered framework callback, so nothing outside this class
+        // would ever unregister it, but a stale closure over the previous
+        // session's StartupCollector is exactly the kind of thing GRA-86 was
+        // about — drop it so the next install() starts from a clean slate.
+        onFirstDraw = null
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
@@ -144,6 +158,13 @@ internal class FrameCollector(private val ring: EventRing) {
         synchronized(lock) {
             recent.addLast(frame)
             while (recent.size > RECENT_CAPACITY) recent.removeFirst()
+        }
+
+        if (frame.firstDraw) {
+            onFirstDraw?.let { callback ->
+                onFirstDraw = null
+                callback(frame.at)
+            }
         }
 
         ring.emit(
