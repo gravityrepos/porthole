@@ -17,6 +17,14 @@ PR that makes the change, not after the fact.
 
 ### Changed
 
+- The landing page's `<title>`, meta description and Open Graph tags now
+  name the terms an Android developer with this problem would actually
+  search — MCP, Perfetto, recompositions, frames, main-thread stalls,
+  in-flight work — instead of describing the tool with no term a search
+  engine or an agent would match. The page now carries `SoftwareApplication`
+  and `FAQPage` JSON-LD, and the Google Fonts request was trimmed from seven
+  weights to the five the page's own CSS actually uses (GRA-128).
+
 ### Fixed
 
 ## [0.2.2] - 2026-09-16
