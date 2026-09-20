@@ -145,6 +145,20 @@ object Porthole {
      * Idempotent, and safe to call from any thread: the second call returns
      * without doing anything.
      *
+     * GRA-240: the project's whole security argument is "debug-only,
+     * device-local, app-local" — this is where the first of those is
+     * actually enforced rather than assumed. [app]'s own
+     * `ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE` is read
+     * before anything else runs; if it is clear, [install] logs one line at
+     * `Log.w` naming the build type and returns — no socket, no collectors,
+     * no reflection, same as a release build linking `runtime-noop`. This
+     * only matters for a build type that lands here at all: the plugin's own
+     * `debugBuildTypes` (see README's "Setup" section) is what puts the real
+     * `runtime` artifact on a build type in the first place, and it can name
+     * a build type that is not actually marked `isDebuggable = true` (a
+     * `staging` type used for QA, say) — this check is what stops that
+     * combination from quietly opening the socket anyway.
+     *
      * @param port the port to bind on the device, defaulting to the
      *   `porthole_port` resource the Gradle plugin generates, and to
      *   [DEFAULT_PORT] if that resource is absent.
@@ -155,6 +169,17 @@ object Porthole {
         if (session != null) return
         synchronized(this) {
             if (session != null) return
+
+            val debuggable = isDebuggable(app)
+            if (!debuggable) {
+                Log.w(
+                    TAG,
+                    "not starting: this is a \"${buildTypeOf(app)}\" build and " +
+                        "ApplicationInfo.FLAG_DEBUGGABLE is not set — porthole only ever runs on a " +
+                        "debuggable build (see README's build-type section); no socket, no collectors.",
+                )
+                return
+            }
 
             val ring = EventRing(capacity = ringCapacityFromResources(app))
             // Constructed before anything else below: GRA-60's origin and
@@ -578,7 +603,7 @@ object Porthole {
                     versionName = runCatching {
                         s.app.packageManager.getPackageInfo(s.app.packageName, 0).versionName
                     }.getOrNull(),
-                    debuggable = true,
+                    debuggable = isDebuggable(s.app),
                     device = Build.MANUFACTURER + " " + Build.MODEL,
                     sdkInt = Build.VERSION.SDK_INT,
                     startedAt = s.startedAt,
@@ -813,6 +838,35 @@ object Porthole {
 
     private fun classPresent(name: String): Boolean =
         runCatching { Class.forName(name, false, Porthole::class.java.classLoader) }.isSuccess
+
+    /**
+     * GRA-240: the actual OS-enforced flag, not the literal `true` this used
+     * to be. `ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE` is
+     * what `dumpsys package` reports as `pkgFlags`'s `DEBUGGABLE` entry, and
+     * what decides whether `run-as`/JDWP attach work — the same signal a
+     * release build's manifest (`android:debuggable` defaulting to `false`,
+     * forced `false` by AGP's own release signing regardless of manifest
+     * overrides) is judged by. `getOrDefault(false)`: a context that cannot
+     * even answer this is treated as not debuggable, never the other way.
+     */
+    private fun isDebuggable(context: Context): Boolean = runCatching {
+        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }.getOrDefault(false)
+
+    /**
+     * Best-effort name for the one line [install] logs when it refuses to
+     * start. There is no public Android API for "which Gradle build type is
+     * this" — that is a compile-time AGP concept — so this reflects on the
+     * consuming app's own generated `<applicationId>.BuildConfig.BUILD_TYPE`,
+     * the same field AGP writes for every variant. Reflection because
+     * `runtime` cannot depend on an app module's generated class; any failure
+     * (obfuscated away, field renamed, class simply absent) reads as
+     * `"unknown"` rather than throwing from inside a log line.
+     */
+    private fun buildTypeOf(context: Context): String = runCatching {
+        val cls = Class.forName(context.packageName + ".BuildConfig", false, context.classLoader)
+        cls.getField("BUILD_TYPE").get(null) as? String
+    }.getOrNull() ?: "unknown"
 
     /**
      * The Gradle plugin writes the port as a generated integer resource, which
