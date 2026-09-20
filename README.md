@@ -1179,6 +1179,50 @@ look.
 The timeline puts the main thread lane next to dropped frames, because a block
 and the frames it cost are the same event seen twice.
 
+## Startup
+
+Every other collector attaches after the process is already up, so none of
+them can say why the app took two seconds to open. `StartupCollector` covers
+the part that happens before any of them could: the fork
+(`Process.getStartUptimeMillis()`), `Application.onCreate`'s entry and exit,
+the first Activity's `onCreate`/`onStart`/`onResume`, and the first frame
+drawn (from `frames`' own `firstDraw` flag) — all as one `startup` event,
+classified `cold`, `warm` or `hot` the way Android itself defines those: cold
+built the process from scratch and ran `Application.onCreate`; warm reused an
+existing process for a fresh Activity with no fresh `onCreate`; hot just
+brought an existing Activity back.
+
+`findings` turns a slow one into a `startup-slow` entry naming the phase with
+the widest gap, and — the cheapest and most valuable part of this — cross-references
+any `db-on-main-thread` or `main-thread-stall` finding that fell inside the
+startup window, which is where the fix usually is. The threshold is
+classification-specific and not invented for this project: 5s cold, 2s warm,
+1.5s hot, the same lines [Android vitals calls "excessive"](https://developer.android.com/topic/performance/vitals/launch-time).
+
+**No app code is required, except for one line.** Android has no way for
+anything outside the app to observe a plain `Activity.reportFullyDrawn()`
+call — there is no listener for it, and the system's own logcat line naming
+it is written by `system_server` under a different uid than the app's own,
+which `logs`' own restriction (below) already rules out reading. Call
+`Porthole.reportFullyDrawn()` next to (or instead of) `Activity.reportFullyDrawn()`
+if you want that measured; skip it and `findings` says once, as a note, that
+it was never observed — an honest "we don't know," not a claim that the app
+is slow to draw.
+
+**The number is for finding the phase, not for quoting.** A debug build's
+startup is not a user's: no R8, JIT compilation instead of a warm AOT
+profile, and dexopt in a state release never ships in. `findings`' own tool
+description says this plainly, because the agent reading it is who ends up
+quoting the number.
+
+Needs API 24 for `Process.getStartUptimeMillis()` — this module's `minSdk` is
+26, so that is never actually a gate in practice. The live collector only
+ever observes a cold launch today: a process runs `Application.onCreate`
+exactly once, and `StartupCollector` is constructed at the same moment, so
+warm/hot classification is proven correct against hand-built timestamps
+(`StartupTest`) ahead of the multi-launch-aware wiring that would be needed
+to see one for real on a device, which is left as a follow-up.
+
 ## Logs
 
 The app reads its own logcat and streams it over the same socket as everything

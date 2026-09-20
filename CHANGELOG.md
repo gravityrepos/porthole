@@ -15,6 +15,16 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- A new `StartupCollector` measures where the time went before the first
+  frame: the process fork (`Process.getStartUptimeMillis()`), `Application.onCreate`'s
+  entry and exit, the first Activity's `onCreate`/`onStart`/`onResume`, and
+  the first frame drawn, all in one `startup` event classified cold, warm or
+  hot. `findings` turns a slow one into a `startup-slow` entry naming the
+  dominant phase and cross-referencing any `db-on-main-thread` or
+  `main-thread-stall` finding that fell inside the startup window, and adds a
+  `startup-not-fully-drawn` note when the app never calls the new
+  `Porthole.reportFullyDrawn()` (GRA-60).
+
 ### Changed
 
 ### Fixed
