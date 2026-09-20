@@ -109,7 +109,7 @@ PR that makes the change, not after the fact.
   except `/api` (`/((?!api(?:/|$)).*)`) instead of the literal `/`, so a
   future second landing-style page inherits the policy instead of falling
   through to the catch-all header block, which carries no CSP at all.
-  `/api/:path*` keeps its own, looser policy; the two `source` patterns are
+  `/api/(.*)` keeps its own, looser policy (the `/api/:path*` form matched every page beneath the directory but not `/api/` itself, which the preview showed carrying no policy at all); the two `source` patterns are
   mutually exclusive by construction, so no single path can ever collect
   both `Content-Security-Policy` headers (GRA-129).
 - The landing page's FAQ is trimmed to the three real first-minute
