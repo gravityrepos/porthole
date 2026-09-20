@@ -164,9 +164,21 @@ gap between two consecutive events, and the one event kind that happened
 exactly once, if there is one.
 
 Truncation notes survive at every level — "20 matched, newest 5 returned",
-"Busiest 1 of 9 nodes shown" — because they live in the summary line itself,
-which every level returns unchanged apart from the size note appended to it;
-only the JSON payload block comes and goes with `detail`.
+"Busiest 1 of 9 nodes shown" — because they are built from the summary
+line's own inputs at every level, not stripped out below `"full"`; only the
+JSON payload block comes and goes with `detail`. Most tools' summary line
+is otherwise identical at every level, apart from the size note appended to
+it. Two are not, precisely: `timeline`'s event-count clause ("N events over
+Xms: kind counts...") and its truncation note vary with the level's own cap
+on *returned* events — its busiest-second/longest-gap/once-only clause does
+not, since it is computed over the whole matched window, never the capped
+slice, so a moment the cap pushed out of what came back is still named.
+`semantics_tree`'s summary sentence (node count, unlabelled, instrumented
+coverage) varies at every level outright, because `"normal"` and `"full"`
+ask the device for a different node budget before the capture is even
+taken — there is no way to report `"full"`'s true counts without paying for
+`"full"`'s own fetch, which is exactly the round trip `detail` exists to
+let `"summary"`/`"normal"` skip.
 
 `porthole_status {"exitTrace": <timestamp>}` is the one exception to
 `"summary"` being the default: the trace text is the entire reason to make

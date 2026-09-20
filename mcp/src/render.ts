@@ -76,15 +76,18 @@ export function formatBytes(n: number): string {
  * }`, spelled as prose appended to the summary line rather than a payload
  * field, since `"summary"` has no payload to carry one in — a field only
  * the other two levels could see would not be "every level"). `shownBytes`
- * is measured off the text this call is actually about to return, never
- * estimated ahead of building it, so it cannot itself be the thing that
- * silently returns less than it says (GRA-68's acceptance criterion) —
- * the one exception is that it is measured *before* this note's own text is
- * appended to it, since a note that had to describe its own length would
- * have no fixed point to measure from; that gap is this note's own text
- * (tens of bytes), never the withheld data the criterion is actually
- * guarding against. `next` is `null` at `"full"`, since there is no level
- * past it.
+ * is meant to be measured off the text this call is actually about to
+ * return, never estimated ahead of building it, so it cannot itself be the
+ * thing that silently returns less than it says (GRA-68's acceptance
+ * criterion) — this function trusts its caller for that; it only formats
+ * the two numbers it is handed. A caller that passes `shownBytes` measured
+ * *before* appending this note's own return value would be the one gap
+ * that criterion allows (a note that had to describe its own length would
+ * have no fixed point to measure from) — `renderDetail`'s `"summary"`
+ * branch closes exactly that gap with one extra pass (QA F6); the other
+ * two levels have a real payload block to measure that this note is never
+ * part of, so no such gap exists for them. `next` is `null` at `"full"`,
+ * since there is no level past it.
  */
 export function sizeNote(
   shownBytes: number,
@@ -130,23 +133,53 @@ export function renderDetail(params: {
    * (nothing to estimate: what was returned is what was returned).
    */
   fullBytesHint?: number;
+  /**
+   * QA F2: bytes returned outside the JSON payload but present at every
+   * level regardless — `screenshot`'s own image content block, which is
+   * never gated by `detail` (see that tool's own comment). Added into
+   * every "shown"/"next" figure below, at every level, so the note never
+   * claims a two-digit byte count while an actual ~26KB base64 image went
+   * out alongside it. Zero for every tool that has nothing outside the
+   * JSON payload, which is every tool but `screenshot`.
+   */
+  extraBytes?: number;
   detail: DetailLevel;
 }): DetailDecision {
   const { summary, normalPayload, detail } = params;
+  const extraBytes = params.extraBytes ?? 0;
   const hasDistinctFull = params.fullPayload !== undefined;
   const fullPayload = hasDistinctFull ? params.fullPayload : normalPayload;
-  const normalBytes = byteLength(compactJson(normalPayload));
+  const normalBytes = byteLength(compactJson(normalPayload)) + extraBytes;
+  // QA F5: `fullBytesHint` is an estimate of what a *different*, bigger
+  // fetch would cost — it never describes what this call is actually
+  // about to return. At `detail: "full"` with no distinct `fullPayload`,
+  // what is returned is `normalPayload` itself (the same fallback `"full"`
+  // uses below), so the hint has nothing left to estimate and must not be
+  // substituted for the real, measured `normalBytes` — matching the doc
+  // comment above, which the code did not, until now.
   const fullBytes = hasDistinctFull
-    ? byteLength(compactJson(fullPayload))
-    : (params.fullBytesHint ?? normalBytes);
+    ? byteLength(compactJson(fullPayload)) + extraBytes
+    : detail === "full"
+      ? normalBytes
+      : params.fullBytesHint !== undefined
+        ? params.fullBytesHint + extraBytes
+        : normalBytes;
 
   if (detail === "summary") {
-    // "summary"'s own "next level" is always "normal", regardless of
-    // `fullBytesHint` — that hint only ever describes the jump from
-    // "normal" to "full", one level further on.
-    return {
-      summaryText: summary + sizeNote(byteLength(summary), { label: "normal", bytes: normalBytes }),
-    };
+    const next = { label: "normal", bytes: normalBytes } as const;
+    // QA F6: the "returned" figure at `"summary"` must count the whole
+    // block actually sent — there is no separate payload block at this
+    // level, so the note's own bytes (and `extraBytes`, QA F2) are part
+    // of what was returned, not just the prose ahead of it. The note's
+    // length depends on the number it reports, so this is a one-step
+    // fixed point: the first pass sizes the note off the prose plus
+    // `extraBytes` alone, and is accurate to within the note's own text
+    // (only a number that crosses a `formatBytes` rounding boundary —
+    // 999 to 1000, say — right at this step could disagree with a second
+    // pass, which no summary line does in practice).
+    const firstPass = sizeNote(byteLength(summary) + extraBytes, next);
+    const totalBytes = byteLength(summary) + extraBytes + byteLength(firstPass);
+    return { summaryText: summary + sizeNote(totalBytes, next) };
   }
   if (detail === "normal") {
     const next = fullBytes > normalBytes ? ({ label: "full", bytes: fullBytes } as const) : null;

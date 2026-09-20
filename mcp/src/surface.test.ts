@@ -878,6 +878,41 @@ describe("GRA-68: detail — summary is the default, on every tool", () => {
       await rig.close();
     }
   });
+
+  it("QA F1: timeline's highlights are computed over the matched window, not the capped slice — a moment the cap pushed off the end is still named", async () => {
+    // QA's own repro: one anr at t=1000, then 300 recompose events from
+    // t=2000 (10ms apart) — 301 events matched, but the default cap at
+    // "summary"/"normal" only returns the newest 100. Before the fix,
+    // computing highlights over that capped slice made the anr (the thing
+    // that happened exactly once) invisible, suppressed the busiest
+    // second, and reported the longest gap as 10ms — the spacing inside
+    // the recompose burst — instead of the real 1000ms gap between the
+    // anr and the first recompose.
+    async function fresh() {
+      const rig = await buildRig();
+      const events = [{ event: "anr", t: 1_000, data: {} }];
+      for (let i = 0; i < 300; i++) {
+        events.push({ event: "recompose", t: 2_000 + i * 10, data: {} });
+      }
+      await rig.pushEvents(events);
+      return rig;
+    }
+
+    for (const detail of ["summary", "normal"] as const) {
+      const rig = await fresh();
+      try {
+        const result = await rig.client.callTool("timeline", { detail, since: "all" });
+        expect(result.text, `detail: ${detail}`).toContain("only one anr");
+        expect(result.text, `detail: ${detail}`).toMatch(/longest gap 1000ms \(t=1000-2000\)/);
+        // The truncation note still says only 100 of the 301 matched came
+        // back — the cap still applies to what is *returned*, only the
+        // highlights themselves are computed over the whole match.
+        expect(result.text, `detail: ${detail}`).toContain("301 matched, newest 100 returned");
+      } finally {
+        await rig.close();
+      }
+    }
+  });
 });
 
 describe("the tool surface", () => {
@@ -1592,7 +1627,10 @@ describe("porthole_connect", () => {
       // above, so launchAppAsync falls back to monkey and then judges
       // success by polling pidof again afterwards, which this second entry
       // answers "running".
-      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [{ exitCode: 1 }, { stdout: "12345\n" }],
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { exitCode: 1 },
+        { stdout: "12345\n" },
+      ],
       [fakeAdbArgsKey([
         "-s",
         "A1",
@@ -1745,6 +1783,77 @@ describe("screenshot", () => {
       const result = await rig.client.callTool("screenshot", { detail: "normal", displayId: 2 });
       expect(result.isError).toBeFalsy();
       expect(adb.calls()[0]).toEqual(["exec-out", "screencap", "-p", "-d", "2"]);
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  /**
+   * Parses the size note's own "[NB returned...]"/"[N.NKB returned...]"
+   * figure back into an approximate byte count — anchored on "returned",
+   * not just any "NNNB"/"NNNKB" substring, since `screenshot`'s own
+   * caption already contains an unrelated one ("...NNNKB JPEG.") ahead of
+   * the note.
+   */
+  function parseFormattedBytes(text: string): number {
+    const m = /\[([\d.]+)(K|M)?B returned/.exec(text);
+    expect(m, `no size-note byte count in "${text}"`).not.toBeNull();
+    const value = Number(m![1]);
+    return m![2] === "M" ? value * 1_000_000 : m![2] === "K" ? value * 1_000 : value;
+  }
+
+  it("QA F2: the size note counts the image block's own bytes, not just the small JSON metadata beside it", async () => {
+    // A busy 800x1600 frame (a gradient, not a solid fill) so the
+    // re-encoded JPEG is a realistic few-tens-of-KB size — a solid colour
+    // compresses to almost nothing and would not distinguish "counts the
+    // image" from "got lucky".
+    const png = new PNG({ width: 800, height: 1600 });
+    for (let i = 0; i < png.data.length; i += 4) {
+      const p = i / 4;
+      png.data[i] = p % 256;
+      png.data[i + 1] = (p * 3) % 256;
+      png.data[i + 2] = (p * 7) % 256;
+      png.data[i + 3] = 255;
+    }
+    const adb = buildFakeScreencapAdb(PNG.sync.write(png));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      // One call, at the default ("summary") level — screenshot returns
+      // its image content block at every detail level (see index.ts's own
+      // comment on this tool), so the image this same call actually sent
+      // is the ground truth to check its own note against, no second
+      // capture or second rig needed.
+      const summaryResult = await rig.client.callTool("screenshot", {});
+      expect(summaryResult.isError).toBeFalsy();
+      expect(summaryResult.content.filter((c) => c.type === "text")).toHaveLength(1); // "summary": no JSON block
+
+      const image = summaryResult.content.find((c) => c.type === "image") as
+        { type: "image"; data: string; mimeType: string } | undefined;
+      expect(image, "no image content block").toBeDefined();
+      const actualImageBytes = Buffer.byteLength(image!.data, "utf8");
+      // A real screenshot's base64 is comfortably into five figures — this
+      // is also this test's own positive control, so a fixture that
+      // stopped producing a real image would fail loudly here rather than
+      // trivially passing every assertion below.
+      expect(actualImageBytes).toBeGreaterThan(5_000);
+
+      // QA's own repro named "[66B returned; normal ≈ 138B]" — a couple of
+      // hundred bytes while a real image went out beside it. The claimed
+      // "returned" size at "summary" must be within the same order of
+      // magnitude as the actual image bytes, not the bare JSON metadata.
+      const claimedAtSummary = parseFormattedBytes(summaryResult.text);
+      expect(claimedAtSummary).toBeGreaterThan(actualImageBytes * 0.9);
+
+      // detail: "normal"'s own claimed size, and the estimate it should
+      // ideally never need (nothing bigger than "normal" exists for this
+      // tool — no distinct "full" payload), must likewise reflect the
+      // image, not just the ~100-byte metadata object. Same rig, same
+      // fake adb, a second call — screenshot carries no state between
+      // calls, so this is not a race with the one above.
+      const normalResult = await rig.client.callTool("screenshot", { detail: "normal" });
+      const claimedAtNormal = parseFormattedBytes(normalResult.text);
+      expect(claimedAtNormal).toBeGreaterThan(actualImageBytes * 0.9);
     } finally {
       await rig.close();
       adb.cleanup();
