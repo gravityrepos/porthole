@@ -28,6 +28,7 @@ export const RIG_FILES = [
   "src/devices.test.ts",
   "src/entrypoints.test.ts",
   "src/index.test.ts",
+  "src/ring.test.ts",
   "src/save.test.ts",
   "src/sessions-integration.test.ts",
   "src/surface.test.ts",

@@ -49,6 +49,30 @@ export interface CapturePlan {
 }
 
 /**
+ * Drops `app` from a requested category list, with the same warning either
+ * caller would otherwise have to write out itself.
+ *
+ * Shared by `planCapture` and `planRing` (GRA-57): both take a `categories`
+ * list from the same place (an agent's request, defaulting to
+ * `DEFAULT_CATEGORIES`), and both need the identical "app is not a category"
+ * correction — see this file's own top-of-file doc comment for why passing
+ * it is a silent no-op rather than a rejected input. Factored out so the two
+ * planners cannot drift into two different wordings of the same warning.
+ */
+function sanitizeCategories(categories: string[], notes: string[]): string[] {
+  return categories.filter((c) => {
+    if (c === "app") {
+      notes.push(
+        "Dropped the `app` category: it is not one. App sections come from " +
+          "ATRACE_TAG_APP, which is enabled per package — pass the package in `apps`.",
+      );
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Works out what to record, and says when the request undercuts itself.
  *
  * Without a package in `apps`, the capture contains no Porthole sections and
@@ -69,20 +93,10 @@ export function planCapture(options: {
     notes.push(`Duration clamped to ${seconds}s; 1 to 120 is the supported range.`);
   }
 
-  const categories = (
-    options.categories?.length ? [...options.categories] : [...DEFAULT_CATEGORIES]
-  ).filter((c) => {
-    // Passing it is harmless but does nothing, and someone who passed it
-    // believes their app sections are being recorded. They are not.
-    if (c === "app") {
-      notes.push(
-        "Dropped the `app` category: it is not one. App sections come from " +
-          "ATRACE_TAG_APP, which is enabled per package — pass the package in `apps`.",
-      );
-      return false;
-    }
-    return true;
-  });
+  const categories = sanitizeCategories(
+    options.categories?.length ? [...options.categories] : [...DEFAULT_CATEGORIES],
+    notes,
+  );
 
   const apps = options.apps?.filter((a) => a.trim().length > 0) ?? [];
   if (apps.length === 0) {
@@ -255,4 +269,144 @@ export function describeCapture(result: CaptureResult): string {
 
   parts.push("Open it at ui.perfetto.dev; nothing here reads it for you.");
   return [...parts, ...result.notes].join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// #ring-config (GRA-57): a detached, continuously-recording ring buffer
+// ---------------------------------------------------------------------------
+
+/**
+ * The system trace of the problem that already happened.
+ *
+ * `capture_system_trace` above answers "record while I reproduce this" — it
+ * blocks for a fixed duration and needs a human standing by. Most of what is
+ * worth a system trace already happened by the time anyone thinks to ask for
+ * one. Perfetto's own ring-buffer session, run detached so it survives the
+ * adb shell that started it, is what makes "capture the last 30 seconds, now,
+ * of something I already saw" possible instead of "reproduce it again with a
+ * recording running."
+ *
+ * `planRing`/`ringConfigText` are the pure half — building the TraceConfig
+ * text `ring.ts` pushes to the device — kept here beside `planCapture` and
+ * `captureArgs` for the same reason those two are pure: a plan can be
+ * asserted on without a device, an adb binary, or a running trace daemon.
+ * `ring.ts` owns everything that actually talks to adb (start, snapshot,
+ * stop, and the state a running session needs between those three calls).
+ */
+
+/**
+ * 32MB, matching perfetto's own light-config default (`--buffer`'s own
+ * documented default). Sized "for ~30s of the sample app" per the ticket,
+ * but that duration is a property of *throughput*, not a fixed constant this
+ * function can promise: the spike's own emulator measurement (see the
+ * ticket's report) held several minutes of a near-idle device at this size,
+ * and a device under real load — active gfx/view/wm/binder/dalvik churn —
+ * fills it far faster. 32MB is offered as a reasonable starting point an
+ * agent can override with `bufferKb`, not a guarantee of any particular
+ * span; `ring.ts`'s snapshot result says so rather than quoting a precise
+ * "last 30s" this host has no way to verify from outside the trace itself.
+ */
+export const DEFAULT_RING_BUFFER_KB = 32 * 1024;
+
+/**
+ * Floor and ceiling for `bufferKb` — GRA-57's stated "traces larger than the
+ * device can hold" is out of scope, but an unbounded number here would let a
+ * single call ask for more RAM than most devices running a debug build can
+ * spare for one ftrace buffer. 4MB is small enough to be nearly useless (a
+ * few seconds under any real load) without being zero; 256MB is a large
+ * fraction of a typical device's usable memory for a debug tool that is
+ * meant to run continuously in the background, not the whole point of the
+ * session.
+ */
+export const MIN_RING_BUFFER_KB = 4 * 1024;
+export const MAX_RING_BUFFER_KB = 256 * 1024;
+
+/**
+ * Every detached ring session this file's tools ever start carries this
+ * exact name — not one per call, and not derived from the package under
+ * test. `perfetto --clone-by-name`/`--query --long` (see `ring.ts`) both key
+ * off it, and a fixed name is what makes "is Porthole's ring already
+ * running" answerable after an MCP server restart, when nothing in this
+ * process remembers starting it. The trade-off, stated plainly rather than
+ * discovered by surprise: only one Porthole ring can run on a given device
+ * at a time, whatever app it is scoped to — a second `system_trace_start`
+ * while one is already running is refused (see `ring.ts`), not silently
+ * layered on top of the first.
+ */
+export const RING_SESSION_NAME = "porthole-ring";
+
+export interface RingPlan {
+  sessionName: string;
+  categories: string[];
+  /** The one package whose ATRACE_TAG_APP sections are recorded — a ring session is always scoped to exactly one app, unlike `capture_system_trace`'s `apps` list. */
+  app: string;
+  bufferKb: number;
+  notes: string[];
+}
+
+/**
+ * Works out what a ring session should record — the same shape of decision
+ * `planCapture` makes for a one-shot capture, with two differences a ring
+ * session's own nature forces: no `seconds` (it runs until
+ * `system_trace_stop` says otherwise), and exactly one `app` rather than a
+ * list (`unique_session_name`/`--clone-by-name` key off one fixed name, and
+ * a session scoped to more than one package at a time is not something this
+ * first cut supports — see the ticket's report for why that is a deliberate
+ * narrowing, not an oversight).
+ */
+export function planRing(options: { app: string; categories?: string[]; bufferKb?: number }): RingPlan {
+  const notes: string[] = [];
+
+  const categories = sanitizeCategories(
+    options.categories?.length ? [...options.categories] : [...DEFAULT_CATEGORIES],
+    notes,
+  );
+
+  const requestedKb = options.bufferKb ?? DEFAULT_RING_BUFFER_KB;
+  const bufferKb = Math.min(Math.max(Math.round(requestedKb), MIN_RING_BUFFER_KB), MAX_RING_BUFFER_KB);
+  if (bufferKb !== Math.round(requestedKb)) {
+    notes.push(
+      `Buffer clamped to ${bufferKb}KB; ${MIN_RING_BUFFER_KB} to ${MAX_RING_BUFFER_KB}KB is the supported range.`,
+    );
+  }
+
+  return { sessionName: RING_SESSION_NAME, categories, app: options.app.trim(), bufferKb, notes };
+}
+
+/**
+ * The TraceConfig text `ring.ts` pushes to the device and starts with
+ * `perfetto --txt -c - --background`.
+ *
+ * `fill_policy: RING_BUFFER` is the whole point — the central buffer drops
+ * its oldest, not-yet-read packets once full rather than blocking or
+ * stopping the session, so a session with nothing reading it continuously
+ * (nothing here calls `--clone-by-name` on a timer) still runs forever
+ * instead of wedging. `unique_session_name` is what makes the session
+ * discoverable by name later — by `system_trace_snapshot`'s
+ * `--clone-by-name`, and by `porthole_status`/`system_trace_stop`'s
+ * `perfetto --query --long`, which prints it in a `NAME` column — without
+ * either of those needing to remember a `--detach` key across MCP server
+ * restarts. `atrace_apps`, not `--app`, is the config-file equivalent of
+ * `capture_system_trace`'s per-package `--app` flag; the two enable the
+ * exact same thing (`ATRACE_TAG_APP` for that package), just spelled for a
+ * config file instead of a command line.
+ */
+export function ringConfigText(plan: RingPlan): string {
+  const lines = [
+    `unique_session_name: "${plan.sessionName}"`,
+    "buffers {",
+    `  size_kb: ${plan.bufferKb}`,
+    "  fill_policy: RING_BUFFER",
+    "}",
+    "data_sources {",
+    "  config {",
+    '    name: "linux.ftrace"',
+    "    ftrace_config {",
+    ...plan.categories.map((c) => `      atrace_categories: "${c}"`),
+    `      atrace_apps: "${plan.app}"`,
+    "    }",
+    "  }",
+    "}",
+  ];
+  return lines.join("\n") + "\n";
 }

@@ -28,6 +28,7 @@ import {
 } from "./system.js";
 import { askTrace, findTraceProcessor, questionsDescription } from "./perfetto.js";
 import { captureArgs, countPortholeLabels, describeCapture, planCapture } from "./systrace.js";
+import { MEASURED_OVERHEAD, RingController } from "./ring.js";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -261,6 +262,9 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
   // directory is current every time a tool runs — cheap, since `open()` is a
   // no-op once the directory has not changed.
   const watermark = new Watermark();
+  // GRA-57: one ring controller per server instance, the same reasoning as
+  // `watermark` above — see `RingController`'s own doc comment in ring.ts.
+  const ring = new RingController();
   /** Set by `resolveWindowSince` on a first-ever `since: "last"` call, consumed by `ok()` (AC5). */
   let pendingFirstEverNote: string | null = null;
   const FIRST_EVER_NOTE =
@@ -1139,6 +1143,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // `ownsDeviceConnection` is false) — present, with `devices` and
         // `serial`, exactly when this call actually went looking for one.
         deviceDiagnosis: reconnect,
+        // GRA-57: whether the detached ring buffer is running, how deep it
+        // is, and its measured cost — an agent deciding whether to turn it
+        // on (`system_trace_start`) sees the overhead before asking, not
+        // after. Present and non-null even when nothing is running: the
+        // `overhead` figures are still worth showing then.
+        ring: ring.status(),
       };
       // GRA-96/GRA-197: a mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
@@ -1556,6 +1566,31 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const findings = trace.findings.map(withFollowUp);
 
+      // GRA-57: a fresh ring snapshot, attached to every error-severity
+      // finding in this result, when the ring is running and the cooldown
+      // allows it — see `RingController.maybeAutoSnapshotOnError`'s own doc
+      // comment for why this is best-effort and never turns a `findings`
+      // call itself into a failure. `findingsWithRing` (not `findings`) is
+      // what feeds `classify` below, so the attached path survives into the
+      // classified/new/ongoing shape the payload actually returns.
+      const hasErrorFinding = findings.some((f) => f.severity === "error");
+      // `findings` (unlike system_trace_start/snapshot/stop) takes no
+      // `serial` parameter of its own — PORTHOLE_SERIAL is the only way this
+      // path can know which device to scope to on a host with more than one
+      // attached, the same fallback `diagnoseAndReconnect` already reads.
+      // Without it, more than one attached device makes every adb call here
+      // fail with "more than one device/emulator" — silently, by design
+      // (`maybeAutoSnapshotOnError` never fails `findings` itself), which
+      // was caught on this ticket's own dev host, not assumed.
+      const autoSnapshot = await ring.maybeAutoSnapshotOnError(hasErrorFinding, {
+        serial: process.env.PORTHOLE_SERIAL,
+        env: adbEnv,
+        binary: adbBinary,
+      });
+      const findingsWithRing = autoSnapshot
+        ? findings.map((f) => (f.severity === "error" ? { ...f, ringSnapshot: autoSnapshot } : f))
+        : findings;
+
       // GRA-200: built from the same windowed `events` `trace` itself came
       // from, so this can never name a different window than the findings
       // beside it. See alsoInWindowOf's own comment in trace.ts for why an
@@ -1568,7 +1603,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // — order matters here, `recordDigest` below must come after reading
       // `previousDigest`, not before.
       const previousDigest = watermark.get().digest;
-      const classified = classify(findings, previousDigest, span.sinceLast, {
+      const classified = classify(findingsWithRing, previousDigest, span.sinceLast, {
         from: span.from,
         to: span.to,
       });
@@ -2044,6 +2079,140 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         notes: [...plan.notes, ...restartNotes],
       };
       return ok(describeCapture(result), result);
+    },
+  );
+
+  server.registerTool(
+    "system_trace_start",
+    {
+      title: "Start a continuous system trace ring buffer",
+      description:
+        "Starts a Perfetto session that records continuously into a fixed-size in-memory ring " +
+        "buffer, detached so it survives this MCP server and outlives the adb shell that started " +
+        "it. Unlike `capture_system_trace`, this does not block and does not need a human standing " +
+        "by to reproduce anything: the point is to have a system trace already running so " +
+        "`system_trace_snapshot` can pull the last stretch of it *after* something already went " +
+        "wrong, not before.\n\n" +
+        "Opt-in only — nothing here runs until this tool is called, and there is no default-on " +
+        "path. The EM's own re-scope on this ticket made that the condition for shipping it at " +
+        "all: continuous `sched` tracing had to be measured cheap enough first. It was, on an " +
+        `emulator, under a light synthetic workload: ${MEASURED_OVERHEAD.cpuPercentOfOneCore}% of ` +
+        "one core combined across traced/traced_probes/the detached perfetto process — see " +
+        "`porthole_status`'s `ring.overhead` for the same number with its own caveats. Hardware " +
+        "measurement under real load is a separate, ongoing pass; treat the emulator number as a " +
+        "starting point, not a guarantee, and turn this off (`system_trace_stop`) when done hunting.\n\n" +
+        "Survives an adb disconnect and a screen-off: confirmed on an emulator by starting a " +
+        "session, cycling the host's adb server (`adb kill-server`/`adb devices`) and separately " +
+        "putting the device to sleep (`input keyevent 26`) for 15+ seconds, and finding the " +
+        "session still present both times. Also survives the target app being killed and " +
+        "restarted — the ring is a device-level session, not tied to any one process's lifetime. " +
+        "Doze was not usefully testable: an emulator's `dumpsys deviceidle force-idle` jumps " +
+        "straight to the IDLE state without the real hardware path (actual CPU/radio suspension), " +
+        "so a pass there would prove only that the simulated state doesn't kill the session, not " +
+        "that real deep sleep on a phone would not. Left for the hardware pass.\n\n" +
+        "Only one ring can run at a time, whatever app it is scoped to — call `system_trace_stop` " +
+        "before starting a different one. `system_trace_snapshot` pulls from it without " +
+        "interrupting it; `capture_system_trace` keeps working exactly as before, independent of " +
+        "this.",
+      inputSchema: {
+        app: z
+          .string()
+          .optional()
+          .describe(
+            "The package whose ATRACE_TAG_APP sections to record. Defaults to the app the porthole " +
+              "is attached to. A ring scoped to no package has no Porthole sections in it, the same " +
+              "problem `capture_system_trace` warns about.",
+          ),
+        categories: z
+          .array(z.string())
+          .optional()
+          .describe("atrace categories. Defaults to the same set capture_system_trace uses."),
+        bufferKb: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Ring buffer size in KB. Defaults to 32768 (32MB), sized for roughly 30s of the sample " +
+              "app, but the true span is a function of how much the device is doing, not a " +
+              "promise — see `system_trace_snapshot`'s own result.",
+          ),
+        serial: z.string().optional().describe("Device serial, when more than one is attached."),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ app, categories, bufferKb, serial }): Promise<ToolResult> => {
+      const target = app ?? device.hello?.packageName ?? "";
+      const started = await ring.start({
+        app: target,
+        categories,
+        bufferKb,
+        serial,
+        env: adbEnv,
+        binary: adbBinary,
+      });
+      if (!started.ok) return fail(started.message);
+      const summary =
+        `Ring started, scoped to ${started.plan.app}, ${started.plan.bufferKb}KB buffer, ` +
+        `${started.plan.categories.length} categories. Call system_trace_snapshot to pull the ` +
+        "last stretch of it at any time, or system_trace_stop to end it.";
+      return ok(summary, started);
+    },
+  );
+
+  server.registerTool(
+    "system_trace_snapshot",
+    {
+      title: "Flush the running ring buffer to a file",
+      description:
+        "Pulls the ring buffer's current contents to a file on disk, without interrupting the " +
+        "ring itself — it keeps recording. Use this the moment after something goes wrong: the " +
+        "trace has already been collecting, so there is no reproduction step to wait through.\n\n" +
+        "Uses Perfetto's `--clone-by-name`, discovered by this ticket's own spike rather than the " +
+        "detach/attach/stop sequence its research brief named — that sequence turned out to " +
+        "require `write_into_file`, which turns the on-device file into a continuously growing " +
+        "stream rather than a ring, and stopping-to-flush would have interrupted the very " +
+        "recording this tool exists to keep running. `--clone-by-name` reads the session's buffer " +
+        "into a brand new file and leaves the original untouched; confirmed on the spike's " +
+        "emulator by finding the source perfetto process still present in `ps` immediately after " +
+        "a pull.\n\n" +
+        "The result's `note` says how much of it is trustworthy: the buffer is sized for roughly " +
+        "30s at default settings, but under real load it can wrap sooner, and this host has no way " +
+        "to verify the actual covered span from outside the trace itself — read it with " +
+        "`ask_system_trace` for that.",
+      inputSchema: {
+        outputDir: z.string().optional().describe("Where to write it. Defaults to .porthole/traces."),
+        serial: z.string().optional().describe("Device serial, when more than one is attached."),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ outputDir, serial }): Promise<ToolResult> => {
+      const snapshot = await ring.snapshot({ outputDir, serial, env: adbEnv, binary: adbBinary });
+      if (!snapshot.ok) return fail(snapshot.message);
+      const mb = (snapshot.bytes / (1024 * 1024)).toFixed(1);
+      return ok(`Snapshot pulled to ${snapshot.path} (${mb}MB). ${snapshot.note}`, snapshot);
+    },
+  );
+
+  server.registerTool(
+    "system_trace_stop",
+    {
+      title: "Stop the ring buffer",
+      description:
+        "Stops the running ring and cleans up after it: the backgrounded perfetto process on the " +
+        "device is killed, and every file this feature could have left behind (the PID marker, the " +
+        "config, any flushed or snapshotted trace) is removed. Safe to call even when nothing is " +
+        "known to be running here — including after this MCP server restarted and no longer " +
+        "remembers starting anything, since this reads the device's own record of the session " +
+        "rather than trusting this process's memory alone.",
+      inputSchema: {
+        serial: z.string().optional().describe("Device serial, when more than one is attached."),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ serial }): Promise<ToolResult> => {
+      const stopped = await ring.stop({ serial, env: adbEnv, binary: adbBinary });
+      return ok(stopped.message, stopped);
     },
   );
 

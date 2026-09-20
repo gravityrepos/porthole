@@ -36,6 +36,8 @@ dist/perfetto.js
 dist/perfetto.js.map
 dist/report.js
 dist/report.js.map
+dist/ring.js
+dist/ring.js.map
 dist/save.js
 dist/save.js.map
 dist/screenshot.js
@@ -68,6 +70,7 @@ src/index.ts
 src/moment.ts
 src/perfetto.ts
 src/report.ts
+src/ring.ts
 src/save.ts
 src/screenshot.ts
 src/sessions.ts
