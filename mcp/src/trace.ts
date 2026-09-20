@@ -87,6 +87,44 @@ export interface Finding {
    * off — see `sources.ts`'s own doc comment for exactly when.
    */
   where?: Where;
+  /**
+   * GRA-103: which tool is making the claim — `"porthole"` for everything
+   * `findingsOf` derives from the device's own event stream (every finding in
+   * this file), `"trace"` for a finding `perfetto.ts`'s `interpret()` derived
+   * from a system trace instead. Optional, and absent on every finding built
+   * before this field existed (every one in this file) — `timeline.ts`'s
+   * `/api/findings` has stamped exactly this distinction onto its own
+   * findings since GRA-113 without it living on `Finding` itself; this is
+   * that same shape, promoted onto the type so `porthole capture --systrace`
+   * (capture.ts) can carry it all the way into the trace JSON on disk, where
+   * `porthole report` reads it back to render a trace-sourced finding
+   * differently from one the runtime itself observed.
+   */
+  source?: "porthole" | "trace";
+}
+
+/**
+ * GRA-103: what `porthole capture --systrace` recorded on-device, alongside
+ * the porthole-sourced trace `capture()` already writes.
+ *
+ * `portholeLabels` is deliberately here rather than only inferable from
+ * `notes`: the acceptance criterion is "portholeLabels: 0 produces a
+ * warning in the artifact", not merely a sentence buried in `notes`, so a
+ * consumer reading the trace JSON structurally (not by grepping prose) can
+ * still see the exact count.
+ */
+export interface SystraceCapture {
+  /** Where the .pftrace was written, alongside the trace JSON. */
+  path: string;
+  bytes: number;
+  seconds: number;
+  categories: string[];
+  apps: string[];
+  portholeLabels: number;
+  /** Whether `trace_processor_shell` could be found to ask the eight questions of it. */
+  questionsAsked: boolean;
+  /** Anything worth saying that is not itself a `Finding` — a missing trace_processor_shell, a plan note from `planCapture`, an unanswered question. */
+  notes: string[];
 }
 
 export interface Trace {
@@ -101,6 +139,8 @@ export interface Trace {
   metrics: Record<string, number>;
   findings: Finding[];
   events?: DeviceEvent[];
+  /** GRA-103: present only when `porthole capture --systrace` was used. */
+  systrace?: SystraceCapture;
 }
 
 /** Exported for `index.ts`'s `exits` section (GRA-58): the same loose coercion every event field here already gets, so a device's numeric fields don't need retyping at a second call site. */

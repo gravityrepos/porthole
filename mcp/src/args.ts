@@ -96,6 +96,31 @@ export function parseDuration(raw: string | undefined, option: string): number |
   return parsed.value * parsed.unitMs;
 }
 
+/**
+ * A whole number of seconds for `porthole capture --systrace-seconds`
+ * (GRA-103).
+ *
+ * Same discipline as `parsePort`/`parseMillis`: a run of decimal digits only,
+ * so `"1e4"` or `" 10 "` — both finite per `Number()` — are refused rather
+ * than silently accepted. No upper bound is enforced here on purpose: the
+ * ceiling is `planCapture`'s own 1-120s clamp (systrace.ts, GRA-57/GRA-103),
+ * which answers an out-of-range value with a note in the plan rather than a
+ * refusal — the same way `capture_system_trace`'s own `seconds` parameter
+ * already behaves. Enforcing a second, stricter ceiling here would just be a
+ * second place for the two to disagree.
+ */
+export function parseSeconds(raw: string | undefined, option: string): number | ParseError {
+  if (raw === undefined || raw === "") {
+    return { message: `${option} needs a whole number of seconds` };
+  }
+  if (/^\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (value <= 0) return { message: `${option} ${raw} must be positive` };
+    return value;
+  }
+  return { message: `${option} ${JSON.stringify(raw)} is not a whole number of seconds` };
+}
+
 const FAIL_ON_VALUES = ["nothing", "error", "regression"] as const;
 
 export type FailOn = (typeof FAIL_ON_VALUES)[number];

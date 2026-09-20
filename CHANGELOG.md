@@ -15,6 +15,35 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- `porthole capture --systrace`: the headless path meets Perfetto (GRA-103).
+  `porthole capture` recorded the app's own view; `capture_system_trace` and
+  `ask_system_trace` recorded the device's — the two never met, so a CI
+  regression could be described but not explained (thermal throttling, ART
+  still compiling, binder blocking). `--systrace [--systrace-seconds N]
+  [--systrace-categories a,b]` starts an on-device Perfetto recording for the
+  lifetime of the child command (a backgrounded, `--background-wait`
+  capture, stopped the moment the command exits rather than blocking on a
+  fixed duration — bounded by `planCapture`'s existing 1-120s clamp as a
+  safety ceiling, defaulting to the max so the command's own lifetime is the
+  real bound), pulls it beside the trace JSON (`porthole-trace.json` and
+  `porthole-trace.pftrace`), and — when `trace_processor_shell` can be
+  found — asks it the same eight questions `ask_system_trace` does, over the
+  window the capture covered, converting between Porthole's uptime clock and
+  the trace's boot clock exactly as that tool does. The answers merge into
+  the same `findings` array `findingsOf` already produces, each finding now
+  carrying `source: "porthole"` or `source: "trace"` — the same distinction
+  `/api/findings` (timeline.ts) already drew, promoted onto `Finding` itself
+  so it survives into the trace JSON on disk. `portholeLabels` (how many of
+  the runtime's own atrace sections landed in the capture) is recorded in a
+  new `systrace` block on the trace, and a `portholeLabels: 0` capture gets
+  an explicit `warning`-severity finding, not just a buried sentence. Without
+  `trace_processor_shell` on the machine the capture still succeeds and the
+  `.pftrace` is still written — a note says the questions were not asked and
+  names `./gradlew portholeTraceProcessor` as the fix. `porthole report`
+  tags a trace-sourced finding `[trace]` so it reads differently from one the
+  runtime itself observed; `compare` was already indifferent to `findings`
+  (it only ever diffed `metrics`), so a baseline without trace findings
+  compares cleanly against a run with them, and vice versa.
 - New `setup` MCP tool: every entry the runtime's `setup` report carries —
   which integration is instrumented, which is only on the classpath, and
   the `socket`/`strictmode` entries alongside them — was previously
