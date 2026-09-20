@@ -1,0 +1,3 @@
+"blocking_method","short_blocking_method","blocked_method","short_blocked_method","blocking_thread_name","blocked_thread_name","is_blocking_thread_main","is_blocked_thread_main","waiter_count","dur","MIN(ts)","MAX(ts)"
+"void com.example.shop.data.CartRepository.save(Item)","save","void com.example.shop.ui.CartViewModel.onAddClicked(Item)","onAddClicked","DefaultDispatch","om.example.shop",0,1,1,12000000,542880000000,542892000000
+"void com.example.shop.data.db.AppDatabase.query(String)","query","void com.example.shop.data.SyncWorker.doWork()","doWork","binder:17183_5","AsyncTask #3",0,0,"[NULL]",3000000,542870000000,542873000000

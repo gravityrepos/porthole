@@ -47,23 +47,25 @@ export interface Question {
 }
 
 /**
- * GRA-113: which of these five can carry a `window` on the findings they
+ * GRA-113: which of these questions can carry a `window` on the findings they
  * produce, versus which can only ever be `spanning`.
  *
- * `jank`, `binder`, `render` and `slices` group real, individually-timestamped
- * occurrences — a slice, a binder transaction, a frame's own deadline record —
- * so `MIN(ts)`/`MAX(ts)` alongside their existing `GROUP BY` is the envelope
- * those occurrences actually happened in, not an invented one. They are
- * **point-placeable**, and their SQL below carries those two columns through
- * to `interpret()`.
+ * `jank`, `binder`, `render`, `slices`, `startup` and `monitor_contention`
+ * group real, individually-timestamped occurrences — a slice, a binder
+ * transaction, a frame's own deadline record, a startup, a lock contention
+ * event — so `MIN(ts)`/`MAX(ts)` alongside their existing `GROUP BY` is the
+ * envelope those occurrences actually happened in, not an invented one. They
+ * are **point-placeable**, and their SQL below carries those two columns
+ * through to `interpret()`.
  *
- * `thread_states` is different in kind, not just missing a column: it answers
- * "how much of the window did the main thread spend in each state", which is
- * a duration summed across however many disjoint stretches the scheduler
- * visited that state — there is no `ts` a single row could add that would
- * mean anything, because the row is not about one occurrence. This is the
- * ticket's own example of a finding that must never be drawn as a point, and
- * every finding `interpret()` derives from it (`trace-main-thread-contention`)
+ * `thread_states` and `cpu` (GRA-61's merged 8+9) are different in kind, not
+ * just missing a column: both answer "how much of the window did [the main
+ * thread / some core] spend doing X", which is a duration summed across
+ * however many disjoint stretches the scheduler visited that state — there is
+ * no `ts` a single row could add that would mean anything, because the row is
+ * not about one occurrence. This is the ticket's own example of a finding
+ * that must never be drawn as a point, and every finding `interpret()`
+ * derives from either one (`trace-main-thread-contention`, `trace-cpu-placement`)
  * is unconditionally **spanning**.
  */
 export const QUESTIONS: Question[] = [
@@ -136,7 +138,142 @@ export const QUESTIONS: Question[] = [
           WHERE s.ts >= $from AND s.ts <= $to AND s.process_name = $package
           GROUP BY 1 ORDER BY SUM(s.dur) DESC LIMIT 200`,
   },
+  {
+    id: "startup",
+    asks: "what slowed the app's own startup, and by how much",
+    // android.startup.startups gives launch type and duration;
+    // android.startup.startup_breakdowns adds android_startup_opinionated_breakdown,
+    // the platform's own attribution of a startup's time to a reason — binder,
+    // monitor contention, GC, dex opening, bindApplication and the rest — so this
+    // question does not have to reinvent that classification from raw slices.
+    // Both modules exist at v58.2 (checked directly against the pinned binary
+    // and the stdlib source for this tag before writing this query); no pin
+    // bump needed.
+    //
+    // Window filter is overlap, not containment: a startup can run for
+    // seconds, well past a window drawn tight around the one slow phase of
+    // it (a bindApplication stall, say), so `ts >= $from AND ts <= $to` —
+    // every other question's convention — would miss the startup whose
+    // reason is exactly what the window was drawn around.
+    sql: `INCLUDE PERFETTO MODULE android.startup.startups;
+          INCLUDE PERFETTO MODULE android.startup.startup_breakdowns;
+          SELECT startup.startup_id AS startup_id, startup.startup_type AS startup_type,
+                 startup.dur AS dur, startup.ts AS "MIN(ts)", startup.ts + startup.dur AS "MAX(ts)",
+                 b.reason AS reason, SUM(b.dur) AS reason_dur
+          FROM android_startups AS startup
+          LEFT JOIN android_startup_opinionated_breakdown AS b USING(startup_id)
+          WHERE startup.ts <= $to AND (startup.ts + startup.dur) >= $from
+            AND startup.package = $package
+          GROUP BY startup.startup_id, startup.startup_type, startup.dur, startup.ts, reason
+          ORDER BY startup.ts, reason_dur DESC`,
+  },
+  {
+    id: "monitor_contention",
+    asks: "which lock contention blocked the main thread, and who was holding it",
+    // android_monitor_contention needs the `dalvik` category, which
+    // systrace.ts's DEFAULT_CATEGORIES already enables — nothing to change
+    // there for this question to have data to read.
+    sql: `INCLUDE PERFETTO MODULE android.monitor_contention;
+          SELECT blocking_method, short_blocking_method, blocked_method, short_blocked_method,
+                 blocking_thread_name, blocked_thread_name, is_blocking_thread_main,
+                 is_blocked_thread_main, waiter_count, dur AS dur,
+                 ts AS "MIN(ts)", ts + dur AS "MAX(ts)"
+          FROM android_monitor_contention
+          WHERE process_name = $package AND ts >= $from AND ts <= $to
+          ORDER BY dur DESC LIMIT 20`,
+  },
+  {
+    id: "cpu",
+    asks: "where the main thread actually ran, and who else wanted the same cores",
+    // GRA-61's questions 8 and 9, merged by the EM into one query over the
+    // same sched window rather than two: where the main thread ran (core,
+    // cluster, frequency) and who else was using those same cores are the
+    // same evidence read two ways, and a merged answer is what lets
+    // `interpret()` gate the whole thing on one property instead of two
+    // findings that can disagree.
+    //
+    // No MIN(ts)/MAX(ts): like `thread_states`, every row here is a sum
+    // across however many disjoint scheduler intervals the main thread (or
+    // someone else) visited a core in this window, not one occurrence — so
+    // it is unconditionally `spanning`, never point-placed.
+    //
+    // `kind` discriminates the two halves inside one result set rather than
+    // running two queries: 'main_thread' rows (one per core the main thread
+    // actually ran on, with its cluster type and a duration-weighted average
+    // frequency alongside that core's own max) and 'other' rows (sched time
+    // other processes spent on exactly those same cores, the cores the app
+    // itself wanted). A row's unused columns come back NULL rather than the
+    // shape splitting into two questions with their own ids.
+    //
+    // The frequency reading is deliberately approximate: it takes the
+    // frequency sample in force at the *start* of each Running interval
+    // (the most recent cpu_frequency_counters row at or before it, on the
+    // same ucpu) rather than a true interval intersection, which needs
+    // machinery (`intervals.intersect`'s macros) this query does not pull
+    // in. A core does not change frequency inside a single scheduler
+    // timeslice often enough for the difference to matter at the
+    // millisecond durations these windows cover.
+    sql: `INCLUDE PERFETTO MODULE linux.cpu.frequency;
+          INCLUDE PERFETTO MODULE android.cpu.cluster_type;
+          WITH main_utid AS (
+            SELECT thread.utid AS utid
+            FROM thread JOIN process USING(upid)
+            WHERE process.name = $package AND thread.is_main_thread
+          ),
+          main_running AS (
+            SELECT thread_state.ts AS ts, thread_state.dur AS dur,
+                   thread_state.ucpu AS ucpu, thread_state.cpu AS cpu
+            FROM thread_state
+            JOIN main_utid USING(utid)
+            WHERE thread_state.state = 'Running'
+              AND thread_state.ts >= $from AND thread_state.ts <= $to
+          ),
+          main_running_freq AS (
+            SELECT mr.cpu AS cpu, mr.ucpu AS ucpu, mr.dur AS dur,
+                   (SELECT freq FROM cpu_frequency_counters AS f
+                    WHERE f.ucpu = mr.ucpu AND f.ts <= mr.ts
+                    ORDER BY f.ts DESC LIMIT 1) AS freq
+            FROM main_running AS mr
+          ),
+          cpu_max_freq AS (
+            SELECT ucpu, MAX(freq) AS max_freq FROM cpu_frequency_counters GROUP BY ucpu
+          ),
+          main_by_cpu AS (
+            SELECT mrf.cpu AS core, cm.cluster_type AS cluster_type,
+                   SUM(mrf.dur) AS dur,
+                   SUM(mrf.dur * COALESCE(mrf.freq, 0)) / NULLIF(SUM(mrf.dur), 0) AS avg_freq,
+                   mf.max_freq AS max_freq
+            FROM main_running_freq AS mrf
+            LEFT JOIN android_cpu_cluster_mapping AS cm ON cm.ucpu = mrf.ucpu
+            LEFT JOIN cpu_max_freq AS mf ON mf.ucpu = mrf.ucpu
+            GROUP BY mrf.cpu, cm.cluster_type, mf.max_freq
+          ),
+          wanted_cpus AS (SELECT DISTINCT cpu FROM main_running),
+          other AS (
+            SELECT process.name AS process_name, SUM(sched.dur) AS dur, COUNT(*) AS COUNT
+            FROM sched
+            JOIN thread USING(utid)
+            LEFT JOIN process USING(upid)
+            WHERE sched.cpu IN (SELECT cpu FROM wanted_cpus)
+              AND sched.ts >= $from AND sched.ts <= $to
+              AND (process.name IS NULL OR process.name != $package)
+              AND NOT COALESCE(thread.is_idle, 0)
+            GROUP BY process.name
+            ORDER BY dur DESC LIMIT 10
+          )
+          SELECT 'main_thread' AS kind, core, cluster_type, dur, avg_freq, max_freq,
+                 NULL AS process_name, NULL AS COUNT
+          FROM main_by_cpu
+          UNION ALL
+          SELECT 'other' AS kind, NULL AS core, NULL AS cluster_type, dur,
+                 NULL AS avg_freq, NULL AS max_freq, process_name, COUNT
+          FROM other
+          ORDER BY kind, dur DESC`,
+  },
 ];
+
+/** Every valid [Question] id, for validating an `ask` filter against. */
+export const QUESTION_IDS: string[] = QUESTIONS.map((q) => q.id);
 
 export interface Rows {
   jank?: Array<Record<string, unknown>>;
@@ -144,6 +281,14 @@ export interface Rows {
   binder?: Array<Record<string, unknown>>;
   render?: Array<Record<string, unknown>>;
   slices?: Array<Record<string, unknown>>;
+  startup?: Array<Record<string, unknown>>;
+  monitor_contention?: Array<Record<string, unknown>>;
+  cpu?: Array<Record<string, unknown>>;
+}
+
+/** One line per question, `id — asks`, for a tool description that cannot drift from QUESTIONS. */
+export function questionsDescription(): string {
+  return QUESTIONS.map((q) => `\`${q.id}\` (${q.asks})`).join(", ");
 }
 
 /**
@@ -172,6 +317,64 @@ const NOT_YOUR_CODE: Array<{ match: RegExp; what: string; note: string }> = [
     note: "The time was spent in whatever was called, not in the app.",
   },
 ];
+
+/**
+ * `android_startup_opinionated_breakdown`'s own reason vocabulary
+ * (`_startup_breakdown_reason` in the stdlib, android/startup/startup_breakdowns.sql
+ * at v58.2), turned into the words a person would use — the ticket's own
+ * list: binder blocking, lock contention, GC, monitor contention, dex
+ * opening, bindApplication cost. A reason this map does not know about is
+ * passed through unchanged rather than dropped, so a stdlib update that adds
+ * one is still readable, just not yet translated.
+ */
+const STARTUP_REASONS: Record<string, string> = {
+  binder: "binder blocking",
+  monitor_contention: "monitor contention",
+  art_lock_contention: "ART lock contention",
+  userspace_memory_reclaim: "garbage collection",
+  kernel_memory_reclaim: "kernel memory reclaim",
+  mutex_contention: "mutex contention",
+  dlopen: "dlopen",
+  verify_class: "class verification",
+  open_dex_files_from_oat: "opening dex files",
+  bind_application: "bindApplication",
+  activity_start: "activityStart",
+  activity_resume: "activityResume",
+  activity_restart: "activityRestart",
+  client_transaction_executed: "client transaction dispatch",
+  choreographer_do_frame: "Choreographer#doFrame",
+  inflate: "layout inflation",
+  resources_manager_get_resources: "resource loading",
+  io: "I/O wait",
+  irq: "interrupt handling",
+  launch_delay: "a delay before the app's main thread picked up startup at all",
+};
+
+const describeStartupReason = (reason: string): string => STARTUP_REASONS[reason] ?? reason;
+
+/**
+ * Gates for `trace-cpu-placement` (GRA-61 questions 8+9, merged).
+ *
+ * All three are deliberately conservative — the acceptance criterion this
+ * exists to satisfy is silence on a trace from an idle device on a desk,
+ * plugged into power, not sensitivity on a busy one. Tuned against
+ * hand-built fixture rows (see `perfetto.test.ts`'s "trace-cpu-placement"
+ * describe block) standing in for both cases; no real device measurement of
+ * an idle trace's own numbers was available when these were chosen (see
+ * GRA-61's own final report), so treat them as a starting point a real
+ * capture may need to move.
+ */
+// A core is "little" enough of the story to mention once the main thread
+// spent at least this share of its running time in this window there.
+const LITTLE_CORE_FRACTION = 0.3;
+// Running, duration-weighted, at or below this fraction of a core's own max
+// frequency counts as throttled enough to mention.
+const LOW_FREQ_FRACTION = 0.6;
+// Below this much total running time in the window, the main thread barely
+// ran at all — on any core, at any frequency — and neither gate above should
+// fire no matter what fraction they compute, because a fraction of
+// near-nothing is not a material share of anything.
+const MATERIAL_RUNNING_MS = 15;
 
 /**
  * boot-clock ns → device uptime ms, the direction `moment.ts`'s `fromBootMs`
@@ -333,6 +536,171 @@ export function interpret(rows: Rows, toUptimeMs?: ToUptimeMs): Finding[] {
       evidence: { totalMs: total, worst: String(worst.name ?? "") },
       ...place(rowsWindow(render, toUptimeMs)),
     });
+  }
+
+  // --- what the platform itself blames the app's startup on ----------------
+  //
+  // GRA-60 hook: the runtime's own startup collector places its own finding
+  // (from `device`/`profile`-style events, not from a trace) in the same
+  // uptime window this one is placed in. Neither knows about the other yet —
+  // GRA-60 is being built in parallel and this ticket does not depend on
+  // it — but both describe the same real startup, so a future change here is
+  // reconciling them: at minimum, the two should never assign different
+  // durations to what turns out to be the same launch, and a caller seeing
+  // both should be told they agree rather than left to notice on their own.
+  // `trace-startup`'s own `id` and its `evidence.durMs` are the two fields
+  // that reconciliation needs to compare against.
+  const startups = rows.startup ?? [];
+  if (startups.length > 0) {
+    const byStartup = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of startups) {
+      const id = String(row.startup_id);
+      const group = byStartup.get(id) ?? [];
+      group.push(row);
+      byStartup.set(id, group);
+    }
+    for (const group of byStartup.values()) {
+      const first = group[0];
+      const durMs = ms(n(first.dur));
+      const reasons = group
+        .filter((r) => r.reason !== null && r.reason !== undefined)
+        .map((r) => ({ reason: String(r.reason), ms: ms(n(r.reason_dur)) }))
+        .filter((r) => r.ms > 0)
+        .sort((a, b) => b.ms - a.ms);
+      const top = reasons.slice(0, 3);
+      findings.push({
+        id: "trace-startup",
+        // A pragmatic threshold, not a platform-defined one: half a second is
+        // noticeable on current hardware for any launch type. Open to
+        // adjustment once GRA-60's own collector gives a second, independent
+        // reading to compare it against.
+        severity: durMs >= 500 ? "warning" : "note",
+        confidence: "observed",
+        title: `${String(first.startup_type ?? "app")} start took ${durMs}ms`,
+        detail: top.length
+          ? `Slowest contributors, by the platform's own attribution: ${top
+              .map((r) => `${describeStartupReason(r.reason)} (${r.ms}ms)`)
+              .join(", ")}.`
+          : "No single reason dominated the platform's own breakdown of it.",
+        count: group.length,
+        evidence: {
+          durMs,
+          startupType: String(first.startup_type ?? ""),
+          reasons: Object.fromEntries(top.map((r) => [r.reason, r.ms])),
+        },
+        ...place(rowsWindow(group, toUptimeMs)),
+      });
+    }
+  }
+
+  // --- java monitor contention that blocked the main thread -----------------
+  const monitor = (rows.monitor_contention ?? []).filter(
+    (r) => String(r.is_blocked_thread_main) === "1",
+  );
+  if (monitor.length > 0) {
+    const worst = monitor.reduce((a, b) => (n(b.dur) > n(a.dur) ? b : a));
+    const worstMs = ms(n(worst.dur));
+    // Sub-millisecond contention on the main thread is common and not
+    // actionable; the same noise floor jank's own reading tolerates.
+    if (worstMs >= 1) {
+      findings.push({
+        id: "trace-lock-contention",
+        // Matches `trace-binder`'s own 8ms threshold for "this is the story,
+        // not a footnote" — both are the app's own thread waiting on
+        // something else to let go of a lock or a call.
+        severity: worstMs >= 8 ? "warning" : "note",
+        confidence: "observed",
+        title: `${monitor.length} lock contention event(s) blocked the main thread, worst ${worstMs}ms in ${
+          worst.short_blocking_method ?? worst.blocking_method
+        }`,
+        detail:
+          `${worst.short_blocked_method ?? worst.blocked_method ?? "the main thread"} waited on ` +
+          `${worst.blocking_thread_name} holding the lock in ${worst.blocking_method}. The fix is ` +
+          "moving the lock off the main thread's path, not making the held work faster.",
+        count: monitor.length,
+        evidence: {
+          worstMs,
+          blockingMethod: String(worst.blocking_method ?? ""),
+          blockedMethod: String(worst.blocked_method ?? ""),
+          blockingThread: String(worst.blocking_thread_name ?? ""),
+        },
+        ...place(rowsWindow(monitor, toUptimeMs)),
+      });
+    }
+  }
+
+  // --- where the main thread ran, and who else wanted the same cores -------
+  //
+  // GRA-61 questions 8+9, merged. Gated hard on purpose: an idle device on a
+  // desk, plugged into power, still schedules the main thread onto a little
+  // core briefly now and then, and reporting that as a finding would make
+  // this noisy on the one trace it most needs to stay silent on. `interpret`
+  // has no window duration to compute a true fraction-of-the-window against
+  // (GRA-61 chose not to thread one through just for this), so the gate uses
+  // an absolute floor on running time instead of a fraction of elapsed wall
+  // time: below MATERIAL_RUNNING_MS the main thread barely ran in this window
+  // at all, on any core, at any frequency, and nothing here is worth saying.
+  const cpu = rows.cpu ?? [];
+  if (cpu.length > 0) {
+    const mainRows = cpu.filter((r) => String(r.kind) === "main_thread");
+    const otherRows = cpu.filter((r) => String(r.kind) === "other");
+    const totalMs = ms(mainRows.reduce((sum, r) => sum + n(r.dur), 0));
+    const littleMs = ms(
+      mainRows.filter((r) => String(r.cluster_type) === "little").reduce((sum, r) => sum + n(r.dur), 0),
+    );
+    const littleFraction = totalMs > 0 ? littleMs / totalMs : 0;
+    const freqNum = mainRows.reduce((sum, r) => sum + n(r.dur) * n(r.avg_freq), 0);
+    const freqDenom = mainRows.reduce((sum, r) => sum + n(r.dur) * n(r.max_freq), 0);
+    const freqFraction = freqDenom > 0 ? freqNum / freqDenom : null;
+
+    const onLittleCore = littleFraction >= LITTLE_CORE_FRACTION;
+    const atLowFreq = freqFraction !== null && freqFraction <= LOW_FREQ_FRACTION;
+    const material = totalMs >= MATERIAL_RUNNING_MS;
+
+    if (material && (onLittleCore || atLowFreq)) {
+      const freqPct = freqFraction === null ? null : Math.round(freqFraction * 100);
+      const littlePct = Math.round(littleFraction * 100);
+      const title =
+        onLittleCore && atLowFreq
+          ? `the main thread ran on a little core for ${littleMs}ms of this window, averaging ${freqPct}% of max frequency`
+          : onLittleCore
+            ? `the main thread spent ${littleMs}ms (${littlePct}%) of this window on a little core`
+            : `the main thread ran at ${freqPct}% of max frequency for ${totalMs}ms of this window`;
+
+      const worstOther =
+        otherRows.length > 0 ? otherRows.reduce((a, b) => (n(b.dur) > n(a.dur) ? b : a)) : undefined;
+      const otherTotalMs = ms(otherRows.reduce((sum, r) => sum + n(r.dur), 0));
+
+      findings.push({
+        id: "trace-cpu-placement",
+        severity: "note",
+        // Co-occurrence, not causation: this says where the main thread ran
+        // during a window Porthole already flagged, not that the placement
+        // is why. `confidence` says so structurally so a report cannot blur
+        // the two the way a plain "observed" would.
+        confidence: "correlated",
+        title,
+        detail: worstOther
+          ? `This does not by itself explain the window's own finding — offered as another candidate, ` +
+            `not a conclusion. Busiest other process on the same cores: ${worstOther.process_name} ` +
+            `(${ms(n(worstOther.dur))}ms across ${n(worstOther.COUNT)} slice(s)).`
+          : "This does not by itself explain the window's own finding — offered as another candidate, " +
+            "not a conclusion. Nothing else was contending for the same cores in this window.",
+        count: otherRows.reduce((sum, r) => sum + n(r.COUNT), 0),
+        evidence: {
+          totalMs,
+          littleMs,
+          littleFraction,
+          freqFraction,
+          otherTotalMs,
+          worstOtherProcess: worstOther ? String(worstOther.process_name ?? "") : undefined,
+        },
+        // Aggregate across the window's own scheduler intervals, not one
+        // occurrence — same reasoning as `thread_states`. See QUESTIONS'
+        // own comment.
+        spanning: true,
+      });
+    }
   }
 
   return findings.sort((a, b) => rank(b.severity) - rank(a.severity));
@@ -532,6 +900,28 @@ export interface AskResult {
   findings: Finding[];
   /** Questions that could not be answered, and why. Never silently dropped. */
   unanswered: string[];
+  /** `asks` text of every question actually put to trace_processor this call. */
+  asked: string[];
+  /** `asks` text of every question `ask` left out — never asked, not a failure. */
+  skipped: string[];
+  /**
+   * How long the invocation that answered each question took, keyed by
+   * question id.
+   *
+   * Not a per-question figure in the sense the ticket's open question
+   * imagined: `trace_processor_shell` reports one "Query execution time" for
+   * an entire `-q` script, not one per statement inside it (checked directly
+   * against the real v58.2 binary — see GRA-61's own final report), so a
+   * batch of several questions that all compile shares one number, the whole
+   * invocation's wall time. What is still true and still worth reporting is
+   * that every id here got its number from a real invocation that answered
+   * it — a single-question `ask` (or a question that only answered after a
+   * retry split it into its own smaller batch) gets an exact reading; a
+   * question that answered as part of a larger batch gets that batch's own
+   * total. Never fabricated by dividing one number across questions that
+   * happened to share an invocation.
+   */
+  wallTimeMs: Record<string, number>;
 }
 
 /** Exported so tests can build a marker line without duplicating the format. */
@@ -859,6 +1249,15 @@ export interface AskTraceOptions {
    * back `spanning: true` instead of `window` — never neither.
    */
   toUptimeMs?: ToUptimeMs;
+  /**
+   * Which [QUESTIONS] to put to the trace, by id. Omitted or empty runs
+   * every question, the pre-GRA-61 default — this is additive, not a
+   * required narrowing. An id that is not one of [QUESTION_IDS] is reported
+   * back through `unanswered`, the same place a question that failed to
+   * compile lands, rather than thrown: a caller building this list from a
+   * stale copy of the id set should get a readable reason, not an exception.
+   */
+  ask?: string[];
 }
 
 /** Whatever runs one script and reports back — real for production, fake in tests. */
@@ -886,10 +1285,11 @@ export async function runBatch(
   modules: string[],
   options: { binary: string; trace: string; packageName: string; fromNs: number; toNs: number; timeoutMs: number },
   run: RunFn,
-): Promise<{ rows: Rows; unanswered: string[] }> {
+): Promise<{ rows: Rows; unanswered: string[]; wallTimeMs: Record<string, number> }> {
   let pending = questions;
   const rows: Rows = {};
   const unanswered: string[] = [];
+  const wallTimeMs: Record<string, number> = {};
 
   while (pending.length > 0) {
     const nonce = newNonce();
@@ -909,6 +1309,11 @@ export async function runBatch(
     const { rows: batchRows, answered } = matchBatch(result.stdout, pending.map((q) => q.id), nonce);
     for (const [id, questionRows] of batchRows) {
       (rows as Record<string, unknown>)[id] = questionRows;
+      // See AskResult.wallTimeMs's own doc comment: every question this
+      // specific invocation answered shares its one elapsedMs reading,
+      // because trace_processor_shell reports one timing for the whole `-q`
+      // script, not one per statement inside it.
+      wallTimeMs[id] = result.elapsedMs;
     }
 
     if (answered >= pending.length) break;
@@ -928,19 +1333,20 @@ export async function runBatch(
     pending = pending.slice(answered + 1);
   }
 
-  return { rows, unanswered };
+  return { rows, unanswered, wallTimeMs };
 }
 
 /**
- * Puts the five questions to a trace, scoped to one window and one process,
- * in one trace_processor_shell invocation rather than five.
+ * Puts the questions to a trace — every one of [QUESTIONS], or the subset
+ * `ask` names — scoped to one window and one process, in one
+ * trace_processor_shell invocation rather than one per question.
  *
  * Trace loading, not querying, is what a real capture costs — the fixtures
  * in this repo are 10-16MB and the ticket that prompted this said a 120s
  * capture runs an order of magnitude bigger. The code this replaced paid
- * that load five times, once per question, synchronously, which is the
- * compounding version of the same mistake: it also froze the one thread the
- * rest of the MCP server runs on for as long as each load took.
+ * that load once per question, synchronously, which is the compounding
+ * version of the same mistake: it also froze the one thread the rest of the
+ * MCP server runs on for as long as each load took.
  *
  * Substitution rather than bound parameters, as before: trace_processor's
  * shell takes a file of SQL and no bindings. The package name is the only
@@ -949,13 +1355,13 @@ export async function runBatch(
  *
  * One script cannot isolate a failure by itself — confirmed against the real
  * binary, not assumed: it aborts the entire run on the first statement that
- * errors, so a naive concatenation answers zero of the four questions after
- * a failing one, not four. That is why `runBatch` is a loop rather than one
- * spawn: a failure removes the failed question from the batch, keeps
- * whatever already answered, and reruns only the remainder. The trace
- * reloads again, but only once per failure — the common case, all five
- * compile, is still one load, and a bad question costs one extra load for
- * the rest rather than four lost answers.
+ * errors, so a naive concatenation answers zero of the questions after a
+ * failing one, however many that is. That is why `runBatch` is a loop rather
+ * than one spawn: a failure removes the failed question from the batch,
+ * keeps whatever already answered, and reruns only the remainder. The trace
+ * reloads again, but only once per failure — the common case, everything
+ * asked for compiles, is still one load, and a bad question costs one extra
+ * load for the rest rather than every question after it going unanswered.
  *
  * A timeout is a different kind of event and is handled differently on
  * purpose: it does not mean one question was bad, it means trace_processor
@@ -964,9 +1370,50 @@ export async function runBatch(
  * unanswered with one shared reason naming the trace and how long it
  * waited — rather than retrying into the same hang one question at a time.
  */
+export interface Selection {
+  /** The questions to actually put to trace_processor, in QUESTIONS' own order. */
+  selected: Question[];
+  /** `asks` text of every question left out by the filter — never asked, not a failure. */
+  skipped: string[];
+  /** Any id in `ask` that is not one of QUESTION_IDS — a typo or a stale copy of the list, not a crash. */
+  unknownIds: string[];
+}
+
+/**
+ * GRA-61's `ask` filter, factored out of `askTrace` so it can be tested
+ * without spawning trace_processor: everything about *which* questions get
+ * asked is a property of this function, not of the process underneath it.
+ *
+ * Empty or omitted keeps the pre-GRA-61 behaviour — every question — rather
+ * than reading "asked for nothing" as "asked for none of them", which would
+ * make the empty-array and omitted cases behave differently for no reason a
+ * caller could predict.
+ */
+export function selectQuestions(ask?: string[]): Selection {
+  const requested = ask?.length ? ask : QUESTION_IDS;
+  return {
+    selected: QUESTIONS.filter((q) => requested.includes(q.id)),
+    skipped: QUESTIONS.filter((q) => !requested.includes(q.id)).map((q) => q.asks),
+    unknownIds: requested.filter((id) => !QUESTION_IDS.includes(id)),
+  };
+}
+
 export async function askTrace(options: AskTraceOptions): Promise<AskResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { modules, questions } = hoistModules(QUESTIONS);
-  const { rows, unanswered } = await runBatch(questions, modules, { ...options, timeoutMs }, runScript);
-  return { findings: interpret(rows, options.toUptimeMs), unanswered };
+  const { selected, skipped, unknownIds } = selectQuestions(options.ask);
+
+  const { modules, questions } = hoistModules(selected);
+  const { rows, unanswered, wallTimeMs } = await runBatch(questions, modules, { ...options, timeoutMs }, runScript);
+
+  const unknownReasons = unknownIds.map(
+    (id) => `unknown question id "${id}" — not one of: ${QUESTION_IDS.join(", ")}`,
+  );
+
+  return {
+    findings: interpret(rows, options.toUptimeMs),
+    unanswered: [...unknownReasons, ...unanswered],
+    asked: selected.map((q) => q.asks),
+    skipped,
+    wallTimeMs,
+  };
 }

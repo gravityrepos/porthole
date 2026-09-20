@@ -1,9 +1,19 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { askTrace, findTraceProcessor, interpret, markerText, matchBatch, parseRows, type Rows } from "./perfetto.js";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+  askTrace,
+  findTraceProcessor,
+  interpret,
+  markerText,
+  matchBatch,
+  parseRows,
+  QUESTIONS,
+  type Rows,
+} from "./perfetto.js";
 
 /**
  * The other fixtures are JSON exported from the trace viewer. These are the
@@ -158,6 +168,82 @@ describe("interpret, on what trace_processor prints", () => {
 });
 
 /**
+ * GRA-61's three new questions. Unlike the five above, these fixtures are
+ * hand-written, not captured — see fixtures/stdout/PROVENANCE.md's own
+ * section on why (no real device trace was available to this session) and
+ * exactly what each file was built to exercise. They still go through the
+ * real `parseRows`, on real trace_processor CSV quoting conventions (string
+ * columns quoted, numbers bare, `[NULL]` always quoted), so what is being
+ * proven here is that the parser and `interpret()` handle these three
+ * questions' own column shapes — not that these particular numbers ever came
+ * off a device.
+ */
+describe("parseRows + interpret, on GRA-61's new questions (hand-written, see PROVENANCE.md)", () => {
+  it("groups startup.csv's breakdown rows by startup_id and reads the platform's own attribution", () => {
+    const findings = interpret({ startup: rows("startup") });
+    const starts = findings.filter((f) => f.id === "trace-startup");
+    expect(starts).toHaveLength(2);
+
+    const cold = starts.find((f) => f.title.startsWith("cold"));
+    expect(cold?.title).toContain("620ms");
+    expect(cold?.severity).toBe("warning"); // >= 500ms
+    expect(cold?.detail).toContain("bindApplication");
+    expect(cold?.detail).toContain("opening dex files");
+    expect(cold?.count).toBe(5); // five breakdown rows for this startup_id
+
+    // The second startup's breakdown is [NULL]/[NULL] — parseRows' own job,
+    // proven generically elsewhere, is turning that into a real null; this
+    // is `interpret()`'s job on top of it: a null reason must not become a
+    // zero-ms "top contributor" entry.
+    const warm = starts.find((f) => f.title.startsWith("warm"));
+    expect(warm?.title).toContain("180ms");
+    expect(warm?.severity).toBe("note");
+    expect(warm?.detail).toContain("No single reason dominated");
+  });
+
+  it("reads monitor_contention.csv's comm-truncated main-thread name and ignores the row that never touched the main thread", () => {
+    const findings = interpret({ monitor_contention: rows("monitor_contention") });
+    const contention = findings.find((f) => f.id === "trace-lock-contention");
+    // Only one of the two rows has is_blocked_thread_main = 1; the other
+    // (waiter_count [NULL], neither thread the main one) must not surface.
+    expect(contention?.count).toBe(1);
+    expect(contention?.severity).toBe("warning"); // 12ms >= the 8ms threshold
+    expect(contention?.title).toContain("save");
+    expect(contention?.detail).toContain("DefaultDispatch");
+    expect(contention?.evidence?.blockingThread).toBe("DefaultDispatch");
+  });
+
+  it("reads cpu.csv's little-core placement and names the busiest other process on the same cores", () => {
+    const findings = interpret({ cpu: rows("cpu") });
+    const placement = findings.find((f) => f.id === "trace-cpu-placement");
+    expect(placement).toBeDefined();
+    expect(placement?.confidence).toBe("correlated");
+    expect(placement?.spanning).toBe(true);
+    expect(placement?.title).toContain("little core");
+    // system_server (95ms) outweighs com.example.shop:sync (20ms).
+    expect(placement?.evidence?.worstOtherProcess).toBe("system_server");
+    expect(placement?.count).toBe(50); // 42 + 8 sched slices across both other rows
+  });
+
+  it("every finding from these three hand-written fixtures still carries exactly one of window/spanning", () => {
+    const all: Rows = {
+      startup: rows("startup"),
+      monitor_contention: rows("monitor_contention"),
+      cpu: rows("cpu"),
+    };
+    const findings = interpret(all, (bootNs) => bootNs / 1e6);
+    expect(findings.length).toBeGreaterThan(0);
+    for (const f of findings) {
+      const hasWindow = f.window !== undefined;
+      const hasSpanning = f.spanning === true;
+      expect(hasWindow !== hasSpanning, `${f.id}: ${JSON.stringify({ window: f.window, spanning: f.spanning })}`).toBe(
+        true,
+      );
+    }
+  });
+});
+
+/**
  * GRA-113: the same real stdout above, this time with a converter wired up —
  * ns → ms only, no offset, so the expected values below are the fixtures'
  * own real MIN(ts)/MAX(ts) divided by 1e6, not invented numbers. Real
@@ -301,5 +387,67 @@ describe("askTrace, end to end against the real binary and a real capture", () =
     });
     expect(result.unanswered).toEqual([]);
     expect(result.findings.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * GRA-61's three new questions, against the real pinned v58.2 binary — but
+ * not against a real capture: none was available to this session (see
+ * fixtures/stdout/PROVENANCE.md). What this proves, and only this: the SQL
+ * for `startup`, `monitor_contention` and `cpu` actually compiles against
+ * the real binary — `INCLUDE PERFETTO MODULE android.startup.startups`,
+ * `android.startup.startup_breakdowns`, `android.monitor_contention`,
+ * `linux.cpu.frequency` and `android.cpu.cluster_type` all resolve at v58.2,
+ * which was this ticket's first open question, checked directly rather than
+ * assumed from the stdlib docs. An empty trace answers zero rows for every
+ * question, which is exactly what a compile-only proof should look like:
+ * `unanswered` stays empty (nothing failed to run) and `findings` stays
+ * empty (nothing to interpret) at the same time.
+ *
+ * Gated on the binary alone, not on a real capture (unlike the describe
+ * block above) — this machine has the binary (installed at
+ * `~/.porthole/trace-processor/v58.2/`, SHA-256 verified against
+ * `TraceProcessor.kt`'s own pin for mac-arm64 before use) but not a real
+ * `.pftrace`; a checkout with neither skips this cleanly too.
+ */
+describe("askTrace, GRA-61's new questions against the real v58.2 binary (no real capture — compiles only)", () => {
+  const binary = findTraceProcessor();
+  let emptyTrace: string;
+
+  beforeAll(() => {
+    const dir = mkdtempSync(join(tmpdir(), "porthole-empty-trace-"));
+    emptyTrace = join(dir, "empty.pftrace");
+    writeFileSync(emptyTrace, "");
+  });
+
+  it.skipIf(!binary)("compiles startup, monitor_contention and cpu against the real binary", async () => {
+    const result = await askTrace({
+      binary: binary as string,
+      trace: emptyTrace,
+      packageName: "com.example.shop",
+      fromNs: 0,
+      toNs: 999_999_999_999,
+      ask: ["startup", "monitor_contention", "cpu"],
+    });
+    expect(result.unanswered).toEqual([]);
+    expect(result.asked).toHaveLength(3);
+    expect(result.skipped).toHaveLength(5);
+    // Nothing to interpret from an empty trace, which is the honest reading
+    // of "compiles" rather than "found something" — see this block's own
+    // doc comment.
+    expect(result.findings).toEqual([]);
+  });
+
+  it.skipIf(!binary)("compiles all eight questions together, in the real batched shape", async () => {
+    const result = await askTrace({
+      binary: binary as string,
+      trace: emptyTrace,
+      packageName: "com.example.shop",
+      fromNs: 0,
+      toNs: 999_999_999_999,
+    });
+    expect(result.unanswered).toEqual([]);
+    expect(result.asked).toHaveLength(QUESTIONS.length);
+    expect(result.skipped).toEqual([]);
   });
 });

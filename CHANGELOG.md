@@ -15,6 +15,17 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- `ask_system_trace` puts three more questions to a trace: `startup` (launch
+  type, duration and the platform's own attribution of what slowed it —
+  binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`
+  (which lock blocked the main thread, and who was holding it), and a merged
+  `cpu` question answering where the main thread actually ran (core,
+  cluster, frequency) and who else wanted the same cores in the same window
+  — correlated, not observed, gated to stay silent on an idle device, and
+  never asserting causation. A new `ask` parameter selects a subset by id
+  (default: all eight); the result now says which questions were skipped by
+  that filter, separately from which were asked and failed (GRA-61).
+
 ### Changed
 
 ### Fixed
