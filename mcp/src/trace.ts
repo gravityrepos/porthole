@@ -114,7 +114,7 @@ export interface Finding {
  * still see the exact count.
  */
 export interface SystraceCapture {
-  /** Where the .pftrace was written, alongside the trace JSON. */
+  /** Where the .pftrace was written, alongside the trace JSON. Empty when `pulled` is false — there is no local file to point at. */
   path: string;
   bytes: number;
   seconds: number;
@@ -123,6 +123,18 @@ export interface SystraceCapture {
   portholeLabels: number;
   /** Whether `trace_processor_shell` could be found to ask the eight questions of it. */
   questionsAsked: boolean;
+  /**
+   * QA (F11): whether the on-device recording actually made it to `path` —
+   * false for a capture that never started (no package, or the on-device
+   * command itself failed) and, distinctly, for one that started and
+   * recorded but whose `adb pull` failed. Either way `path`/`bytes`/
+   * `portholeLabels`/`questionsAsked` stay at their zero values rather than
+   * lying about a file that is not actually there; `notes` says why, and for
+   * a failed pull specifically, names the on-device copy this call left in
+   * place rather than deleting (see `stopAndPullSystraceCapture`'s own doc
+   * comment in systrace.ts).
+   */
+  pulled: boolean;
   /** Anything worth saying that is not itself a `Finding` — a missing trace_processor_shell, a plan note from `planCapture`, an unanswered question. */
   notes: string[];
 }

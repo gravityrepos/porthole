@@ -209,7 +209,27 @@ export async function capture(options: CaptureOptions): Promise<number> {
     const pftracePath = systracePathFor(options.out);
     const stopped = await stopAndPullSystraceCapture(systraceHandle, pftracePath, adbOptions);
     if (!stopped.ok) {
+      // QA (F11): this used to only push a note here and never assign
+      // `systraceBlock` at all — the `else if (options.systrace)` fallback
+      // below only covers a capture that never *started*, so a pull failure
+      // (the recording ran, `adb pull` itself failed) fell through with no
+      // `trace.systrace` in the artifact and these notes written nowhere a
+      // reader would ever see them. `pulled: false` here is honest: nothing
+      // reached `pftracePath`, and `stopped.message` (systrace.ts) already
+      // names the on-device copy this call left in place rather than
+      // deleting, so `notes` alone is enough to recover it by hand.
       systraceNotes.push(`--systrace: ${stopped.message}`);
+      systraceBlock = {
+        path: "",
+        bytes: 0,
+        pulled: false,
+        seconds: systracePlan.seconds,
+        categories: systracePlan.categories,
+        apps: systracePlan.apps,
+        portholeLabels: 0,
+        questionsAsked: false,
+        notes: systraceNotes,
+      };
     } else {
       const portholeLabels = await countPortholeLabels(pftracePath);
       if (portholeLabels === 0) {
@@ -271,6 +291,7 @@ export async function capture(options: CaptureOptions): Promise<number> {
       systraceBlock = {
         path: pftracePath,
         bytes: stopped.bytes,
+        pulled: true,
         seconds: systracePlan.seconds,
         categories: systracePlan.categories,
         apps: systracePlan.apps,
@@ -288,6 +309,7 @@ export async function capture(options: CaptureOptions): Promise<number> {
     systraceBlock = {
       path: "",
       bytes: 0,
+      pulled: false,
       seconds: systracePlan?.seconds ?? 0,
       categories: systracePlan?.categories ?? [],
       apps: systracePlan?.apps ?? [],
@@ -522,5 +544,25 @@ export function parseCapture(argv: string[]): CaptureOptions {
       process.exit(2);
     }
   }
+
+  // QA (F12), per GRA-93's own discipline: an option that silently does
+  // nothing is exactly the shape that ticket exists to close off elsewhere
+  // in this same loop (a mistyped --fail-on, a swallowed --driver value).
+  // `--systrace-seconds`/`--systrace-categories` without `--systrace` used
+  // to parse cleanly and then have no effect at all — no warning, nothing —
+  // which reads as "it worked" to whoever typed it. Checked once here,
+  // after the loop, rather than inline at each flag: a value can arrive in
+  // either order (`--systrace-seconds 30 --systrace` is exactly as valid as
+  // the reverse), so this cannot be decided while the option that licenses
+  // it might still be a few tokens away.
+  if (!options.systrace && options.systraceSeconds !== undefined) {
+    process.stderr.write(`--systrace-seconds requires --systrace\n${CAPTURE_USAGE}`);
+    process.exit(2);
+  }
+  if (!options.systrace && options.systraceCategories !== undefined) {
+    process.stderr.write(`--systrace-categories requires --systrace\n${CAPTURE_USAGE}`);
+    process.exit(2);
+  }
+
   return options;
 }
