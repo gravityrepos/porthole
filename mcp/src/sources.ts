@@ -107,7 +107,20 @@ export function setWalkFileCapForTests(cap: number | null): void {
  * this to — and never leaves a stale answer live for more than one edit-run
  * cycle.
  */
-const CACHE_TTL_MS = 5_000;
+export const CACHE_TTL_MS = 5_000;
+
+/**
+ * The clock `getEntry` checks a cached walk's age against. A plain
+ * `Date.now` reference, not a call — swapped out entirely under test
+ * (`setClockForTests`) rather than read through an indirection on every
+ * call, so production pays nothing for this existing.
+ */
+let clock: () => number = Date.now;
+
+/** Test-only: a fake clock for proving TTL expiry deterministically, without a real sleep. `null` restores the real one. */
+export function setClockForTests(fn: (() => number) | null): void {
+  clock = fn ?? Date.now;
+}
 
 interface Declaration {
   path: string;
@@ -165,10 +178,42 @@ function isInside(root: string, candidate: string): boolean {
  * escapes it (a source checked out elsewhere and linked in, `/etc`, a
  * dangling link) is skipped outright rather than either followed blind or
  * silently making the walk non-deterministic across machines.
+ *
+ * `visitedDirs` guards the other symlink failure mode: a cycle inside the
+ * root (`app/src/main/kotlin/loop -> ..`). Nothing about a plain directory
+ * tree can cycle on its own — only a symlink can point back at an ancestor
+ * — but the loop can close several levels below the symlink itself, not
+ * necessarily at the entry currently being visited, so every directory's
+ * real (symlink-resolved) identity is checked against the set before
+ * recursing into it, not only ones reached directly through a link.
+ * Without this, the walk previously terminated only when a path built from
+ * repeating the loop finally tripped the OS's own path-length limit inside
+ * `readdirSync` — caught below same as any other unreadable directory —
+ * and by then every file under the loop had been collected once per lap,
+ * which turns a lookup that should resolve into a false "ambiguous".
  */
 function walk(root: string): { files: string[]; capped: boolean } {
   const files: string[] = [];
   let capped = false;
+  const visitedDirs = new Set<string>();
+  // The canonical root a symlink's own realpath is checked against below —
+  // not `root` itself, which is a caller-supplied path.resolve()'d string,
+  // never realpath'd. On a machine where the root is only reachable through
+  // a symlinked ancestor (macOS's /tmp -> /private/tmp is the everyday
+  // case — every temp-directory fixture in this file's own tests hits it),
+  // comparing a symlink's fully resolved target against that literal,
+  // non-canonical `root` makes every in-root symlink look like it escapes:
+  // `path.relative` between the two disagreeing prefixes always starts with
+  // `..`. Falls back to `root` itself when it cannot be resolved (does not
+  // exist, a dangling root) — `isInside` against an unresolvable root
+  // rejects everything, the same as before this existed.
+  let canonicalRoot = root;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch {
+    // Left as `root` — the readdirSync below fails the same way regardless and reports no files.
+  }
+  visitedDirs.add(canonicalRoot);
 
   const visit = (dir: string, segments: string[]): void => {
     if (capped) return;
@@ -183,15 +228,15 @@ function walk(root: string): { files: string[]; capped: boolean } {
       const full = path.join(dir, entry.name);
       let isDir = entry.isDirectory();
       let isFile = entry.isFile();
+      let real: string | null = null;
 
       if (entry.isSymbolicLink()) {
-        let real: string;
         try {
           real = realpathSync(full);
         } catch {
           continue; // broken link
         }
-        if (!isInside(root, real)) continue; // escapes the declared root
+        if (!isInside(canonicalRoot, real)) continue; // escapes the declared root
         let target;
         try {
           target = statSync(real);
@@ -204,6 +249,15 @@ function walk(root: string): { files: string[]; capped: boolean } {
 
       if (isDir) {
         if (SKIP_DIRS.has(entry.name)) continue;
+        if (real === null) {
+          try {
+            real = realpathSync(full);
+          } catch {
+            continue; // vanished between readdir and here
+          }
+        }
+        if (visitedDirs.has(real)) continue; // already walked this directory by another path — a cycle, or two links to the same place
+        visitedDirs.add(real);
         visit(full, [...segments, entry.name]);
       } else if (isFile) {
         if (!/\.(kt|java)$/.test(entry.name)) continue;
@@ -224,7 +278,7 @@ function walk(root: string): { files: string[]; capped: boolean } {
 function getEntry(root: string): CacheEntry {
   const absolute = path.resolve(root);
   const cached = cache.get(absolute);
-  if (cached && Date.now() - cached.builtAt < CACHE_TTL_MS) return cached;
+  if (cached && clock() - cached.builtAt < CACHE_TTL_MS) return cached;
 
   sourceIndexStats.walks++;
   const { files, capped } = walk(absolute);
@@ -235,7 +289,7 @@ function getEntry(root: string): CacheEntry {
     if (existing) existing.push(file);
     else byBaseName.set(base, [file]);
   }
-  const entry: CacheEntry = { builtAt: Date.now(), files, capped, byBaseName, names: null, packageByFile: new Map() };
+  const entry: CacheEntry = { builtAt: clock(), files, capped, byBaseName, names: null, packageByFile: new Map() };
   cache.set(absolute, entry);
   return entry;
 }

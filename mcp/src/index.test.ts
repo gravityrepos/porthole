@@ -2743,4 +2743,85 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       resetSourceIndexForTests();
     }
   });
+
+  /**
+   * 201-C: `blocking`'s AC3 rig test only proves the `where`-carrying
+   * payload looks right; it does not prove `call()`'s `augment` step
+   * leaves everything else on the payload alone. These two do, for the
+   * other two tools that use `augment` (`recompositions`, `state`) —
+   * calling each with resolution on and off against the *same* device
+   * reply and asserting the two payloads agree on everything except
+   * `where` itself.
+   */
+  it("recompositions: on vs off is byte-identical except each node's where", async () => {
+    const deviceReply = {
+      nodes: [{ name: "Fixture.PromoField", count: 42, triggeredBy: [{ key: "x", count: 1 }] }],
+      totalNodes: 1,
+      truncated: false,
+      unattributedWrites: [],
+    };
+
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const onRig = await buildRig({ handlers: { recompositions: () => deviceReply } });
+    let onJson: { nodes: Array<Record<string, unknown>> };
+    try {
+      onJson = (await onRig.client.callTool("recompositions", {})).json as typeof onJson;
+    } finally {
+      await onRig.close();
+    }
+
+    withProjectRoot(undefined);
+    resetSourceIndexForTests();
+    const offRig = await buildRig({ handlers: { recompositions: () => deviceReply } });
+    let offJson: { nodes: Array<Record<string, unknown>> };
+    try {
+      offJson = (await offRig.client.callTool("recompositions", {})).json as typeof offJson;
+    } finally {
+      await offRig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+
+    expect(onJson.nodes[0].where).toBeDefined();
+    expect(offJson.nodes[0].where).toBeUndefined();
+    const { where: onWhere, ...onNodeRest } = onJson.nodes[0];
+    const { where: offWhere, ...offNodeRest } = offJson.nodes[0];
+    expect(onNodeRest).toEqual(offNodeRest);
+    expect({ ...onJson, nodes: undefined }).toEqual({ ...offJson, nodes: undefined });
+  });
+
+  it("state: on vs off is byte-identical except each owner's where", async () => {
+    const deviceReply = { owners: [{ name: "FixtureCartViewModel", fields: [{ name: "items" }] }] };
+
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const onRig = await buildRig({ handlers: { state: () => deviceReply } });
+    let onJson: { owners: Array<Record<string, unknown>> };
+    try {
+      onJson = (await onRig.client.callTool("state", {})).json as typeof onJson;
+    } finally {
+      await onRig.close();
+    }
+
+    withProjectRoot(undefined);
+    resetSourceIndexForTests();
+    const offRig = await buildRig({ handlers: { state: () => deviceReply } });
+    let offJson: { owners: Array<Record<string, unknown>> };
+    try {
+      offJson = (await offRig.client.callTool("state", {})).json as typeof offJson;
+    } finally {
+      await offRig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+    }
+
+    expect(onJson.owners[0].where).toBeDefined();
+    expect(offJson.owners[0].where).toBeUndefined();
+    const { where: onWhere, ...onOwnerRest } = onJson.owners[0];
+    const { where: offWhere, ...offOwnerRest } = offJson.owners[0];
+    expect(onOwnerRest).toEqual(offOwnerRest);
+  });
 });

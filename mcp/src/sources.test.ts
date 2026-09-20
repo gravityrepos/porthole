@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CACHE_TTL_MS,
   parseFrame,
   resetSourceIndexForTests,
+  setClockForTests,
   setWalkFileCapForTests,
   sourceIndexStats,
   whereForFrame,
@@ -61,6 +63,7 @@ beforeEach(() => {
 afterEach(() => {
   useProjectRoot(savedProjectRoot);
   setWalkFileCapForTests(null);
+  setClockForTests(null);
   for (const root of roots) rmSync(root, { recursive: true, force: true });
   roots = [];
 });
@@ -349,6 +352,34 @@ describe("the index is built once and reused across calls", () => {
   });
 });
 
+describe("201-B: the TTL actually expires and re-walks", () => {
+  it("re-walks once the clock has moved past CACHE_TTL_MS, not merely on the next call", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/Foo.kt", "class Foo");
+    useProjectRoot(root);
+
+    // The clock is injected rather than slept on: `getEntry` reads `clock()`
+    // instead of `Date.now()` under test, so "time has passed" is a plain
+    // variable assignment, not a real wait this suite would otherwise pay
+    // for on every run.
+    let now = 1_000_000_000;
+    setClockForTests(() => now);
+
+    whereForFrame("x.Foo.method(Foo.kt:1)");
+    expect(sourceIndexStats.walks).toBe(1);
+
+    // Still inside the TTL: reused, not re-walked.
+    now += CACHE_TTL_MS - 1;
+    whereForFrame("x.Foo.method(Foo.kt:1)");
+    expect(sourceIndexStats.walks).toBe(1);
+
+    // Past it: the next lookup re-walks.
+    now += 2;
+    whereForFrame("x.Foo.method(Foo.kt:1)");
+    expect(sourceIndexStats.walks).toBe(2);
+  });
+});
+
 describe("the walk cap", () => {
   it("stops collecting once the cap is reached, and says so instead of 'not found'", () => {
     const root = temporaryRoot();
@@ -365,6 +396,55 @@ describe("the walk cap", () => {
     expect(whereForFrame("x.Ghost.method(ZZZ_never_written.kt:1)")).toEqual({
       resolved: false,
       reason: "too many source files under the project root to search them all",
+    });
+  });
+});
+
+/**
+ * 201-B: `build/` already has a decoy proving exclusion (the committed
+ * fixture's `app/build/src/.../FixtureCartViewModel.kt`) -- these are the
+ * same proof for the other three SKIP_DIRS entries, which had none. Each
+ * decoy shares a basename with a real file elsewhere in the same tree, so
+ * a walk that failed to skip it would turn "resolved" into "ambiguous" --
+ * the identical failure mode the `build/` test already relies on.
+ */
+describe("the walk skips node_modules/, .gradle/ and .git/, not only build/", () => {
+  it("node_modules/ is never walked", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/RealOnly.kt", "class RealOnly");
+    writeSource(root, "node_modules/some-package/src/RealOnly.kt", "class RealOnly");
+    useProjectRoot(root);
+
+    expect(whereForFrame("x.RealOnly.method(RealOnly.kt:1)")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/RealOnly.kt",
+      line: 1,
+    });
+  });
+
+  it(".gradle/ is never walked", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/RealOnly.kt", "class RealOnly");
+    writeSource(root, ".gradle/caches/src/RealOnly.kt", "class RealOnly");
+    useProjectRoot(root);
+
+    expect(whereForFrame("x.RealOnly.method(RealOnly.kt:1)")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/RealOnly.kt",
+      line: 1,
+    });
+  });
+
+  it(".git/ is never walked", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/RealOnly.kt", "class RealOnly");
+    writeSource(root, ".git/objects/src/RealOnly.kt", "class RealOnly");
+    useProjectRoot(root);
+
+    expect(whereForFrame("x.RealOnly.method(RealOnly.kt:1)")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/RealOnly.kt",
+      line: 1,
     });
   });
 });
@@ -387,6 +467,38 @@ describe("a symlink that escapes the project root", () => {
       expect(whereForFrame("x.Outside.method(Outside.kt:1)")).toEqual({
         resolved: false,
         reason: "not found",
+      });
+    },
+  );
+});
+
+describe("a symlink cycle inside the project root", () => {
+  it.skipIf(process.platform === "win32")(
+    "does not multiply a file's matches -- 201-A: a real declaration still resolves, not 'ambiguous'",
+    () => {
+      const root = temporaryRoot();
+      const kotlinDir = path.join(root, "app/src/main/kotlin");
+      writeSource(root, "app/src/main/kotlin/UniqueClass.kt", "class UniqueClass");
+      try {
+        // The ticket's own example: app/src/main/kotlin/loop -> .. (the
+        // directory's own parent, `app/src/main`) -- walking into `loop`
+        // reaches `main`, which contains `kotlin` again, which contains
+        // `loop` again, forever, without the visited-directories guard.
+        symlinkSync("..", path.join(kotlinDir, "loop"), "dir");
+      } catch {
+        return; // no permission to create symlinks on this machine -- nothing to assert
+      }
+      useProjectRoot(root);
+
+      // Mutation quoted (final report): removing
+      // `if (visitedDirs.has(real)) continue;` from sources.ts's walk()
+      // turns this into "ambiguous" -- UniqueClass.kt collected once per
+      // lap around the cycle before readdirSync finally throws on a path
+      // too long for the OS to open.
+      expect(whereForFrame("x.UniqueClass.method(UniqueClass.kt:1)")).toEqual({
+        resolved: true,
+        path: "app/src/main/kotlin/UniqueClass.kt",
+        line: 1,
       });
     },
   );
