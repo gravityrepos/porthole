@@ -4,10 +4,12 @@ package live.gravitylabs.porthole.integration
 
 import android.app.Application
 import live.gravitylabs.porthole.Porthole
+import live.gravitylabs.porthole.collect.Setup
 import live.gravitylabs.porthole.installPorthole
 import live.gravitylabs.porthole.protocol.HttpCall
 import okhttp3.Call
 import okhttp3.Connection
+import okhttp3.Dispatcher
 import okhttp3.EventListener
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -24,8 +26,10 @@ import okio.source
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,10 +37,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
-import java.net.InetAddress
+import java.io.IOException
+import java.lang.reflect.Modifier
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -86,6 +92,9 @@ class HttpPhasesTest {
     /** The one HttpCall `recentHttp` holds after the request this test just made completes. */
     private fun lastCall(): HttpCall = Porthole.inflight()!!.capture().recentHttp.last()
 
+    /** `recentHttp` is newest-first (unwindowed default) — the call this test made most recently, when more than one is in flight at once. */
+    private fun newestCall(): HttpCall = Porthole.inflight()!!.capture().recentHttp.first()
+
     // -- phase timings -------------------------------------------------------
 
     @Test
@@ -109,7 +118,10 @@ class HttpPhasesTest {
             "summed phases ($summed from $phases) should land within a few ms of the true elapsed time (${trueElapsedMs}ms)",
             summed in (trueElapsedMs - 30)..(trueElapsedMs + 30),
         )
-        assertTrue("the 300ms server delay should show up as the dominant responseHeaders phase, got $phases", (phases["responseHeaders"] ?: 0) >= 250)
+        // QA F14: renamed from "responseHeaders" to "waiting", to match the
+        // live phase label (Porthole.inflight()?.httpPhase(call, "waiting"))
+        // rather than the OkHttp callback name it happened to come from.
+        assertTrue("the 300ms server delay should show up as the dominant waiting phase, got $phases", (phases["waiting"] ?: 0) >= 250)
     }
 
     @Test
@@ -135,6 +147,186 @@ class HttpPhasesTest {
         server.enqueue(MockResponse().setBody("hi"))
         call(client()).use { it.body?.bytes() }
         assertEquals("http/1.1", lastCall().protocol)
+    }
+
+    // -- QA F11: the dispatcher's own queue is real time too ------------------
+
+    @Test
+    fun `a dispatcher-queued call accounts the wait as its own queued phase, and phases still sum to elapsed`() {
+        // maxRequestsPerHost = 1: the second call cannot start until the
+        // first (deliberately slow) one finishes. Synchronous execute()
+        // bypasses the dispatcher's own queueing entirely (OkHttp's own
+        // documented behaviour), so this needs real async enqueue() calls —
+        // the exact shape a real app's own connection-pool pressure takes,
+        // and the one synchronous calls elsewhere in this file cannot
+        // exercise at all.
+        server.enqueue(MockResponse().setBodyDelay(200, TimeUnit.MILLISECONDS).setBody("first"))
+        server.enqueue(MockResponse().setBody("second"))
+
+        val client = client().newBuilder()
+            .dispatcher(Dispatcher().apply { maxRequestsPerHost = 1 })
+            .build()
+
+        val firstDone = CountDownLatch(1)
+        val secondDone = CountDownLatch(1)
+
+        // Distinct paths so the two calls can be told apart afterward by
+        // URL rather than by recentHttp's own ordering — that is keyed off
+        // InflightCollector's `now()` (SystemClock.uptimeMillis(), a
+        // Robolectric shadow with no promise of tracking real wall time
+        // during a plain Thread.sleep()), which the phase timings below
+        // (real System.nanoTime()) do not share a clock with.
+        client.newCall(Request.Builder().url(server.url("/first")).build()).enqueue(
+            object : okhttp3.Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { it.body?.bytes() }
+                    firstDone.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) = firstDone.countDown()
+            },
+        )
+        // Gives the first call a moment to actually be admitted (not merely
+        // enqueued) before the second arrives, so the second is the one
+        // genuinely held back by maxRequestsPerHost rather than both racing
+        // for the single slot together.
+        Thread.sleep(30)
+
+        // Measured independently of anything InflightCollector/HttpCall
+        // itself reports, the same reason the plain phase-sum test above
+        // does — ground truth, not the code checking its own arithmetic.
+        val secondStartedAt = System.nanoTime()
+        client.newCall(Request.Builder().url(server.url("/second")).build()).enqueue(
+            object : okhttp3.Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { it.body?.bytes() }
+                    secondDone.countDown()
+                }
+
+                override fun onFailure(call: Call, e: IOException) = secondDone.countDown()
+            },
+        )
+
+        assertTrue("first call never completed", firstDone.await(5, TimeUnit.SECONDS))
+        assertTrue("second (queued) call never completed", secondDone.await(5, TimeUnit.SECONDS))
+        val secondTrueElapsedMs = (System.nanoTime() - secondStartedAt) / 1_000_000
+
+        val queuedCall = Porthole.inflight()!!.capture().recentHttp.first { it.url.endsWith("/second") }
+        assertTrue(
+            "the queued call should show real dispatcher-queue time, got ${queuedCall.phases}",
+            (queuedCall.phases["queued"] ?: 0) >= 100,
+        )
+        val summed = queuedCall.phases.values.sum()
+        assertTrue(
+            "summed phases ($summed from ${queuedCall.phases}) should land within a few ms of the true " +
+                "elapsed time (${secondTrueElapsedMs}ms)",
+            summed in (secondTrueElapsedMs - 30)..(secondTrueElapsedMs + 30),
+        )
+    }
+
+    // -- QA F12: connect/dns accumulate across attempts, never latch --------
+
+    @Test
+    fun `connect is accumulated across a failed attempt and a successful retry, not latched to either`() {
+        // Drives PortholeEventListener directly through a two-attempt
+        // connect sequence — the shape an IPv6-then-IPv4 failover takes —
+        // rather than trying to force a real socket-level failure through
+        // MockWebServer, which controls the server side, not the client's
+        // own route selection.
+        val listener = PortholeEventListener(null)
+        val call = client().newCall(Request.Builder().url(server.url("/")).build())
+        val addressA = InetSocketAddress.createUnresolved("2001:db8::1", 443)
+        val addressB = InetSocketAddress.createUnresolved("127.0.0.1", 443)
+
+        listener.callStart(call)
+
+        // Attempt 1: fails after ~20ms.
+        listener.connectStart(call, addressA, Proxy.NO_PROXY)
+        Thread.sleep(20)
+        listener.connectFailed(call, addressA, Proxy.NO_PROXY, null, IOException("unreachable"))
+
+        // Attempt 2: succeeds after ~40ms.
+        listener.connectStart(call, addressB, Proxy.NO_PROXY)
+        Thread.sleep(40)
+        listener.connectEnd(call, addressB, Proxy.NO_PROXY, Protocol.HTTP_1_1)
+        listener.connectionAcquired(call, fakeConnection())
+
+        listener.callEnd(call)
+
+        val recorded = newestCall()
+        assertEquals(
+            "both attempts should count -- one failed, one succeeded",
+            2,
+            recorded.connectAttempts,
+        )
+        assertTrue(
+            "connect should be the *sum* of both attempts (~60ms), not either one alone, got ${recorded.phases}",
+            (recorded.phases["connect"] ?: 0) >= 55,
+        )
+    }
+
+    /**
+     * The previous test's second (successful) attempt goes through
+     * `connectEnd`, whose own accumulation was never latched — so a
+     * regression that latched *only* `connectFailed` (setting `connectMs`
+     * once and never adding to it again) would still pass that test: the
+     * first failed attempt sets the latch, the second, successful one
+     * still adds its own share on top via the unaffected `connectEnd`, and
+     * the sum comes out right by coincidence. Two *failed* attempts in a
+     * row isolates `connectFailed`'s own accumulation specifically, with
+     * nothing else able to paper over a regression in it.
+     */
+    @Test
+    fun `two failed connect attempts in a row both contribute -- connectFailed's own accumulation, isolated`() {
+        val listener = PortholeEventListener(null)
+        val call = client().newCall(Request.Builder().url(server.url("/")).build())
+        val addressA = InetSocketAddress.createUnresolved("2001:db8::1", 443)
+        val addressB = InetSocketAddress.createUnresolved("2001:db8::2", 443)
+
+        listener.callStart(call)
+
+        listener.connectStart(call, addressA, Proxy.NO_PROXY)
+        Thread.sleep(20)
+        listener.connectFailed(call, addressA, Proxy.NO_PROXY, null, IOException("unreachable"))
+
+        listener.connectStart(call, addressB, Proxy.NO_PROXY)
+        Thread.sleep(25)
+        listener.connectFailed(call, addressB, Proxy.NO_PROXY, null, IOException("unreachable"))
+
+        listener.callFailed(call, IOException("both routes failed"))
+
+        val recorded = newestCall()
+        assertEquals(2, recorded.connectAttempts)
+        assertTrue(
+            "connect should sum both failed attempts (~45ms) -- a latch would show only the first (~20ms), " +
+                "got ${recorded.phases}",
+            (recorded.phases["connect"] ?: 0) >= 40,
+        )
+    }
+
+    @Test
+    fun `dns is accumulated too, not left holding only the last lookup`() {
+        val listener = PortholeEventListener(null)
+        val call = client().newCall(Request.Builder().url(server.url("/")).build())
+
+        listener.callStart(call)
+        listener.dnsStart(call, "first.example.com")
+        Thread.sleep(15)
+        listener.dnsEnd(call, "first.example.com", emptyList())
+        // A redirect to a second host needs a second lookup.
+        listener.dnsStart(call, "second.example.com")
+        Thread.sleep(25)
+        listener.dnsEnd(call, "second.example.com", emptyList())
+        listener.connectStart(call, InetSocketAddress.createUnresolved("127.0.0.1", 443), Proxy.NO_PROXY)
+        listener.connectEnd(call, InetSocketAddress.createUnresolved("127.0.0.1", 443), Proxy.NO_PROXY, Protocol.HTTP_1_1)
+        listener.connectionAcquired(call, fakeConnection())
+        listener.callEnd(call)
+
+        val recorded = newestCall()
+        assertTrue(
+            "dns should sum both lookups (~40ms), not just the last one (~25ms), got ${recorded.phases}",
+            (recorded.phases["dns"] ?: 0) >= 35,
+        )
     }
 
     // -- byte counts (GRA-66's "a size, not a payload") -----------------------
@@ -179,6 +371,84 @@ class HttpPhasesTest {
         assertNull("a bodiless request never fires requestBodyEnd, so this must be null, not 0", lastCall().requestBytes)
     }
 
+    // -- QA F9: a momentarily-invalid builder must not crash installPorthole --
+
+    @Test
+    fun `sanity check -- the invalid builder state F9 exploits really does throw, from verifyClientState() itself`() {
+        // Establishes the premise the next test relies on: this specific
+        // state is genuinely invalid, not merely assumed to be. The
+        // builder's own interceptors() getter returns its live, mutable
+        // backing list rather than a copy — Kotlin's own typing keeps a
+        // null out of it through the public API, but nothing stops one
+        // arriving some other way (a Java caller, a reflective interceptor
+        // pipeline built up elsewhere) that OkHttpClient's own constructor,
+        // ending in the private verifyClientState(), refuses at build()
+        // time. This is that exact method, empirically confirmed rather
+        // than assumed — see this file's own history for the two other
+        // hypotheses (a CLEARTEXT-only connectionSpecs set, and the
+        // deprecated single-arg sslSocketFactory() overload) that turned
+        // out not to reproduce it at all.
+        val builder = OkHttpClient.Builder()
+        @Suppress("UNCHECKED_CAST")
+        val interceptors = builder.interceptors() as MutableList<Any?>
+        interceptors.add(null)
+        try {
+            builder.build()
+            fail("expected build() to throw IllegalStateException for a null interceptor")
+        } catch (e: IllegalStateException) {
+            assertTrue("expected OkHttp's own null-interceptor message, got: ${e.message}", e.message.orEmpty().contains("interceptor", ignoreCase = true))
+        }
+    }
+
+    @Test
+    fun `a momentarily-invalid builder does not crash installPorthole -- falls back to no delegate`() {
+        val builder = OkHttpClient.Builder()
+        @Suppress("UNCHECKED_CAST")
+        val interceptors = builder.interceptors() as MutableList<Any?>
+        // Momentarily invalid, per the sanity check above: build() would
+        // throw right now. installPorthole()'s own internal build() call —
+        // the "free peek" at the builder's existing eventListenerFactory —
+        // sits in exactly this gap.
+        interceptors.add(null)
+
+        // Must not throw, despite the builder being invalid right now.
+        builder.installPorthole()
+
+        // Fixing the mismatch afterward makes the builder valid again,
+        // proving the invalidity above really was momentary, not permanent
+        // — and that installPorthole() itself did not somehow leave the
+        // builder worse off than it found it.
+        interceptors.remove(null)
+        val client = builder.build()
+        assertNotNull(client)
+    }
+
+    // -- QA F10: installPorthole() called before the app's own listener -----
+
+    @Test
+    fun `installPorthole before the app's own eventListener -- last-call-wins replaces it, Setup says so, the app still gets every callback`() {
+        server.enqueue(MockResponse().setBody("hi"))
+        val builder = OkHttpClient.Builder()
+        builder.installPorthole() // wired first...
+        val seen = CopyOnWriteArrayList<String>()
+        builder.eventListener(
+            object : EventListener() {
+                override fun callStart(call: Call) {
+                    seen += "callStart"
+                }
+            },
+        ) // ...then OkHttp's own last-call-wins silently replaces it.
+        val client = builder.build()
+
+        call(client).use { it.body?.bytes() }
+
+        assertTrue("the app's own listener is now the only listener, so it should see callStart", seen.contains("callStart"))
+        assertTrue(
+            "Setup should record that installPorthole()'s own listener was replaced",
+            Setup.report().any { it.name == "okhttp-listener" },
+        )
+    }
+
     // -- EM's fix: the app's own listener must keep hearing everything -------
 
     @Test
@@ -187,12 +457,13 @@ class HttpPhasesTest {
         val recording = object : EventListener() {
             override fun callStart(call: Call) { seen += "callStart" }
             override fun dnsStart(call: Call, domainName: String) { seen += "dnsStart" }
-            override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) { seen += "dnsEnd" }
+            override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { seen += "dnsEnd" }
             override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) { seen += "connectStart" }
             override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) {
                 seen += "connectEnd"
             }
             override fun connectionAcquired(call: Call, connection: Connection) { seen += "connectionAcquired" }
+            override fun connectionReleased(call: Call, connection: Connection) { seen += "connectionReleased" }
             override fun requestHeadersStart(call: Call) { seen += "requestHeadersStart" }
             override fun requestHeadersEnd(call: Call, request: Request) { seen += "requestHeadersEnd" }
             override fun responseHeadersStart(call: Call) { seen += "responseHeadersStart" }
@@ -211,8 +482,8 @@ class HttpPhasesTest {
 
         val expected = listOf(
             "callStart", "dnsStart", "dnsEnd", "connectStart", "connectEnd", "connectionAcquired",
-            "requestHeadersStart", "requestHeadersEnd", "responseHeadersStart", "responseHeadersEnd",
-            "responseBodyStart", "responseBodyEnd", "callEnd",
+            "connectionReleased", "requestHeadersStart", "requestHeadersEnd", "responseHeadersStart",
+            "responseHeadersEnd", "responseBodyStart", "responseBodyEnd", "callEnd",
         )
         for (name in expected) {
             assertTrue("app's own listener should still have seen $name; saw $seen", seen.contains(name))
@@ -225,6 +496,100 @@ class HttpPhasesTest {
         server.enqueue(MockResponse().setBody("hi"))
         call(client(existing = object : EventListener() {})).use { it.body?.bytes() }
         assertTrue(lastCall().phases.containsKey("connect"))
+    }
+
+    // -- QA F8: every one of EventListener's public callbacks, not just 14 --
+
+    /**
+     * The test named above ("an app with its own EventListener still
+     * receives every callback") asserts a hand-picked list — 13 names
+     * before this ticket, 14 now — which can only ever catch a regression
+     * in a callback someone remembered to add to that list. Seven were
+     * missing entirely before QA F8 (`connectionReleased`,
+     * `proxySelectStart`/`End`, `satisfactionFailure`, `cacheHit`/`Miss`/
+     * `ConditionalHit`) and that exact test, unchanged, would have stayed
+     * green throughout.
+     *
+     * This one instead enumerates [EventListener]'s own public methods by
+     * reflection and invokes every one of them directly on a
+     * [PortholeEventListener] wrapping a recording delegate — so a future
+     * OkHttp version adding a 30th callback fails this test outright
+     * (`argsFor` has nothing registered for it) rather than the two
+     * silently drifting apart the way the named list could.
+     */
+    @Test
+    fun `every public EventListener callback OkHttp declares reaches the delegate (F8)`() {
+        val recording = RecordingEventListener()
+        val listener = PortholeEventListener(recording)
+
+        val methods = EventListener::class.java.declaredMethods
+            .filter { Modifier.isPublic(it.modifiers) && !Modifier.isStatic(it.modifiers) && !it.isSynthetic }
+        assertTrue(
+            "sanity: EventListener should declare its usual ~29 callbacks, found ${methods.size}",
+            methods.size >= 29,
+        )
+
+        val request = Request.Builder().url("https://example.com/").build()
+        val call = client().newCall(request)
+        val response = Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .build()
+
+        val unregistered = mutableListOf<String>()
+        for (method in methods) {
+            val args = argsFor(method.name, call, request, response) ?: run {
+                unregistered += method.name
+                null
+            } ?: continue
+            method.isAccessible = true
+            method.invoke(listener, *args)
+        }
+        assertTrue(
+            "OkHttp declares a callback this test has no arguments registered for: $unregistered — add it " +
+                "to argsFor() here and override+delegate it on PortholeEventListener",
+            unregistered.isEmpty(),
+        )
+
+        val expectedNames = methods.map { it.name }.toSet()
+        assertEquals(
+            "every EventListener callback OkHttp declares should have reached the recording delegate",
+            expectedNames,
+            recording.seen.toSet(),
+        )
+    }
+
+    /** One argument list per [EventListener] method name — see the test above for why by name rather than by reflected parameter type. */
+    private fun argsFor(name: String, call: Call, request: Request, response: Response): Array<Any?>? {
+        val address = InetSocketAddress.createUnresolved("example.com", 443)
+        return when (name) {
+            "callStart", "requestHeadersStart", "requestBodyStart", "responseHeadersStart", "responseBodyStart",
+            "secureConnectStart", "callEnd", "canceled", "cacheMiss",
+            -> arrayOf(call)
+            "proxySelectStart" -> arrayOf(call, request.url)
+            "proxySelectEnd" -> arrayOf(call, request.url, listOf(Proxy.NO_PROXY))
+            "dnsStart" -> arrayOf(call, "example.com")
+            "dnsEnd" -> arrayOf(call, "example.com", emptyList<java.net.InetAddress>())
+            "connectStart" -> arrayOf(call, address, Proxy.NO_PROXY)
+            "secureConnectEnd" -> arrayOf(call, null)
+            "connectEnd" -> arrayOf(call, address, Proxy.NO_PROXY, Protocol.HTTP_1_1)
+            "connectFailed" -> arrayOf(call, address, Proxy.NO_PROXY, Protocol.HTTP_1_1, IOException("boom"))
+            "connectionAcquired", "connectionReleased" -> arrayOf(call, fakeConnection())
+            "requestHeadersEnd" -> arrayOf(call, request)
+            "requestBodyEnd", "responseBodyEnd" -> arrayOf(call, 128L)
+            "requestFailed", "responseFailed", "callFailed" -> arrayOf(call, IOException("boom"))
+            "responseHeadersEnd", "satisfactionFailure", "cacheHit", "cacheConditionalHit" -> arrayOf(call, response)
+            else -> null
+        }
+    }
+
+    private fun fakeConnection(): Connection = object : Connection {
+        override fun route(): okhttp3.Route = throw UnsupportedOperationException("not needed by anything this test exercises")
+        override fun socket(): java.net.Socket = throw UnsupportedOperationException("not needed by anything this test exercises")
+        override fun handshake() = null
+        override fun protocol(): Protocol = Protocol.HTTP_1_1
     }
 
     // -- helpers ---------------------------------------------------------------
@@ -241,4 +606,41 @@ class HttpPhasesTest {
             source.buffer().use { sink.writeAll(it) }
         }
     }
+}
+
+/** Records every [EventListener] callback's own name — the delegate F8's reflective coverage test invokes every method against. */
+private class RecordingEventListener : EventListener() {
+    val seen = CopyOnWriteArrayList<String>()
+
+    override fun callStart(call: Call) { seen += "callStart" }
+    override fun proxySelectStart(call: Call, url: okhttp3.HttpUrl) { seen += "proxySelectStart" }
+    override fun proxySelectEnd(call: Call, url: okhttp3.HttpUrl, proxies: List<Proxy>) { seen += "proxySelectEnd" }
+    override fun dnsStart(call: Call, domainName: String) { seen += "dnsStart" }
+    override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { seen += "dnsEnd" }
+    override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) { seen += "connectStart" }
+    override fun secureConnectStart(call: Call) { seen += "secureConnectStart" }
+    override fun secureConnectEnd(call: Call, handshake: okhttp3.Handshake?) { seen += "secureConnectEnd" }
+    override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) { seen += "connectEnd" }
+    override fun connectFailed(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?, ioe: IOException) {
+        seen += "connectFailed"
+    }
+    override fun connectionAcquired(call: Call, connection: Connection) { seen += "connectionAcquired" }
+    override fun connectionReleased(call: Call, connection: Connection) { seen += "connectionReleased" }
+    override fun requestHeadersStart(call: Call) { seen += "requestHeadersStart" }
+    override fun requestHeadersEnd(call: Call, request: Request) { seen += "requestHeadersEnd" }
+    override fun requestBodyStart(call: Call) { seen += "requestBodyStart" }
+    override fun requestBodyEnd(call: Call, byteCount: Long) { seen += "requestBodyEnd" }
+    override fun requestFailed(call: Call, ioe: IOException) { seen += "requestFailed" }
+    override fun responseHeadersStart(call: Call) { seen += "responseHeadersStart" }
+    override fun responseHeadersEnd(call: Call, response: Response) { seen += "responseHeadersEnd" }
+    override fun responseBodyStart(call: Call) { seen += "responseBodyStart" }
+    override fun responseBodyEnd(call: Call, byteCount: Long) { seen += "responseBodyEnd" }
+    override fun responseFailed(call: Call, ioe: IOException) { seen += "responseFailed" }
+    override fun callEnd(call: Call) { seen += "callEnd" }
+    override fun callFailed(call: Call, ioe: IOException) { seen += "callFailed" }
+    override fun canceled(call: Call) { seen += "canceled" }
+    override fun satisfactionFailure(call: Call, response: Response) { seen += "satisfactionFailure" }
+    override fun cacheHit(call: Call, response: Response) { seen += "cacheHit" }
+    override fun cacheMiss(call: Call) { seen += "cacheMiss" }
+    override fun cacheConditionalHit(call: Call, response: Response) { seen += "cacheConditionalHit" }
 }

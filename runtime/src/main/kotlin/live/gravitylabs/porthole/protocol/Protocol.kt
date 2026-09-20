@@ -447,13 +447,32 @@ internal data class HttpCall(
     val responseBody: BodyPreview? = null,
     /**
      * GRA-66: OkHttp's own `EventListener` timings, only the phases actually
-     * observed — `dns`, `connect`, `secureConnect`, `requestHeaders`,
-     * `requestBody`, `responseHeaders`, `responseBody`, each the time *that
-     * phase itself* took (not cumulative), so summing every key here should
-     * land within a few ms of [elapsedMs]. Empty for a call this collector
-     * has no `EventListener` timings for at all — a Ktor call with no OkHttp
-     * engine underneath (see `KtorPorthole`'s own doc comment for why that
-     * boundary is real, not an oversight), or one still in flight.
+     * observed — `queued`, `dns`, `connect`, `secureConnect`, `dispatch`,
+     * `requestHeaders`, `requestBody`, `waiting`, `responseBody` — each the
+     * time *that phase itself* took (not cumulative), so summing every key
+     * here should now genuinely land within a few ms of [elapsedMs] (QA
+     * F11: it did not, before `queued` and `dispatch` existed — 73ms of a
+     * 748ms call was dispatcher queueing before `dnsStart`, plus OkHttp's
+     * own exchange setup between `connectionAcquired` and
+     * `requestHeadersStart`, and neither had anywhere to go). `waiting` is
+     * named to match [phase]'s own live label above, not OkHttp's callback
+     * name (`responseHeadersStart`/`End`) — it is mostly server think time,
+     * not header-parsing time; see `OkHttpPorthole.kt`'s own doc comment
+     * for why it has to be timed from *before* that callback fires at all.
+     *
+     * `dns` and `connect` are summed across every attempt a call made
+     * (QA F12) — an IPv6 attempt that failed before a IPv4 one succeeded is
+     * not thrown away, [connectAttempts] says how many there were. The
+     * header/body write/read phases are not: a redirect or an auth-challenge
+     * retry re-runs its own request/response legs, and each one's callbacks
+     * simply overwrite the last (QA F13, accepted rather than fixed) — they
+     * describe the *final* leg only, while [elapsedMs] still spans the
+     * whole call, every leg included.
+     *
+     * Empty for a call this collector has no `EventListener` timings for at
+     * all — a Ktor call with no OkHttp engine underneath (see
+     * `KtorPorthole`'s own doc comment for why that boundary is real, not
+     * an oversight), or one still in flight.
      */
     val phases: Map<String, Long> = emptyMap(),
     /**
@@ -473,6 +492,8 @@ internal data class HttpCall(
     val requestBytes: Long? = null,
     /** Bytes actually read for the response body, from `EventListener.responseBodyEnd` — same null-means-no-body rule as [requestBytes]. */
     val responseBytes: Long? = null,
+    /** QA F12: how many `connectStart`s this call made — 1 for an ordinary connect, 2+ for a failover, 0 for a reused connection or a call [phases] has nothing to say about. */
+    val connectAttempts: Int = 0,
 )
 
 /**

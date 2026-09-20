@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.collect
 
+import live.gravitylabs.porthole.protocol.BodyPreview
 import live.gravitylabs.porthole.store.EventRing
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,6 +32,18 @@ class InflightRecentHttpTest {
         clock = startedAt
         val token = Any() to id
         httpStart(token, "GET", "https://api.example.com/cart/$id")
+        clock = startedAt + durationMs
+        httpEnd(token, "done")
+        return token
+    }
+
+    /** Same as [seedCall], but with a body preview on both directions — GRA-66 F15's own subject. */
+    private fun InflightCollector.seedCallWithBody(startedAt: Long, durationMs: Long, id: String = "$startedAt"): Any {
+        clock = startedAt
+        val token = Any() to id
+        httpStart(token, "GET", "https://api.example.com/cart/$id")
+        httpRequest(token, emptyMap(), BodyPreview(contentType = "application/json", byteCount = 12, truncated = false, text = "req-$id"))
+        httpResponse(token, 200, emptyMap(), BodyPreview(contentType = "application/json", byteCount = 12, truncated = false, text = "res-$id"))
         clock = startedAt + durationMs
         httpEnd(token, "done")
         return token
@@ -160,5 +174,60 @@ class InflightRecentHttpTest {
         val all = inflight.recentHttp(sinceMs = null, from = 0, to = 10_000, limit = 201)
         assertEquals(200, all.size)
         assertTrue("the oldest call should have been evicted", all.none { it.startedAt == 10L })
+    }
+
+    // -- GRA-66 F15: only the newest 25 keep their body previews -----------------
+
+    @Test
+    fun `only the newest 25 entries keep their body previews -- older ones lose only the body`() {
+        val inflight = inflight()
+        for (i in 1..30) inflight.seedCallWithBody(startedAt = i * 100L, durationMs = 10, id = "$i")
+
+        val all = inflight.recentHttp(sinceMs = null, from = 0, to = 100_000, limit = 30)
+        assertEquals(30, all.size) // newest first, per the earlier tests in this file
+
+        val withBodies = all.take(25)
+        val stripped = all.drop(25)
+
+        assertTrue(
+            "the newest 25 should keep their body previews",
+            withBodies.all { it.requestBody != null && it.responseBody != null },
+        )
+        assertTrue(
+            "entries older than the newest 25 should have lost their body previews",
+            stripped.all { it.requestBody == null && it.responseBody == null },
+        )
+        // Stripping removes only the bodies -- everything else a caller
+        // might still want (status, timing, headers-as-present) survives.
+        assertTrue(
+            "a stripped entry should keep every other field",
+            stripped.all { it.status == 200 && it.elapsedMs == 10L && it.method == "GET" },
+        )
+    }
+
+    @Test
+    fun `a call's own body preview is stripped once 25 newer calls have arrived, not only when later asked`() {
+        val inflight = inflight()
+        inflight.seedCallWithBody(startedAt = 1_000, durationMs = 10, id = "first")
+        for (i in 1..25) inflight.seedCallWithBody(startedAt = 2_000 + i * 10L, durationMs = 5, id = "$i")
+
+        // Stripping happens as part of adding each new call (inside the
+        // same synchronized block httpEnd already uses), not lazily when
+        // recentHttp is later read -- proven by seeding no calls after the
+        // 25th and still finding "first" already stripped here.
+        val first = inflight
+            .recentHttp(sinceMs = null, from = 0, to = 100_000, limit = 30)
+            .first { it.url.endsWith("/first") }
+        assertNull("the 26th-newest call should already have lost its request body", first.requestBody)
+        assertNull("the 26th-newest call should already have lost its response body", first.responseBody)
+    }
+
+    @Test
+    fun `a call with no body to begin with is unaffected by stripping -- nothing to lose`() {
+        val inflight = inflight()
+        for (i in 1..30) inflight.seedCall(startedAt = i * 100L, durationMs = 10, id = "$i") // no bodies at all
+
+        val all = inflight.recentHttp(sinceMs = null, from = 0, to = 100_000, limit = 30)
+        assertTrue(all.all { it.requestBody == null && it.responseBody == null })
     }
 }

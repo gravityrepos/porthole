@@ -207,12 +207,12 @@ function fieldFor(key: string, value: unknown): FieldBody | null {
     }
 
     // GRA-66: OkHttp's own EventListener phase breakdown, one row per phase
-    // actually observed (dns, connect, secureConnect, requestHeaders,
-    // requestBody, responseHeaders, responseBody) — the same "pairs" shape
-    // `args` already renders a small key/value table as. Absent entirely
-    // for a call OkHttpPorthole never instrumented (a Ktor call with no
-    // OkHttp engine underneath), which `fieldFor`'s own empty-value check
-    // above already handles for free.
+    // actually observed (queued, dns, connect, secureConnect, dispatch,
+    // requestHeaders, requestBody, waiting, responseBody) — the same
+    // "pairs" shape `args` already renders a small key/value table as.
+    // Absent entirely for a call OkHttpPorthole never instrumented (a Ktor
+    // call with no OkHttp engine underneath), which `fieldFor`'s own
+    // empty-value check above already handles for free.
     case "phases": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
       const pairs = Object.entries(value as Record<string, unknown>).map(

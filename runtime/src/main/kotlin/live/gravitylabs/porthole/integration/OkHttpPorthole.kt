@@ -11,6 +11,7 @@ import okhttp3.Connection
 import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
@@ -64,12 +65,33 @@ object OkHttpPorthole {
      * `EventListener.NONE`-producing default when nothing was set) becomes
      * the delegate [PortholeEventListener] calls through on every callback,
      * so an app with its own listener keeps receiving every one of them.
+     *
+     * QA F9: that `build()` is not the free peek it reads as. `OkHttpClient`'s
+     * own constructor builds the platform's default trust manager and SSL
+     * context — thrown away the instant this local `delegate` value goes out
+     * of scope — and ends in a validity check that throws
+     * `IllegalStateException` for a builder that is *momentarily* invalid:
+     * `connectionSpecs(listOf(ConnectionSpec.CLEARTEXT))` called before a
+     * later `protocols(...)` call narrows away the default HTTP/2, say,
+     * would be perfectly valid once the app finished configuring the
+     * builder, but invalid at the exact instant `installPorthole()` sits
+     * between the two calls. Crashing the app's own `build()` from a line
+     * that reads as a no-op is the one failure mode worse than losing the
+     * app's own listener, so this is wrapped: an exception here means no
+     * delegate rather than no client.
+     *
+     * QA F10: the other half of getting call order wrong — the app calling
+     * `eventListener()`/`eventListenerFactory()` *after* this one, rather
+     * than before it — cannot be caught here at all: by the time that later
+     * call runs, this function has already returned. See
+     * [PortholeInterceptor]'s own comment for how that direction is caught
+     * instead, at the first request that actually proves it happened.
      */
     fun OkHttpClient.Builder.installPorthole(
         existing: EventListener.Factory? = null,
         bodies: BodyCapture = BodyCapture.Off,
     ): OkHttpClient.Builder {
-        val delegate = existing ?: build().eventListenerFactory
+        val delegate = existing ?: runCatching { build().eventListenerFactory }.getOrNull()
         eventListenerFactory(PortholeEventListener.factory(delegate))
         // Always added, even with bodies off. The interceptor is the only place
         // that runs on the thread doing the IO, so it is the only place that can
@@ -189,6 +211,23 @@ internal class PortholeInterceptor(private val capture: BodyCapture) : Intercept
         // chain.call() is the same Call instance the EventListener keyed on, so
         // the two halves land on the same record without any correlation id.
         val token = chain.call()
+
+        // QA F10: a client holds exactly one EventListener factory, and
+        // OkHttpClient.Builder is last-call-wins, silently — if the app
+        // called its own eventListener()/eventListenerFactory() *after*
+        // installPorthole(), PortholeEventListener's factory was replaced
+        // and never told. addInterceptor() (below, at install time) is a
+        // *second*, independent builder call that nothing else on the
+        // builder can collide with, so this interceptor is the one thing
+        // still guaranteed to see every call regardless — and if
+        // PortholeEventListener's own callStart never ran for this one
+        // (isTracked would be true if it had), that silent replacement is
+        // exactly what happened. Checked before this interceptor's own
+        // no-op-when-untracked calls below, so the record happens once, on
+        // the very first call it is ever true for.
+        if (inflight != null && !inflight.isTracked(token)) {
+            Setup.recordListenerReplaced()
+        }
 
         // The chain runs on the thread doing the IO, so this is where the
         // question "is this blocking the UI" can actually be answered. OkHttp
@@ -367,6 +406,19 @@ internal class TeeRequestBody(
  * resume its next leg on a different connection's thread) — so a plain field
  * write is not guaranteed visible to a later read without it.
  *
+ * QA F8: every one of [EventListener]'s 29 public callbacks is overridden
+ * and delegated below, not only the 13 this class actually times. Seven were
+ * missing before this fix — `connectionReleased`, `proxySelectStart`/`End`,
+ * `satisfactionFailure`, `cacheHit`/`Miss`/`ConditionalHit` — and an app
+ * chaining its own metrics listener onto this one (see `installPorthole`'s
+ * own doc comment) simply never heard them: `connectionReleased` alone
+ * unbalances every acquired/released pair such a listener keeps. See
+ * `HttpPhasesTest`'s own reflective coverage test, which enumerates
+ * [EventListener]'s public methods and fails if a future OkHttp version
+ * adds one this class does not yet know about, rather than the two of them
+ * silently drifting apart the way the named-13 version of that test could
+ * not detect.
+ *
  * `connect` and `secureConnect` are one pair that needs care: OkHttp fires
  * `secureConnectStart`/`secureConnectEnd` *between* `connectStart` and
  * `connectEnd`, so a naive `connectEnd - connectStart` would already include
@@ -376,35 +428,74 @@ internal class TeeRequestBody(
  * to close otherwise (a plain HTTP connect, where there is no TLS phase to
  * subtract).
  *
- * `responseHeaders` is the other: measured empirically (a MockWebServer
- * response delayed with `setHeadersDelay`, `HttpPhasesTest`'s own "phase
- * breakdown sums to the call's own elapsed time" test), OkHttp does *not*
- * call `responseHeadersStart` until the response has actually started
- * arriving — the wait for a slow server elapses *before* that callback
- * fires, silently, in the gap between finishing the request and
+ * QA F12: `dns` and `connect` are *accumulated* across every attempt, not
+ * latched to the first or the last. `connectStart`/`connectEnd`/
+ * `connectFailed` can each fire more than once for one call — a route
+ * selector trying an IPv6 address, failing, then succeeding over IPv4 is
+ * routine on cellular — and the old, latch-once version either kept a
+ * failed attempt's own short duration (whichever failed first) or silently
+ * discarded a real, successful attempt's time depending on which fired
+ * first. [connectAttempts] on the wire says how many attempts contributed.
+ *
+ * `waiting` (QA F14: renamed from `responseHeaders`, to match [phase]'s own
+ * live label above rather than the OkHttp callback name it happened to come
+ * from) is the other one that needs care: measured empirically (a
+ * MockWebServer response delayed with `setHeadersDelay`, `HttpPhasesTest`'s
+ * own "phase breakdown sums to the call's own elapsed time" test), OkHttp
+ * does *not* call `responseHeadersStart` until the response has actually
+ * started arriving — the wait for a slow server elapses *before* that
+ * callback fires, silently, in the gap between finishing the request and
  * `responseHeadersStart`. Timing this phase from `responseHeadersStart`
  * itself would therefore report a slow server as instant, which is the one
- * failure this whole feature exists to catch. `waitStartNanos`
- * is set from `requestHeadersEnd`/`requestBodyEnd` instead — the instant the
- * request actually finished sending, which is genuinely where the wait
- * begins — and only read, never written, from `responseHeadersStart`.
+ * failure this whole feature exists to catch. `waitStartNanos` is set from
+ * `requestHeadersEnd`/`requestBodyEnd` instead — the instant the request
+ * actually finished sending, which is genuinely where the wait begins — and
+ * only read, never written, from `responseHeadersStart`.
+ *
+ * QA F11: `queued` (`callStart` to the first of `dnsStart`/`connectStart`/
+ * `connectionAcquired`) and `dispatch` (`connectionAcquired` to
+ * `requestHeadersStart`) close the two gaps that made "the phases sum to
+ * elapsed" false on a real device (675ms of phases against a 748ms call,
+ * on an emulator run with no TLS and a warm connection pool — the two gaps
+ * this fixes are exactly where the other 73ms was). `queued` is OkHttp's
+ * own dispatcher: `maxRequestsPerHost` can hold a call back before any of
+ * its `EventListener` callbacks fire at all, and that wait is as real as a
+ * slow DNS lookup. `dispatch` is OkHttp's own exchange setup once a
+ * connection exists but before anything has been written to it — not
+ * network time, but still time neither `queued` nor `requestHeaders`
+ * otherwise accounts for.
+ *
+ * QA F13: the header/body write/read phases (`requestHeaders`,
+ * `requestBody`, `waiting`, `responseBody`) are *not* accumulated the way
+ * `dns`/`connect` are — a redirect or an auth-challenge retry re-runs its
+ * own request/response legs, and each one's callbacks simply overwrite the
+ * last. Accepted rather than fixed: these phases describe the call's
+ * *final* leg only, while [live.gravitylabs.porthole.collect.InflightCollector]'s
+ * own `elapsedMs` still spans every leg. Documented here, in
+ * `HttpCall.phases`'s own doc comment (`Protocol.kt`) and in the README's
+ * HTTP section, all three asked to say the same thing.
  */
 internal class PortholeEventListener(private val delegate: EventListener?) : EventListener() {
 
+    @Volatile private var callStartNanos: Long? = null
     @Volatile private var dnsStartNanos: Long? = null
     @Volatile private var connectStartNanos: Long? = null
     @Volatile private var secureConnectStartNanos: Long? = null
+    @Volatile private var connectionAcquiredNanos: Long? = null
     @Volatile private var requestHeadersStartNanos: Long? = null
     @Volatile private var requestBodyStartNanos: Long? = null
     @Volatile private var waitStartNanos: Long? = null
     @Volatile private var responseBodyStartNanos: Long? = null
 
+    @Volatile private var queuedMs: Long? = null
     @Volatile private var dnsMs: Long? = null
     @Volatile private var connectMs: Long? = null
+    @Volatile private var connectAttempts: Int = 0
     @Volatile private var secureConnectMs: Long? = null
+    @Volatile private var dispatchMs: Long? = null
     @Volatile private var requestHeadersMs: Long? = null
     @Volatile private var requestBodyMs: Long? = null
-    @Volatile private var responseHeadersMs: Long? = null
+    @Volatile private var waitingMs: Long? = null
     @Volatile private var responseBodyMs: Long? = null
 
     /**
@@ -422,25 +513,50 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
     @Volatile private var requestBytes: Long? = null
     @Volatile private var responseBytes: Long? = null
 
+    /**
+     * QA F11: `queued` closes the moment any of the three callbacks that can
+     * legitimately be the *first* sign of network activity fires —
+     * idempotent, since only one of them ever actually is, per call.
+     */
+    private fun markQueuedEndIfFirst() {
+        if (queuedMs != null) return
+        queuedMs = elapsedMs(callStartNanos)
+    }
+
     override fun callStart(call: Call) {
         delegate?.callStart(call)
+        callStartNanos = System.nanoTime()
         val request = call.request()
         Porthole.inflight()?.httpStart(call, request.method, request.url.toString())
     }
 
+    override fun proxySelectStart(call: Call, url: HttpUrl) {
+        delegate?.proxySelectStart(call, url)
+    }
+
+    override fun proxySelectEnd(call: Call, url: HttpUrl, proxies: List<Proxy>) {
+        delegate?.proxySelectEnd(call, url, proxies)
+    }
+
     override fun dnsStart(call: Call, domainName: String) {
         delegate?.dnsStart(call, domainName)
+        markQueuedEndIfFirst()
         dnsStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "dns")
     }
 
     override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
         delegate?.dnsEnd(call, domainName, inetAddressList)
-        dnsMs = elapsedMs(dnsStartNanos)
+        // QA F12: accumulated, not latched — a redirect to a second host
+        // needs a second lookup, and the first one's time must not be
+        // thrown away for it.
+        elapsedMs(dnsStartNanos)?.let { dnsMs = (dnsMs ?: 0) + it }
+        dnsStartNanos = null
     }
 
     override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
         delegate?.connectStart(call, inetSocketAddress, proxy)
+        markQueuedEndIfFirst()
         connectAttempted = true
         connectStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "connecting")
@@ -448,23 +564,34 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
 
     override fun secureConnectStart(call: Call) {
         delegate?.secureConnectStart(call)
-        // See this class's own doc comment: this is where the raw TCP
-        // portion of `connect` ends, before TLS's own phase begins.
-        connectMs = elapsedMs(connectStartNanos)
+        // See this class's own doc comment: this attempt's raw TCP portion
+        // of `connect` ends here, before TLS's own phase begins. Cleared
+        // (not just added) so connectEnd, which always fires after this for
+        // the same attempt, does not also count it.
+        elapsedMs(connectStartNanos)?.let {
+            connectMs = (connectMs ?: 0) + it
+            connectAttempts += 1
+        }
+        connectStartNanos = null
         secureConnectStartNanos = System.nanoTime()
     }
 
     override fun secureConnectEnd(call: Call, handshake: Handshake?) {
         delegate?.secureConnectEnd(call, handshake)
-        secureConnectMs = elapsedMs(secureConnectStartNanos)
+        elapsedMs(secureConnectStartNanos)?.let { secureConnectMs = (secureConnectMs ?: 0) + it }
+        secureConnectStartNanos = null
     }
 
     override fun connectEnd(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?) {
         delegate?.connectEnd(call, inetSocketAddress, proxy, protocol)
-        // Only for a plain (non-TLS) connect: a TLS one already closed
-        // connectMs at secureConnectStart, and overwriting it here would
-        // fold the whole handshake back into it.
-        if (connectMs == null) connectMs = elapsedMs(connectStartNanos)
+        // Only contributes for a plain (non-TLS) attempt: a TLS one already
+        // accounted its own share of connectMs at secureConnectStart and
+        // cleared connectStartNanos there, so this is a no-op for it.
+        elapsedMs(connectStartNanos)?.let {
+            connectMs = (connectMs ?: 0) + it
+            connectAttempts += 1
+        }
+        connectStartNanos = null
     }
 
     override fun connectFailed(
@@ -475,18 +602,36 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
         ioe: IOException,
     ) {
         delegate?.connectFailed(call, inetSocketAddress, proxy, protocol, ioe)
-        if (connectMs == null) connectMs = elapsedMs(connectStartNanos)
+        // QA F12: a failed attempt still counts — an IPv6 attempt that
+        // failed before a IPv4 one succeeded is real time too, and must not
+        // silently stand in for (or be overwritten by) the attempt that
+        // actually worked.
+        elapsedMs(connectStartNanos)?.let {
+            connectMs = (connectMs ?: 0) + it
+            connectAttempts += 1
+        }
+        connectStartNanos = null
     }
 
     override fun connectionAcquired(call: Call, connection: Connection) {
         delegate?.connectionAcquired(call, connection)
+        markQueuedEndIfFirst()
         reused = !connectAttempted
         connectAttempted = false
         protocolName = runCatching { connection.protocol().toString() }.getOrNull()
+        connectionAcquiredNanos = System.nanoTime()
+    }
+
+    override fun connectionReleased(call: Call, connection: Connection) {
+        delegate?.connectionReleased(call, connection)
     }
 
     override fun requestHeadersStart(call: Call) {
         delegate?.requestHeadersStart(call)
+        // QA F11: the gap between having a connection and starting to write
+        // to it — OkHttp's own exchange setup, not network time, but still
+        // real and otherwise unattributed.
+        dispatchMs = elapsedMs(connectionAcquiredNanos)
         requestHeadersStartNanos = System.nanoTime()
         Porthole.inflight()?.httpPhase(call, "headers")
     }
@@ -528,7 +673,7 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
 
     override fun responseHeadersEnd(call: Call, response: Response) {
         delegate?.responseHeadersEnd(call, response)
-        responseHeadersMs = elapsedMs(waitStartNanos)
+        waitingMs = elapsedMs(waitStartNanos)
     }
 
     override fun responseBodyStart(call: Call) {
@@ -568,6 +713,22 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
         Porthole.inflight()?.httpEnd(call, "canceled")
     }
 
+    override fun satisfactionFailure(call: Call, response: Response) {
+        delegate?.satisfactionFailure(call, response)
+    }
+
+    override fun cacheHit(call: Call, response: Response) {
+        delegate?.cacheHit(call, response)
+    }
+
+    override fun cacheMiss(call: Call) {
+        delegate?.cacheMiss(call)
+    }
+
+    override fun cacheConditionalHit(call: Call, response: Response) {
+        delegate?.cacheConditionalHit(call, response)
+    }
+
     /**
      * Reported before [live.gravitylabs.porthole.collect.InflightCollector.httpEnd]
      * finalises the call — that method reads whatever
@@ -577,15 +738,17 @@ internal class PortholeEventListener(private val delegate: EventListener?) : Eve
      */
     private fun reportPhases(call: Call) {
         val phases = buildMap {
+            queuedMs?.let { put("queued", it) }
             dnsMs?.let { put("dns", it) }
             connectMs?.let { put("connect", it) }
             secureConnectMs?.let { put("secureConnect", it) }
+            dispatchMs?.let { put("dispatch", it) }
             requestHeadersMs?.let { put("requestHeaders", it) }
             requestBodyMs?.let { put("requestBody", it) }
-            responseHeadersMs?.let { put("responseHeaders", it) }
+            waitingMs?.let { put("waiting", it) }
             responseBodyMs?.let { put("responseBody", it) }
         }
-        Porthole.inflight()?.httpPhases(call, phases, reused, protocolName, requestBytes, responseBytes)
+        Porthole.inflight()?.httpPhases(call, phases, reused, protocolName, requestBytes, responseBytes, connectAttempts)
     }
 
     private fun elapsedMs(startNanos: Long?): Long? =

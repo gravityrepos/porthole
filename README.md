@@ -1503,19 +1503,39 @@ DNS that never resolved, a pooled connection that was not actually pooled, a
 server that sat on the response, a body that took forever to arrive.
 
 **Phases, from OkHttp's own `EventListener`.** `installPorthole()` reports
-`dns`, `connect`, `secureConnect`, `requestHeaders`, `requestBody`,
-`responseHeaders` and `responseBody` — only the phases actually observed, each
-already the time *that phase itself* took, not a running total, so summing
-every value lands within a few ms of the call's own `elapsedMs`. `connect` and
-`secureConnect` are the one pair worth knowing about: OkHttp fires
-`secureConnectStart`/`secureConnectEnd` *between* `connectStart` and
-`connectEnd`, so `connect` is closed the moment TLS begins (the raw TCP
-portion only) rather than at `connectEnd`, which would silently fold the whole
-handshake into it a second time. A subtler one: OkHttp does not call
-`responseHeadersStart` until the response has actually started arriving, so
-the wait for a slow server is measured from when the request finished
-sending, not from that callback — timing it the naive way reports a slow
-server as instant.
+`queued`, `dns`, `connect`, `secureConnect`, `dispatch`, `requestHeaders`,
+`requestBody`, `waiting` and `responseBody` — only the phases actually
+observed, each already the time *that phase itself* took, not a running
+total, so summing every value now genuinely lands within a few ms of the
+call's own `elapsedMs`. Three pairs worth knowing about:
+
+- `connect`/`secureConnect`: OkHttp fires `secureConnectStart`/
+  `secureConnectEnd` *between* `connectStart` and `connectEnd`, so `connect`
+  is closed the moment TLS begins (the raw TCP portion only) rather than at
+  `connectEnd`, which would silently fold the whole handshake into it a
+  second time.
+- `waiting` (named to match the same live label `inflight`'s own current-call
+  `phase` already uses, not the OkHttp callback it happens to come from —
+  `responseHeadersEnd`): OkHttp does not call `responseHeadersStart` until
+  the response has actually started arriving, so the wait for a slow server
+  is measured from when the request finished sending, not from that
+  callback — timing it the naive way reports a slow server as instant.
+- `queued` (`callStart` to the first sign of any network activity) and
+  `dispatch` (`connectionAcquired` to `requestHeadersStart`): OkHttp's own
+  dispatcher can hold a call back behind `maxRequestsPerHost` before any of
+  its `EventListener` callbacks fire at all, and there is real, otherwise
+  invisible time between having a connection and starting to write to it.
+  Without these two, a real call's phases summed to noticeably less than its
+  own `elapsedMs` — exactly the gap this whole feature exists to close.
+
+`dns` and `connect` are each the *sum* of every attempt a call made — a route
+failover (IPv6 fails, IPv4 succeeds, routine on cellular) is not thrown away,
+and `connectAttempts` says how many attempts contributed (present only past
+1). `requestHeaders`/`requestBody`/`waiting`/`responseBody` are not summed
+the same way: a redirect or an auth-challenge retry re-runs its own
+request/response legs, and each one's callbacks simply overwrite the last, so
+these four describe the call's *final* leg only, while `elapsedMs` still
+spans every leg.
 
 **Connection reuse and protocol come along for free.** `reused: true` means
 `connectStart` never fired for this call — it came straight from OkHttp's own
@@ -1541,19 +1561,43 @@ whichever was called last wins, silently. `installPorthole()` reads back
 whatever the builder already has configured (via `build().eventListenerFactory`
 — `OkHttpClient.Builder` does not expose that field itself, but the client it
 builds does) and chains onto it, so an app that already set its own listener
-before calling `installPorthole()` keeps receiving every callback, in the same
-order it always did.
+before calling `installPorthole()` keeps receiving every callback, in the
+same order it always did — all 29 `EventListener` declares, not only the
+ones this collector times itself (`connectionReleased` included, which
+matters most: it is the one an app's own metrics listener needs to balance
+against its own `connectionAcquired`).
+
+That `build()` call is not free, and not always safe: constructing an
+`OkHttpClient` builds (and immediately discards) the platform's default
+trust manager and SSL context, and can throw `IllegalStateException` for a
+builder that is momentarily invalid mid-configuration — a state the app's
+*own*, later builder calls would have resolved before its own `build()` ever
+ran. `installPorthole()` catches that and falls back to no delegate rather
+than crashing client construction from a line that reads like a no-op.
+
+The one order `installPorthole()` genuinely cannot fix on its own: the app
+calling its *own* `eventListener()`/`eventListenerFactory()` **after**
+`installPorthole()`, which replaces Porthole's factory the same silent way.
+The first request on such a client is caught anyway — `PortholeInterceptor`
+notices its own listener never saw that call's `callStart` — and reported as
+an `okhttp-listener` entry from `setup`, saying so plainly rather than the
+app just noticing an empty `http` lane later.
 
 **`findings` gains `http-call-slow`** at `warning`, for a call whose own
 elapsed time was at least 3000ms — a pragmatic floor, not a platform-defined
 one, chosen the same way `trace-startup`'s 500ms is: close to the point
 Google's own RAIL guidance treats a wait as a wait rather than a step in a
-sequence. It attributes the call to whichever phase took the largest share,
-and joins the device's own most recent `network` event (transport, metered,
-validated) in force when the call started, so a call that ran on a metered
-cellular connection says so instead of just looking slow for no stated
-reason. A call with no phase breakdown at all — the Ktor case below — says so
-honestly rather than guessing.
+sequence. It names the phase with the largest share as `mostly <phase>` only
+when that phase actually accounts for at least half of the call's own
+elapsed time — phases need not sum to it in every case a reader might expect
+(a redirect's earlier legs, say), so a phase that is merely the largest of
+several small numbers is reported as `largest phase: <phase> (Nms of Mms)`
+instead, honest about how little of the call it actually explains. Joins the
+device's own most recent `network` event (transport, metered, validated) in
+force when the call started, so a call that ran on a metered cellular
+connection says so instead of just looking slow for no stated reason. A call
+with no phase breakdown at all — the Ktor case below — says so honestly
+rather than guessing.
 
 **Ktor gets none of this.** Ktor's own client plugin API sits above the
 engine (CIO, OkHttp-as-engine, Darwin, …) and the boundary is structural, not
@@ -1569,11 +1613,19 @@ for.
 **`recentHttp` is window-aware.** `inflight`'s `recentHttp` now takes the
 standard `sinceMs`/`from`/`to`, the same shape every other tool here uses, and
 `limit` (default 25 — what "the last 25" always meant) caps how many come
-back. The buffer itself holds more than the default limit, so quoting a
-`window` from a finding — `http-call-slow`'s, say — can still reach a call
-older than the last 25, not only whatever is newest right now. `http`/
+back. The buffer itself holds more than the default limit (200, not 25), so
+quoting a `window` from a finding — `http-call-slow`'s, say — can still reach
+a call older than the last 25, not only whatever is newest right now. `http`/
 `queries`/`work` in the same response are unaffected: they are the live set,
 "what is happening right now," which a window has no honest meaning for.
+
+Holding 8x as many calls does not mean holding 8x as many bodies: only the
+newest 25 — what `recentHttp` already returns unwindowed — keep their
+`requestBody`/`responseBody` previews. An older entry keeps everything else
+(status, headers, timings, phases, byte counts) and loses only the body
+itself, set back to `null` the same way "never captured" already reads —
+`BodyCapture.Text`'s 4KB-per-body cap times 200 entries would otherwise be
+real memory nobody asked to keep that far back.
 
 ## Payloads: what gets captured, and what does not
 

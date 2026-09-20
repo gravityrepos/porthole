@@ -120,9 +120,59 @@ internal object Setup {
         )
     }
 
+    // -- the OkHttp listener getting silently replaced (GRA-66 F10) ---------
+    //
+    // Not a classpath question either: OkHttp is on the classpath and
+    // `installPorthole()` was called — both already true, or this could
+    // never happen at all. What went wrong is call order: a client can
+    // hold exactly one `EventListener` factory, and OkHttp's builder is
+    // last-call-wins, silently. If the app calls its own `eventListener()`
+    // *after* `installPorthole()`, the porthole's factory is replaced and
+    // `Setup.record("okhttp")` already reported this client wired — which
+    // was true the moment it ran, and stopped being true one builder call
+    // later. `PortholeInterceptor` is the one thing still guaranteed to run
+    // for every call regardless (it is a separate builder call,
+    // `addInterceptor()`, nothing else can silently displace it), so it is
+    // the only place left that can notice the listener went dark — see its
+    // own comment for how. Recorded once: every later call on the same
+    // client has the identical builder-level cause, so nothing is gained by
+    // saying it again.
+
+    @Volatile private var listenerReplaced: Boolean = false
+
+    /**
+     * Called by [live.gravitylabs.porthole.integration.PortholeInterceptor]
+     * the first time a call reaches it with no record of
+     * [live.gravitylabs.porthole.integration.PortholeEventListener] having
+     * seen that call's own `callStart`.
+     */
+    fun recordListenerReplaced() {
+        if (listenerReplaced) return
+        listenerReplaced = true
+        Log.w(
+            TAG,
+            "okhttp: installPorthole()'s own EventListener was replaced by a later " +
+                "eventListener()/eventListenerFactory() call on the same builder — call " +
+                "installPorthole() after your own listener, not before, or its phases, reuse, " +
+                "protocol and byte counts silently stop appearing",
+        )
+    }
+
+    private fun listenerReplacedEntry(): SetupEntry? {
+        if (!listenerReplaced) return null
+        return SetupEntry(
+            name = "okhttp-listener",
+            onClasspath = true,
+            instrumented = false,
+            hint = "call installPorthole() after your own eventListener()/eventListenerFactory(), " +
+                "not before — it was replaced and this client's own callbacks are not reaching it",
+        )
+    }
+
     fun report(): List<SetupEntry> = buildList {
         socketEntry()?.let(::add)
         strictModeEntry()?.let(::add)
+        listenerReplacedEntry()?.let(::add)
         addAll(integrationEntries())
     }
 
