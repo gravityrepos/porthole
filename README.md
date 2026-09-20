@@ -712,6 +712,128 @@ want one — but it is worth nothing until such a driver integrates with it, and
 it brings lifecycle problems the wrapper does not have, starting with a crashed
 test leaving a capture running forever.
 
+## porthole watch
+
+MCP cannot interrupt an agent's turn — there is no push, and an MCP server is
+not allowed to run background work of its own. An agent's *harness* can,
+though: Claude Code notices when a background bash task exits, and it runs
+hooks. `porthole watch` is a process built for exactly that seam: it blocks,
+watches the app for you, prints one line the moment something crosses a
+severity threshold, and exits non-zero.
+
+```bash
+porthole watch                              # run forever, one line per finding
+porthole watch --until-first                # block, then exit 1 the instant one lands
+porthole watch --json                       # one finding object per line, for a hook
+porthole watch --until-first --timeout 300  # give up after 5 minutes if nothing happens
+```
+
+It connects like any other client — its own socket to the device, independent
+of whatever MCP server may also be attached (`PortholeSocketServer` already
+serves several clients at once; the timeline and an MCP server are proof of
+that) — and streams findings as they occur rather than answering one question
+and exiting. Default severity is `error`; `--severity warning` or
+`--severity note` widen it. A finding line carries everything the ticket that
+sent you here needs to quote into `findings`/`what_was_happening`:
+
+```
+ERROR  main thread blocked for 6240ms  t=2088311..2094551  com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:146)
+```
+
+Severity, the finding's own title, the window on the device uptime clock
+(`t=from..to`, the same clock every tool call already speaks), the first line
+of its detail, and — when `PORTHOLE_PROJECT_ROOT` is set and
+[`where`](#handing-a-moment-to-the-agent) resolves — `where=<path>:<line>`,
+the resolved, project-relative file an agent can open directly. `--json`
+prints the same finding as one JSON object per line instead, for a hook to
+parse with `jq`; every diagnostic (connection state, reconnect chatter) goes
+to stderr only, so stdout is never anything but findings.
+
+**Deduplication.** A `watch` running alongside a live agent session must not
+repeat what the agent's own ["since your last call" banner](#what-happened-while-you-were-not-looking)
+already surfaced, and must not make that banner repeat what `watch` already
+put in front of the harness. The decision: `watch` opens the exact same
+on-disk watermark (`<session dir>/watermark.json`) the MCP surface's banner
+uses, keyed by the device's `hello` identity the same way
+[sessions on disk](#sessions-on-disk) already are, and reads/advances the
+very same `lastReportedErrorT` field — not a parallel one of its own. This
+only ever applies to `error`-severity findings, matching what that field
+already means; `--severity warning`/`--severity note` still dedupe repeats,
+but only within `watch`'s own run, since there is no shared field for those
+severities to share.
+
+**Exit codes**, and nothing else stops it:
+
+| code | meaning |
+| --- | --- |
+| 0 | clean stop — SIGINT |
+| 1 | `--until-first` found a qualifying finding (on stdout) |
+| 2 | bad arguments, or nothing to connect to |
+| 3 | `--timeout` elapsed with nothing (yet) to report |
+
+A disconnect is never on that list. `porthole watch` reconnects on its own,
+exactly like `porthole ui` — the app restarting mid-session is normal, not a
+reason to stop watching it.
+
+### The Claude Code recipe
+
+**Background task**, for a loop that wants to keep working and get notified
+the moment something breaks:
+
+```bash
+porthole watch --until-first
+```
+
+Run it the way you'd run any long-lived command in Claude Code — as a
+background bash task. Claude Code notifies the agent when a background task
+exits; `--until-first`'s exit code (1, with the finding already on stdout) *is*
+the notification, and the finding is already there to paste into `findings`
+without another tool call.
+
+**Hook**, for a gate that runs once and reports back — `--json` so the hook
+can parse what it found:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "porthole watch --until-first --json --timeout 30 --severity error; code=$?; if [ $code -eq 1 ]; then exit 2; fi; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`exit 2` from a hook is what tells Claude Code to block and show the agent
+its stderr/stdout — quoting the JSON line straight back gives it the window
+and the evidence in one shot. `exit 0` for a clean `--timeout` (nothing
+happened) or a genuine connection failure lets the tool call through rather
+than wedging the loop on a hook that could not reach the device.
+
+On Windows, quote the whole command for the shell running it (PowerShell:
+double quotes around the command, no shell-specific escaping inside — the
+example above is POSIX `sh`, which is what Claude Code's own hook runner
+invokes on every platform it supports; check its own hook documentation
+before adapting the command line itself, not the quoting shown here).
+
+### Open questions this settles
+
+- **Sharing the device with a running MCP server.** Proven, not assumed:
+  `watch.test.ts` runs a `watch` beside a full MCP server rig on the same
+  fake device and checks both see the same events.
+- **A hung watch wedging a hook.** `--timeout <seconds>` — exit 3, decided
+  and tested above.
+- **Exit codes.** Decided and tested: 0/1/2/3 as the table above, chosen to
+  match `porthole capture`'s own `process.exit(2)` discipline for bad
+  arguments rather than invent a fifth code for the same fact.
+
 ## Handing a moment to the agent
 
 The two halves share a clock: every event, every log line and every report is

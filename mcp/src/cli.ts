@@ -10,6 +10,7 @@ import { bootPortholeServer } from "./index.js";
 import { parseDuration, parseMillis, parsePort, requiredValue } from "./args.js";
 import { sessionsRoot } from "./sessions.js";
 import { listSessionsText, saveFromSessions, type SaveFromSessionsOptions } from "./save.js";
+import { parseWatch, runWatch } from "./watch.js";
 
 /**
  * The human entry point.
@@ -32,6 +33,7 @@ porthole — a window into a running Android app
 
   porthole ui                          open the live timeline
   porthole capture --scenario <name> -- <command>   record a run to a trace
+  porthole watch [--until-first] [--json]   block until something breaks
   porthole save (--since <dur> | --from <ms> --to <ms>)   save what already happened
   porthole sessions                    list what is recorded on disk
   porthole report <trace.json>         what the run is worth looking at
@@ -338,6 +340,25 @@ if (command === "ui") {
     if (!forwarded.ok) console.error(forwarded.output);
   }
   process.exit(await capture(options));
+} else if (command === "watch") {
+  const options = parseWatch(rest);
+  if (options.forward) {
+    const forwarded = runAdb(
+      ["forward", `tcp:${options.port}`, `tcp:${options.port}`],
+      options.serial,
+    );
+    if (!forwarded.ok) console.error(forwarded.output);
+  }
+  // AbortController, not a direct `device.stop()` in a SIGINT handler here:
+  // runWatch() owns its own DeviceClient and every timer that could still be
+  // armed (the tick interval, --timeout), and it is the one place that knows
+  // how to unwind all of it without leaving a handle open behind it. Wiring
+  // SIGINT/SIGTERM to abort() is the same shape `ui()`'s own shutdown uses.
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  process.exit(await runWatch(options, controller.signal));
 } else if (command === "save") {
   const options = parseSave(rest);
   const projectRoot = resolveProjectRoot().directory;
