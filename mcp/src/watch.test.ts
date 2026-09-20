@@ -982,18 +982,21 @@ describe("porthole watch (compiled CLI)", () => {
     expect(err.stderr.toString("utf8")).toContain("--severity must be one of");
   });
 
-  it(
+  // GRA-237: Windows has no SIGINT delivery to a child process —
+  // child.kill("SIGINT") is a TerminateProcess and node reports a null exit
+  // code — so the clean-stop path this proves cannot be observed there.
+  it.skipIf(process.platform === "win32")(
     "exits 0 on SIGINT",
     async () => {
       const fakeDevice = await FakeDevice.start();
+      const child = spawn(process.execPath, [
+        distCli,
+        "watch",
+        "--port",
+        String(fakeDevice.port),
+        "--no-forward",
+      ]);
       try {
-        const child = spawn(process.execPath, [
-          distCli,
-          "watch",
-          "--port",
-          String(fakeDevice.port),
-          "--no-forward",
-        ]);
         let stderr = "";
         child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
         child.stdout.on("data", () => {});
@@ -1017,6 +1020,9 @@ describe("porthole watch (compiled CLI)", () => {
         });
         expect(exitCode).toBe(0);
       } finally {
+        // Never leave the CLI child behind: a lingering watch keeps vitest's
+        // process alive after the suite is otherwise done.
+        if (child.exitCode === null && child.signalCode === null) child.kill();
         await fakeDevice.close();
       }
     },

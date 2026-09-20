@@ -377,7 +377,14 @@ function setupFakeRingAdb(extraEnv: NodeJS.ProcessEnv = {}): FakeRingAdb {
 // RingController, against the fake adb, through the real MCP tools
 // ---------------------------------------------------------------------------
 
-describe("system_trace_start / system_trace_snapshot / system_trace_stop", () => {
+// GRA-237: on windows-latest this file's two adb-driven blocks never finish
+// — the fake adb here is a node.exe copy driven by a NODE_OPTIONS preload
+// (not testing/fakeAdb.ts's .cmd shim), and the run hangs until the job's
+// 12-minute timeout. The three pure describes above still run there; the
+// adb-driven ones are exercised on ubuntu and macOS until GRA-237 lands.
+const adbDriven = describe.skipIf(process.platform === "win32");
+
+adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () => {
   let fakeAdb: FakeRingAdb;
 
   beforeEach(() => {
@@ -815,7 +822,7 @@ async function waitForAutoSnapshot(
   }
 }
 
-describe("findings auto-snapshots the ring on an error-severity finding", () => {
+adbDriven("findings auto-snapshots the ring on an error-severity finding", () => {
   let fakeAdb: FakeRingAdb;
 
   beforeEach(() => {
