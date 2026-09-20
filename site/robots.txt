@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://porthole.gravitylabs.live/sitemap.xml
