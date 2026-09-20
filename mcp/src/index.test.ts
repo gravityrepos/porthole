@@ -2631,6 +2631,82 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
   }, 20_000);
 });
 
+describe("GRA-234: ask_system_trace on a trace path that does not exist", () => {
+  // `traceProcessor` only needs to be a path `existsSync` accepts — the
+  // stat-before-load check this ticket adds short-circuits before this
+  // tool would ever actually spawn it, the same way it never reaches
+  // askTrace()'s real trace_processor invocation at all. Using this
+  // process's own node binary keeps the fixture honest and cross-platform
+  // without needing a real trace_processor_shell on the test machine.
+  const traceProcessor = process.execPath;
+
+  it("names the missing path in one plain sentence, with asked/unanswered/findings all empty — not '8 question(s) failed'", async () => {
+    const rig = await buildRig();
+    const dir = mkdtempSync(path.join(tmpdir(), "porthole-gra234-"));
+    try {
+      const missing = path.join(dir, "porthole-2026-09-19T12-00-00.pftrace");
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: missing,
+        from: 0,
+        to: 1_000,
+        traceProcessor,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain(`No such trace file: ${missing}`);
+      // The old bug's exact wording — this proves the fix replaced it, not
+      // just that the new wording happens to also be present.
+      expect(result.text).not.toContain("question(s) failed");
+      expect(result.json).toMatchObject({ asked: [], skipped: [], unanswered: [], findings: [] });
+    } finally {
+      await rig.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the nearest same-prefix candidate under the same directory when one exists", async () => {
+    const rig = await buildRig();
+    const dir = mkdtempSync(path.join(tmpdir(), "porthole-gra234-"));
+    try {
+      const candidate = path.join(dir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+      writeFileSync(candidate, "");
+      const missing = path.join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: missing,
+        from: 0,
+        to: 1_000,
+        traceProcessor,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain(`Did you mean ${candidate}?`);
+    } finally {
+      await rig.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still resolves the handshake/connection checks first — a missing trace never masks 'still waiting on its first check-in'", async () => {
+    // Same shape as the GRA-157 describe block's own buildRaceRig (not
+    // reused here — it is scoped to that block): connectDevice: false skips
+    // buildRig's wait-for-hello, and a hello handler that never resolves,
+    // with the socket nudged to connect and waited on, holds "handshaking"
+    // open for the length of this test.
+    const rig = await buildRig({ connectDevice: false, handlers: { hello: () => new Promise(() => {}) } });
+    rig.device.start();
+    await waitUntil(() => rig.device.state === "handshaking");
+    try {
+      const result = await rig.client.callTool("ask_system_trace", { trace: path.join(tmpdir(), "does-not-exist.pftrace") });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("still waiting on its first check-in");
+      expect(result.text).not.toContain("No such trace file");
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
 describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a real project", () => {
   // The same fixture sources.test.ts uses: two modules,
   // FixtureCartViewModel.kt under app/, ApiClient.kt under core/network/,

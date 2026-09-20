@@ -386,6 +386,17 @@ PR that makes the change, not after the fact.
   launcher activity at all. The timeline UI's restart button now shares
   this exact code path (`restartAppAsync`) rather than a separate sync copy
   (GRA-233).
+- `ask_system_trace` on a trace path that does not exist (a typo, a trace
+  already cleaned up, one copied from the wrong session) reached
+  `trace_processor_shell` anyway, where every one of its eight questions
+  failed to load the file independently and came back "unanswered" —
+  reported as "8 question(s) failed" instead of the one true sentence. The
+  path is now stat'd before anything tries to load it: a missing or
+  unreadable file is reported in one plain sentence naming it, with the
+  nearest same-prefix (or, failing that, newest) `.pftrace` file under the
+  same directory suggested when one exists, and `asked`/`skipped`/
+  `unanswered`/`findings` all come back empty rather than populated with a
+  ghost result (GRA-234).
 
 ## [0.2.2] - 2026-09-16
 

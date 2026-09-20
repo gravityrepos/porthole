@@ -27,7 +27,7 @@ import {
   parseTop,
   type SystemContext,
 } from "./system.js";
-import { askTrace, findTraceProcessor, questionsDescription } from "./perfetto.js";
+import { askTrace, checkTracePath, findTraceProcessor, questionsDescription } from "./perfetto.js";
 import { reconcileStartupWithTrace } from "./startup.js";
 import { captureArgs, countPortholeLabels, describeCapture, planCapture } from "./systrace.js";
 import { MEASURED_OVERHEAD, RingController } from "./ring.js";
@@ -2049,6 +2049,28 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // `fromBootMs` that `timeline.ts` already builds for its own `askTrace`
       // call.
       const toUptimeMs = (bootNs: number) => fromBootMs(events, bootNs / 1e6)?.at ?? null;
+
+      // GRA-234: stat `trace` before spending a trace_processor invocation
+      // trying to load it. Without this, a bad path (typo, a trace already
+      // cleaned up, one copied from the wrong session) reached askTrace()
+      // anyway, where every one of QUESTIONS failed to load it independently
+      // and came back unanswered — "8 question(s) failed" instead of the one
+      // sentence a caller actually needed. `asked`/`unanswered`/`findings`
+      // all come back empty here, not populated and then discarded, so nothing
+      // downstream reads a phantom result off a file that was never opened.
+      const traceCheck = checkTracePath(trace);
+      if (!traceCheck.ok) {
+        return ok(traceCheck.message!, {
+          trace,
+          app,
+          window: { from: span.from, to: span.to, sleepMs: bootTo.sleepMs },
+          asked: [],
+          skipped: [],
+          wallTimeMs: {},
+          unanswered: [],
+          findings: [],
+        });
+      }
 
       const {
         findings: traceFindings,
