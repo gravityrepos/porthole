@@ -1369,7 +1369,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "The other tools return measurements and leave the conclusion to you. This one draws the " +
         "conclusions the data actually supports, which is a shorter list than it looks: queries on " +
         "the main thread, stalls, failed calls, dropped frames, blocking collections, memory trims, " +
-        "retried jobs, recomposition hotspots.\n\n" +
+        "retried jobs, recomposition hotspots. A hotspot the Kotlin compose compiler's own report " +
+        "(`./gradlew portholeComposeReport`, not on by default) says is restartable but not " +
+        "skippable is promoted to a `warning` and names the unstable parameter and why, in the " +
+        "compiler's own words; one that is skippable but still carries an unstable parameter is a " +
+        "different, less urgent finding of its own, never promoted the same way.\n\n" +
         "`confidence` is load-bearing and worth repeating to whoever reads your answer. 'observed' " +
         "means the device reported it: a query ran on the main thread, a frame missed its deadline. " +
         "'correlated' means two things happened close together, which is ordering and not " +
@@ -2393,7 +2397,17 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "A key carrying 'holds' is anonymous state that was found holding one of the app's own " +
         "types, so it is definitely the app's and definitely unregistered — that one is worth " +
         "chasing. Its absence proves nothing: an unregistered Int is indistinguishable from a " +
-        "ripple, so most of the app's own unnamed state will not be flagged.",
+        "ripple, so most of the app's own unnamed state will not be flagged.\n\n" +
+        "'composeReport' (present only when it has something to say) joins each node against " +
+        "the Kotlin compose compiler's own report (run `./gradlew portholeComposeReport` first — " +
+        "it is not on by default, since enabling it costs a recompile): 'joined: true' names the " +
+        "enclosing composable function, whether the compiler itself calls it skippable, and, when " +
+        "it is not, 'notSkippableReason' quotes the compiler's own reason — an unstable parameter, " +
+        "and, for a class parameter, why that class is unstable. 'joined: false' with 'reason: " +
+        "\"no report entry matched\"' or '\"matched more than one report entry\"' (candidates " +
+        "listed) means the label could not be tied to one function with confidence — never a " +
+        "guess. A stale report ('stale: true' — its own source state has moved on) is still named " +
+        "but never used for a reason.",
       inputSchema: {
         screen: z
           .string()
