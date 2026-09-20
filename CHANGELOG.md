@@ -15,6 +15,19 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- `porthole { strictMode.set(true) }` installs an Android `StrictMode`
+  thread + VM policy in debug builds (never `penaltyDeath`) and turns a
+  violation into a `strict_violation` finding — main-thread disk writes and
+  network calls at `error`, leaked closeables/cursors at `warning`,
+  everything else at `note` — but only for a violation whose stack names a
+  frame in the app's own package; a platform-only violation (most of what
+  trips during ordinary startup) is never counted or reported at all. Off by
+  default: `StrictMode` has no public API to detect or chain an existing
+  policy, so enabling this replaces whatever was already installed, and the
+  `setup` report says so plainly rather than claiming to chain. A flood at
+  one call site is throttled to a handful of ring events carrying an
+  accurate running count, not one event per violation (GRA-59).
+
 ### Changed
 
 ### Fixed

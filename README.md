@@ -1179,6 +1179,63 @@ look.
 The timeline puts the main thread lane next to dropped frames, because a block
 and the frames it cost are the same event seen twice.
 
+## StrictMode
+
+`db-on-main-thread` above only ever sees Room and SQLDelight going through the
+support layer. Android's own `StrictMode` sees the whole class of the same
+mistake — disk on main, network on main, a leaked cursor or closeable,
+unbuffered I/O, an untagged socket — from any source, because the platform
+itself is the one watching. Opt in and it becomes findings instead of a
+logcat line and a dialog nobody reads:
+
+```kotlin
+porthole {
+    strictMode.set(true)
+}
+```
+
+**Off by default.** `StrictMode.getThreadPolicy()`/`getVmPolicy()` return
+opaque objects with no accessors, so there is no public API to detect a
+policy the app already installed, let alone chain onto it. Turning this on
+unconditionally would silently discard a debug build's own `penaltyDeath`
+the moment Porthole's runtime loaded. Enabling it **replaces** whatever
+policy was already in effect — not chains onto it — and the `setup` tool
+says so plainly, in exactly those terms, rather than claiming a cooperation
+`StrictMode`'s API cannot actually support.
+
+**The default check set leaves out `detectDiskReads()`.** It is the single
+noisiest check `StrictMode` has — a `SharedPreferences` read on `Context`
+creation trips it before an app's own code has even run — and
+`db-on-main-thread` already covers the read that matters categorically, with
+the SQL and the stack. Everything else reasonable to enable by default is on:
+disk writes and network on the main thread, leaked SQLite cursors and
+closeables, unbuffered I/O, untagged sockets, file-URI exposure, cleartext
+network, and (API 31+) unsafe intent launches. `penaltyDeath` is never
+installed, on either policy, ever — that is the one penalty this feature will
+not add to your app's behaviour. Non-SDK API detection is intentionally not
+part of this at all.
+
+**A violation only becomes a finding when the app's own code is in it.** A
+violation whose stack contains no frame from the app's own package — the
+platform tripping its own policy during startup, most often — is not counted
+and not reported. This is the mechanism, not a device-specific denylist: it
+is what makes an ordinary app launch produce no false findings, by
+construction, on every device rather than on the ones someone happened to
+test against.
+
+`findings` maps a violation's category to a severity the same way every other
+categorical finding here is ranked: main-thread disk writes and network calls
+are `error`, leaked closeables and SQLite cursors are `warning`, everything
+else is `note`. A call site that keeps violating — a scrolling list doing a
+disk write per row, say — is reported once immediately and then again only
+every 50th repeat, each update carrying the true running count: a flood at
+one call site becomes a handful of events with an accurate total, never one
+event per violation.
+
+Needs API 28 (`penaltyListener`, which hands the violation over as an object
+instead of a log line). Below that, `strictMode.set(true)` installs nothing
+at all — no log-scraping fallback — and the `setup` tool says why.
+
 ## Logs
 
 The app reads its own logcat and streams it over the same socket as everything
