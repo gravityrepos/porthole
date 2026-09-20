@@ -1600,10 +1600,11 @@ aliased to short custom properties. The canvas reads those back with
 
 ## The landing page
 
-`site/index.html` is the whole site: one file, no build step, no JavaScript. It
-is deliberately script-free — every part of it is markup, so it renders the same
-from a `file://` path, a sanitising preview or a strict CSP as it does from a
-host. The `vercel.json` at the repo root encodes that as a rule rather than a
+`site/index.html` is the whole site: one file, no build step, and no
+JavaScript of its own. Every part of the page is markup, so it renders the
+same from a `file://` path, a sanitising preview or a strict CSP as it does
+from a host; the one script it loads is Vercel's same-origin analytics beacon,
+described next, and the page is complete without it. The `vercel.json` at the repo root encodes that as a rule rather than a
 habit: `default-src 'none'` blocks everything by default, and the one opening
 is `script-src 'self'` — narrow enough to cover only what this origin already
 serves (Vercel's own analytics script, `/_vercel/insights/script.js`) and to
