@@ -967,6 +967,45 @@
         text-wrap: pretty;
       }
 
+      /* status — GRA-131: what is true now, not what is coming. Device
+         coverage is not a metric this project tracks, so the block is
+         deliberately narrow — the current version, where to get it, and a
+         link to the README for what is and is not supported. A grid rather
+         than a single line so a later cell (if one is ever warranted) has
+         somewhere to go without a redesign. */
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+        gap: 10px 28px;
+      }
+      .status-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .status-label {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--teal);
+      }
+      .status-cell p {
+        margin: 0;
+        font-size: 12.5px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+      .status-cell code {
+        font-family: var(--mono);
+        font-size: 0.93em;
+        color: #cfd8e5;
+      }
+      .status-more {
+        margin: 12px 0 0;
+        font-size: 11.5px;
+        color: var(--dim);
+      }
 
       /* footer */
       .foot {
@@ -1404,9 +1443,16 @@ the main thread [observed].
     </section>
 
     <section id="faq">
-      <div class="wrap">
+      <!-- GRA-131: the FAQ used to carry five items plus a "next up" line;
+           trimmed to the three real first-minute objections, the other two
+           moved to links. That alone would not fit the #faq height budget
+           (under 500px at 1280x800, under 900px at 375px) against the
+           section's default 66px top/bottom wrap padding, so this one
+           section takes a tighter pad — same pattern #install already uses
+           for the same reason. -->
+      <div class="wrap" style="padding-top: 28px; padding-bottom: 28px">
         <div style="max-width: 68ch">
-          <div class="heading" style="margin-bottom: 20px">
+          <div class="heading" style="margin-bottom: 14px">
             <span class="eyebrow">FAQ</span>
             <h2>The usual objections</h2>
           </div>
@@ -1434,27 +1480,46 @@ the main thread [observed].
                 loopback only.
               </dd>
             </div>
-            <div class="faq-item">
-              <dt>Views, or only Compose?</dt>
-              <dd>
-                Frames, main thread, navigation, http, db, work, memory, device and logcat work in
-                any app. Recompositions and state writes are Compose-specific.
-              </dd>
-            </div>
-            <div class="faq-item">
-              <dt>Will it leak a token into a trace?</dt>
-              <dd>
-                Query-string values and sensitive headers are replaced before anything leaves the
-                process, and bodies are not captured unless you ask. The sample sends three secrets
-                containing do-not-log so you can grep a capture and check.
-              </dd>
-            </div>
           </dl>
-          <p class="lede" style="margin-top: 28px; font-size: 14px">
-            What is next, and what is not yet verified, lives with the code:
-            <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+          <p class="lede" style="margin-top: 16px; font-size: 14px">
+            Views, or only Compose? See
+            <a href="https://github.com/gravityrepos/porthole/blob/main/README.md#compatibility"
+              >Compatibility</a
+            >. Will it leak a token into a trace? See
+            <a
+              href="https://github.com/gravityrepos/porthole/blob/main/README.md#payloads-what-gets-captured-and-what-does-not"
+              >Payloads</a
+            >
+            and
+            <a href="https://github.com/gravityrepos/porthole/blob/main/SECURITY.md">SECURITY.md</a>.
           </p>
         </div>
+      </div>
+    </section>
+
+    <section id="status" style="background: var(--ground-2)">
+      <div class="wrap" style="padding: 22px 24px">
+        <div class="status-grid">
+          <div class="status-cell">
+            <span class="status-label">now</span>
+            <p>
+              v0.2.2 ·
+              <a href="https://central.sonatype.com/artifact/live.gravitylabs.porthole/runtime"
+                >Maven Central</a
+              >
+              ·
+              <a href="https://www.npmjs.com/package/@gravitylabsllc/porthole">npm</a>
+              ·
+              <a href="https://plugins.gradle.org/plugin/live.gravitylabs.porthole"
+                >Gradle Plugin Portal</a
+              >
+            </p>
+          </div>
+        </div>
+        <p class="status-more">
+          What is and is not supported lives with the code:
+          <a href="https://github.com/gravityrepos/porthole#status">the status section of the README</a>.
+        </p>
       </div>
     </section>
     </main>
@@ -1470,7 +1535,12 @@ the main thread [observed].
             PORTHOLE
           </div>
           <p>Open source, Apache-2.0.</p>
-          <span class="foot-meta">v0.2.0 · Android · Jetpack Compose</span>
+          <!-- No version here (GRA-131): this string was hand-typed and had
+               drifted two releases stale with nothing to catch it, since the
+               page has no build step. The one hand-maintained version on the
+               page now lives in #status, next to the registries that explain
+               what it means; this line just says what the thing is. -->
+          <span class="foot-meta">Android · Jetpack Compose</span>
         </div>
       </div>
       <div style="border-top: 1px solid var(--line-soft)">

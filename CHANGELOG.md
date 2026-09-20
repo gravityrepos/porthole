@@ -41,6 +41,16 @@ PR that makes the change, not after the fact.
   `/api/:path*` keeps its own, looser policy; the two `source` patterns are
   mutually exclusive by construction, so no single path can ever collect
   both `Content-Security-Policy` headers (GRA-129).
+- The landing page's FAQ is trimmed to the three real first-minute
+  objections (release APK, runtime cost, root); the other two now link to
+  README's Compatibility and Payloads sections and to SECURITY.md instead.
+  A status block above the footer now states the current version and where
+  to get it (Maven Central, npm, Gradle Plugin Portal), with a link to the
+  README for what is and is not supported — device coverage is not a metric
+  this project tracks, so the block does not enumerate it. The footer's
+  hand-typed version string, which had drifted two releases stale, is gone;
+  the one hand-maintained version on the page now lives in the status block,
+  next to the registries that explain what it means (GRA-131).
 
 ### Fixed
 
