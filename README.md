@@ -1326,6 +1326,68 @@ event per violation.
 Needs API 28 (`penaltyListener`, which hands the violation over as an object
 instead of a log line). Below that, `strictMode.set(true)` installs nothing
 at all — no log-scraping fallback — and the `setup` tool says why.
+## Startup
+
+Every other collector attaches after the process is already up, so none of
+them can say why the app took two seconds to open. `StartupCollector` covers
+the part that happens before any of them could: the fork
+(`Process.getStartUptimeMillis()`), `Application.onCreate`'s entry and exit,
+the first Activity's `onCreate`/`onStart`/`onResume`, and the first frame
+drawn (from `frames`' own `firstDraw` flag) — all as one `startup` event,
+classified `cold`, `warm` or `hot` the way Android itself defines those: cold
+built the process from scratch and ran `Application.onCreate`; warm reused an
+existing process for a fresh Activity with no fresh `onCreate`; hot just
+brought an existing Activity back.
+
+That is not only the first launch. A process only forks — and runs
+`Application.onCreate` — once, but the app can be backgrounded and reopened
+many times while it stays alive, and each of those is its own `startup`
+event: the collector watches the same started-activity count `DeviceCollector`
+already does for its own foreground/background events, and a 0-to-1
+transition after the cold event has been emitted is a new launch. Whether
+that transition's Activity got a fresh `onCreate` (warm) or was simply
+brought back with none (hot) is read straight off the same lifecycle
+callbacks; its own end is the next frame drawn, from a second, on-demand hook
+next to `frames`' `firstDraw` one, since a warm or hot launch has no
+first-draw frame of its own to key off — that flag is spent once, by the
+process's very first window.
+
+`findings` turns a slow one into a `startup-slow` entry naming the phase with
+the widest gap, and — the cheapest and most valuable part of this — cross-references
+any `db-on-main-thread` or `main-thread-stall` finding that fell inside the
+startup window, which is where the fix usually is. The threshold is
+classification-specific and not invented for this project: 5s cold, 2s warm,
+1.5s hot, the same lines [Android vitals calls "excessive"](https://developer.android.com/topic/performance/vitals/launch-time).
+
+**No app code is required — reportFullyDrawn included.** androidx.activity
+1.7 gave `ComponentActivity` a `fullyDrawnReporter`, and `ComponentActivity`'s
+own `reportFullyDrawn()` override routes through it, so calling the standard
+`Activity.reportFullyDrawn()` is already observable for free in any Compose
+app, or any app whose Activity extends `ComponentActivity` at all — which
+`setContent` requires, so that is every Compose app there is. `Porthole.reportFullyDrawn()`
+still exists as the documented fallback for the one shape this cannot reach:
+an Activity that is not a `ComponentActivity`, where Android otherwise gives
+nothing outside the app a way to observe a plain `Activity.reportFullyDrawn()`
+call at all — no listener for it, and the system's own logcat line naming it
+is written by `system_server` under a different uid than the app's own,
+which `logs`' own restriction (below) already rules out reading. Skip both
+and `findings` says once, as a note, that it was never observed — an honest
+"we don't know," not a claim that the app is slow to draw.
+
+**The number is for finding the phase, not for quoting.** A debug build's
+startup is not a user's: no R8, JIT compilation instead of a warm AOT
+profile, and dexopt in a state release never ships in. `findings`' own tool
+description says this plainly, because the agent reading it is who ends up
+quoting the number.
+
+Needs API 24 for `Process.getStartUptimeMillis()` — this module's `minSdk` is
+26, so that is never actually a gate in practice. A process only ever runs
+`Application.onCreate` once, which is what keeps the classifier from ever
+calling a second launch cold: a warm or hot `startup` event structurally
+cannot carry the `onCreate` phase, since nothing after the first launch ever
+sets it. `StartupTest` proves the arithmetic and classification with
+hand-built timestamps and drives the live collector through a real
+cold-then-hot-then-warm sequence over Robolectric.
 
 ## Logs
 

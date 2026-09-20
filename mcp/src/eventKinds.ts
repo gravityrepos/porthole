@@ -42,6 +42,7 @@ export const EVENT_KINDS = [
   "gc",
   "memory",
   "strict_violation",
+  "startup",
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -109,6 +110,17 @@ const KIND_GROUPS: readonly KindGroup[] = [
       "calls), `warning` (leaked closeables/cursors), or `note` (everything else) — only ever for a " +
       "violation whose stack names a frame in the app's own package, so a platform-only violation is " +
       "not a finding at all",
+  },
+  {
+    // GRA-60: one per launch — cold (process fork + Application.onCreate)
+    // the first time, warm or hot (no fork, no onCreate) for every
+    // relaunch after — see StartupCollector.kt for what each field means.
+    kinds: ["startup"],
+    narrated:
+      "raw here; `findings` turns a slow one into a `startup-slow` entry naming the dominant phase and " +
+      "cross-referencing any `db-on-main-thread`/`main-thread-stall` finding that fell inside the " +
+      "startup window, and a `startup-not-fully-drawn` note when `Activity.reportFullyDrawn()` " +
+      "(caught automatically in a Compose/ComponentActivity app) was never observed",
   },
 ];
 

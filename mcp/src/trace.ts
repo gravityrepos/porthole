@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DeviceEvent } from "./device.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
+import { startupFindingsOf } from "./startup.js";
 
 /**
  * Turning a recorded run into something worth reading.
@@ -779,6 +780,13 @@ export function findingsOf(
       ...(where ? { where } : {}),
     });
   }
+
+  // -------------------------------------------------------------------
+  // GRA-60: startup — see startup.ts#startupFindingsOf. Inserted last so
+  // it can cross-reference every finding already collected above
+  // (db-on-main-thread, main-thread-stall) against the startup window.
+  // -------------------------------------------------------------------
+  findings.push(...startupFindingsOf(events, findings));
 
   const order: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
   return findings.sort((a, b) => order[a.severity] - order[b.severity]);

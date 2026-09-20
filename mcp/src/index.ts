@@ -1380,7 +1380,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "were in the window whether or not they crossed a threshold worth a finding — an exit " +
         "already covered by a finding above still appears here too, because a finding is a " +
         "judgement and this is a count. Absent means genuinely nothing to add, not that this tool " +
-        "declined to look.",
+        "declined to look.\n\n" +
+        "`startup-slow`/`startup-not-fully-drawn` (present only when a `startup` event exists in " +
+        "the window) read a debug build's own launch, not a user's: no R8, JIT compilation rather " +
+        "than a warm AOT profile, and dexopt in a state release never ships in. Use the total to " +
+        "find which phase was slow, not to quote as what a user's release build would see.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },

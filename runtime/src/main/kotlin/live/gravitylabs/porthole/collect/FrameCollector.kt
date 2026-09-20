@@ -52,6 +52,31 @@ internal class FrameCollector(private val ring: EventRing) {
     @Volatile private var handler: Handler? = null
     @Volatile private var frameIntervalNanos: Long = DEFAULT_INTERVAL_NANOS
 
+    /**
+     * [StartupCollector]'s hook onto "the first frame drawn" — fired at most
+     * once, the first time a frame with [FrameMetrics.FIRST_DRAW_FRAME] is
+     * observed, then cleared. A plain nullable field rather than a listener
+     * list: nothing else has ever needed this moment, and a second listener
+     * can be added the day a second caller does.
+     */
+    @Volatile var onFirstDraw: ((atMs: Long) -> Unit)? = null
+
+    /**
+     * [StartupCollector]'s hook onto "whatever frame comes next" — armed on
+     * demand via [armNextFrame] rather than fired automatically the way
+     * [onFirstDraw] is. A warm or hot launch has no first-draw frame of its
+     * own: [android.view.FrameMetrics.FIRST_DRAW_FRAME] is a once-per-process
+     * flag on the *window*, already spent by the process's first launch, so
+     * this fires for the very next frame observed after arming, first-draw
+     * or not — one-shot, consumed and cleared the same way [onFirstDraw] is.
+     */
+    @Volatile private var nextFrameCallback: ((atMs: Long) -> Unit)? = null
+
+    /** Replaces any previously-armed, not-yet-fired callback — there is only ever one launch pending at a time. */
+    fun armNextFrame(callback: (atMs: Long) -> Unit) {
+        nextFrameCallback = callback
+    }
+
     // Kept so stop() can hand the same object back to the Application. An
     // anonymous object registered inline is registered forever: nothing holds
     // it, so nothing can unregister it, and every install/shutdown cycle left
@@ -83,6 +108,12 @@ internal class FrameCollector(private val ring: EventRing) {
         thread?.quitSafely()
         thread = null
         handler = null
+        // Not a registered framework callback, so nothing outside this class
+        // would ever unregister it, but a stale closure over the previous
+        // session's StartupCollector is exactly the kind of thing GRA-86 was
+        // about — drop it so the next install() starts from a clean slate.
+        onFirstDraw = null
+        nextFrameCallback = null
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
@@ -119,6 +150,30 @@ internal class FrameCollector(private val ring: EventRing) {
         total.incrementAndGet()
         if (droppedSoFar > 0) dropped.addAndGet(droppedSoFar.toLong())
 
+        val isFirstDraw = metrics.getMetric(FrameMetrics.FIRST_DRAW_FRAME) == 1L
+        val vsyncAt = vsyncUptimeMs(metrics)
+
+        // GRA-60: both startup hooks fire here, for every frame that reaches
+        // this point — janky or not — rather than below, where the rest of
+        // this listener already returns early for a frame that stayed inside
+        // its deadline. A warm or hot launch's next frame routinely does: the
+        // window already exists, there is no fresh inflate to pay for, and a
+        // hook that only ever saw janky frames would simply never hear about
+        // it. [onFirstDraw] happens to have worked before this moved, since a
+        // process's very first frame is nearly always janky — but "nearly
+        // always" is not a contract, and [nextFrameCallback] has no such
+        // luck at all.
+        if (isFirstDraw) {
+            onFirstDraw?.let { callback ->
+                onFirstDraw = null
+                callback(vsyncAt)
+            }
+        }
+        nextFrameCallback?.let { callback ->
+            nextFrameCallback = null
+            callback(vsyncAt)
+        }
+
         // Two different questions, and they need two different numbers. Whether
         // a frame was late is judged against its own deadline, which the system
         // may relax. How much of the display it cost is always measured in
@@ -131,14 +186,14 @@ internal class FrameCollector(private val ring: EventRing) {
         janky.incrementAndGet()
 
         val frame = JankyFrame(
-            at = vsyncUptimeMs(metrics),
+            at = vsyncAt,
             totalMs = totalNanos.toMillis(),
             missedFrames = missed,
             // Which phase dominated is the whole point: "41ms, 30 of it in
             // layout" and "41ms, 30 of it waiting on the GPU" are different bugs.
             worstPhase = worstPhase(metrics),
             phases = phaseBreakdown(metrics),
-            firstDraw = metrics.getMetric(FrameMetrics.FIRST_DRAW_FRAME) == 1L,
+            firstDraw = isFirstDraw,
         )
 
         synchronized(lock) {

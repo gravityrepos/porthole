@@ -81,6 +81,20 @@ PR that makes the change, not after the fact.
   post-processing step of the `:runtime:apiDocs` Gradle task rather than
   hand-edited, since `apiDocs` is a `Sync` that overwrites the file from
   Dokka's output on every run (GRA-129).
+- A new `StartupCollector` measures where the time went before the first
+  frame: the process fork (`Process.getStartUptimeMillis()`), `Application.onCreate`'s
+  entry and exit, the first Activity's `onCreate`/`onStart`/`onResume`, and
+  the first frame drawn, all in one `startup` event classified cold, warm or
+  hot — and not only the first launch: every relaunch while the process stays
+  alive gets its own warm or hot `startup` event too, observed live off the
+  same activity lifecycle callbacks. `findings` turns a slow one into a
+  `startup-slow` entry naming the dominant phase and cross-referencing any
+  `db-on-main-thread` or `main-thread-stall` finding that fell inside the
+  startup window, and adds a `startup-not-fully-drawn` note when the app
+  never reports itself fully drawn — caught automatically via
+  `ComponentActivity.fullyDrawnReporter` in a Compose (or any ComponentActivity)
+  app, with the new `Porthole.reportFullyDrawn()` as the documented fallback
+  for an Activity that is not one (GRA-60).
 
 ### Changed
 

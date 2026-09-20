@@ -209,6 +209,8 @@ internal object EventKinds {
      * not every violation the platform noticed. StrictModeCollector.
      */
     const val STRICT_VIOLATION = "strict_violation"
+    /** One completed app launch, phases from process fork to first frame. StartupCollector. */
+    const val STARTUP = "startup"
 }
 
 /**
