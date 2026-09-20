@@ -21,10 +21,24 @@ PR that makes the change, not after the fact.
   reachable only through the timeline UI's `GET /api/setup` or the raw
   socket, so GRA-59's "the setup report says whether StrictMode is
   installed" was true on the wire and invisible to an agent. `setup` now
-  exposes the identical data on the MCP surface. `porthole_status` also
-  now names `setup` in its own summary whenever an integration looks
-  present but unwired, so the first call an agent makes already points at
-  it (GRA-228).
+  exposes the identical data, plus, for each integration that is present
+  but unwired, the exact line to add and which lanes and MCP tools go dark
+  without it — ranked so the gap that leaves the most dark comes first
+  (unwiring both OkHttp and Ktor costs the `http` lane and both `inflight`
+  and `blocking`, which outranks a gap that costs one tool). A
+  fully-instrumented project gets an explicit "everything present is
+  wired" instead of an empty list indistinguishable from "nothing to
+  check." `porthole_status` now names `setup` in its own summary whenever
+  an integration looks present but unwired, so the first call an agent
+  makes already points at it (GRA-228).
+- `setup`'s ranking and snippets, not the source project: GRA-65's EM cut
+  the source scan this ticket originally scoped — finding the
+  `OkHttpClient.Builder` to point an agent at — since a real app usually
+  has several and guessing which one is wrong more often than right.
+  What shipped instead is what the runtime can say with certainty: the
+  exact one-liner README.md already documents for OkHttp, Ktor, Room,
+  SQLDelight and Navigation, as a constant kept in sync with README.md by
+  test, never a snippet reconstructed from a grep of the project (GRA-65).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

@@ -54,22 +54,7 @@ import { InvalidScenarioError, buildSavedTrace, coverageNote, defaultOutPath, de
 import { Watermark, buildBanner, classificationSummary, classify } from "./watermark.js";
 import { whereForFrame, whereForName, type Where } from "./sources.js";
 import { captureScreenshot } from "./screenshot.js";
-
-/**
- * GRA-228: mirrors `protocol/Protocol.kt`'s `SetupEntry`, verbatim off the
- * wire — which integration is instrumented, which is only on the
- * classpath, and (GRA-59) the `strictmode`/`socket` entries alongside
- * them. Declared locally rather than in its own module for now: this
- * ticket only exposes the report, it does not rank it. GRA-65 gives the
- * ranking and per-integration snippet logic its own module (`setup.ts`)
- * and this type moves there with it.
- */
-interface SetupEntry {
-  name: string;
-  onClasspath: boolean;
-  instrumented: boolean;
-  hint?: string | null;
-}
+import { buildSetupReport, type SetupEntry } from "./setup.js";
 
 /** Read, not retyped: a hardcoded version here drifts from the package. */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -1100,11 +1085,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       if (pending === null && !device.packageMismatch && !device.protocolMismatch) {
         try {
           const setupEntries = await device.request<SetupEntry[]>("setup", {});
-          const unwired = setupEntries.filter((entry) => entry.onClasspath && !entry.instrumented);
-          if (unwired.length > 0) {
+          const { gaps } = buildSetupReport(setupEntries);
+          if (gaps.length > 0) {
             setupNote =
-              ` ${unwired.length} integration${unwired.length > 1 ? "s" : ""} present but unwired ` +
-              `(${unwired.map((entry) => entry.name).join(", ")}) — call \`setup\` for details.`;
+              ` ${gaps.length} integration${gaps.length > 1 ? "s" : ""} present but unwired ` +
+              `(${gaps.map((gap) => gap.displayName).join(", ")}) — call \`setup\` for the exact line to add.`;
           }
         } catch {
           // Connected but `setup` itself failed: say nothing rather than a
@@ -1406,26 +1391,23 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "timeline UI's setup panel shows, including the `socket` entry (did the loopback socket " +
         "bind) and the `strictmode` entry (GRA-59: is StrictMode installed, and note that Porthole's " +
         "policy REPLACES the app's own rather than chaining it).\n\n" +
-        "An empty lane looks the same whether the app never made a call or whether nobody wired a " +
-        "porthole to the client that would have — this is how to tell which. `porthole_status` " +
-        "already names it whenever an integration looks present but unwired, so you rarely have to " +
-        "remember to reach for it yourself.",
+        "For each integration that is present but unwired, this also gives the exact line to add " +
+        "and names which lanes and tools go dark without it — ranked so the gap that leaves the " +
+        "most dark comes first. A fully-instrumented project gets an explicit 'everything present " +
+        "is wired' rather than an empty list that looks the same as 'nothing to check'.\n\n" +
+        "Instrumenting a client cannot be discovered by scanning the project for it — being handed " +
+        "the builder before it is built is the only way to attach to one, and a real app usually has " +
+        "several. This names which library is unwired, never where in the project to change it.\n\n" +
+        "Call this once, early: `porthole_status` already names it whenever an integration looks " +
+        "present but unwired, so you rarely have to remember to reach for it yourself.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async (): Promise<ToolResult> => {
       try {
         const entries = await device.request<SetupEntry[]>("setup", {});
-        const unwired = entries.filter((entry) => entry.onClasspath && !entry.instrumented);
-        const anyPresent = entries.some((entry) => entry.onClasspath);
-        const summary =
-          unwired.length > 0
-            ? `${unwired.length} integration${unwired.length > 1 ? "s" : ""} present but unwired: ` +
-              `${unwired.map((entry) => entry.name).join(", ")}.`
-            : anyPresent
-              ? "Everything present is wired."
-              : "No instrumentable integration is on the classpath yet.";
-        return ok(summary, { entries });
+        const report = buildSetupReport(entries);
+        return ok(report.summary, report);
       } catch (error) {
         return fail(error);
       }
