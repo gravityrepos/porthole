@@ -7,7 +7,15 @@ import { z } from "zod";
 import { DeviceClient, isAttached, isHandshaking, type DeviceEvent } from "./device.js";
 import { TimelineServer } from "./timeline.js";
 import { readFileSync } from "node:fs";
-import { resolveProjectRoot, resolveSdkDir, restartAppAsync, runAdb, runAdbAsync } from "./adb.js";
+import { launchAppAsync, resolveProjectRoot, resolveSdkDir, restartAppAsync, runAdb, runAdbAsync } from "./adb.js";
+import {
+  checkInstalledApp,
+  describeDevices,
+  diagnoseAndReconnect,
+  ensureForward,
+  listDevices,
+  resolveSerial,
+} from "./devices.js";
 import { describe as describeMoment, fromBootMs, momentOf, toBoot } from "./moment.js";
 import {
   CPU_PROBE,
@@ -235,6 +243,15 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
     options.device ??
     new DeviceClient(HOST, PORT, sessionsRootPath(resolveProjectRoot().directory), APPLICATION_ID);
   const timeline = options.timeline ?? new TimelineServer(device, UI_PORT);
+  /**
+   * GRA-62: `porthole_status`'s one read-only exception (re-establishing the
+   * adb forward) only makes sense against the real device this function
+   * built for itself — a caller that injected its own `device` (every test
+   * in this suite) is not necessarily backed by a real, adb-managed device
+   * at all, and must see no behaviour change. See `porthole_status`'s
+   * handler below for where this is actually consulted.
+   */
+  const ownsDeviceConnection = options.device === undefined;
   const adbEnv = options.adbEnv;
   const adbBinary = options.adbBinary;
   // GRA-55: one watermark per process (see watermark.ts's module doc comment
@@ -954,7 +971,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "This tool answers 'is it plugged in', not 'is anything wrong'. For that, call `findings`.\n\n" +
         "Also carries `exits`: the most recent process deaths Android recorded for this app, so " +
         "'why did it just die' is answerable on the first call after a crash, not a tool an agent " +
-        "has to know to reach for.",
+        "has to know to reach for.\n\n" +
+        "GRA-62: when not connected, this tries to fix the one thing it safely can before answering — " +
+        "listing attached devices and (re-)establishing the `adb forward` — so a dropped forward is " +
+        "often invisible: call this again and it is just connected. It never installs, launches or " +
+        "restarts anything; when the fix needs that, the summary names `porthole_connect` instead.",
       inputSchema: {
         // GRA-188: `exits.recent` prints both an epoch-milliseconds
         // `timestamp` and an ISO-8601 `at` for the same instant (device
@@ -971,10 +992,34 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
               "are accepted and converted. Capped at 256 KB by the runtime, with a note in the text " +
               "if it was truncated. Omit this to just see the `exits` summary.",
           ),
+        // GRA-62: only consulted while reconnecting (see diagnoseAndReconnect
+        // above) — an already-connected call ignores this entirely, same as
+        // every other windowed tool ignores parameters it has no use for.
+        serial: z
+          .string()
+          .optional()
+          .describe(
+            "Device serial to use while reconnecting, when more than one is attached and " +
+              "PORTHOLE_SERIAL is not set. `adb devices` lists them; this tool does too, in its " +
+              "payload, when it cannot pick one on its own.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ exitTrace }): Promise<ToolResult> => {
+    async ({ exitTrace, serial }): Promise<ToolResult> => {
+      // GRA-62: idempotent and invisible to the app under test — the one
+      // exception the EM's ruling on this ticket carves out of
+      // `readOnlyHint: true`. Gated on `ownsDeviceConnection` (see its own
+      // comment above): only the real device this server manages itself is
+      // ever worth running `adb` against here.
+      const reconnect = ownsDeviceConnection
+        ? await diagnoseAndReconnect(device, PORT, {
+            serial,
+            envSerial: process.env.PORTHOLE_SERIAL,
+            adbOptions: { env: adbEnv, binary: adbBinary },
+          })
+        : null;
+
       // GRA-119 AC5: name which SDK and which project root this run resolved
       // to, and where each came from, so "adb resolved to the wrong SDK" is
       // something this tool can actually diagnose instead of something an
@@ -988,7 +1033,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // handshaking stories the same way `findings` does (AC3), and returns
       // null only when state === "connected", which now guarantees `hello`
       // is set, so the non-null assertion below is the invariant, not a hope.
-      const pending = device.pendingMessage();
+      //
+      // GRA-62: when `reconnect` ran and still could not attach, its own
+      // message replaces the generic wall-of-text — it names the specific
+      // thing (no device, several with no serial, forward failed) instead
+      // of a five-step checklist that starts "is the app running" when the
+      // actual answer is "nothing is even plugged in". When `reconnect`
+      // succeeded, `device.pendingMessage()` already reflects that (it is
+      // either null or the ordinary handshake-pending message), so it is
+      // left untouched.
+      const pendingFromDevice = device.pendingMessage();
+      const pending =
+        reconnect && reconnect.attempted && !reconnect.reconnected && pendingFromDevice !== null
+          ? reconnect.message
+          : pendingFromDevice;
       const bufferedEvents = timeline.buffer().length;
       // GRA-163: same structured field findings and what_was_happening carry
       // — null once connected, otherwise the last confirmed process and when
@@ -1065,6 +1123,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         exitedProcess,
         exits,
         exitTrace: exitTraceResult,
+        // GRA-62: null whenever `reconnect` never ran (already attached, or
+        // `ownsDeviceConnection` is false) — present, with `devices` and
+        // `serial`, exactly when this call actually went looking for one.
+        deviceDiagnosis: reconnect,
       };
       // GRA-96/GRA-197: a mismatch takes priority over the normal "here is
       // what's connected" sentence — hello did land and the socket is fine,
@@ -1076,7 +1138,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // turns AC1's "specific, actionable message... not a generic failure"
       // into the actual summary text an agent reads, rather than a field it
       // has to know to check.
+      // GRA-62: said once, ahead of everything else, only on the call that
+      // actually fixed it — AC1's "a single porthole_status call ... reports
+      // connected" means this sentence and the "Connected to ..." one below
+      // land in the same response, not that this tool got quieter about how.
+      const reconnectNotice =
+        reconnect && reconnect.attempted && reconnect.reconnected
+          ? `Re-established the adb forward to ${reconnect.serial}. `
+          : "";
       const summary =
+        reconnectNotice +
         notice +
         deathNotice +
         (pending ??
@@ -1085,6 +1156,188 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           `Connected to ${device.hello!.packageName} on ${device.hello!.device} ` +
             `(API ${device.hello!.sdkInt}). Collectors: ${device.hello!.collectors.join(", ")}.`);
       return ok(summary, payload);
+    },
+  );
+
+  server.registerTool(
+    "porthole_connect",
+    {
+      title: "Connect the porthole to a device",
+      description:
+        "Does the parts of getting connected that `porthole_status` cannot safely do on its own: " +
+        "checking whether the debug build is installed and which version, and launching or restarting " +
+        "the app. Call this when `porthole_status` names it, or to deliberately force a fresh session " +
+        "(an empty buffer) by restarting the app.\n\n" +
+        "By default this only diagnoses — which device, whether the app is installed, what version, " +
+        "whether it is debuggable, whether it is running — and touches nothing. Pass `launch: true` to " +
+        "start the app if it is installed but not running, or `restart: true` to force-stop and " +
+        "relaunch it even if it is already running, the same force-stop-then-launch the timeline UI's " +
+        "own restart button and `capture_system_trace`'s `restartApp` option already do. A restart " +
+        "produces a new session: the next `porthole_status` reports a new process, and the event " +
+        "buffer starts over.\n\n" +
+        "Unlike `porthole_status`, this can act on the app under test, so it is not called on the " +
+        "speculative first-check-in path — only when something is actually known to need fixing.",
+      inputSchema: {
+        serial: z
+          .string()
+          .optional()
+          .describe(
+            "Device serial, when more than one is attached and PORTHOLE_SERIAL is not set. " +
+              "`adb devices` lists them; so does this tool's own payload when it cannot pick one.",
+          ),
+        packageName: z
+          .string()
+          .optional()
+          .describe(
+            "The app to check/launch/restart. Defaults to PORTHOLE_APPLICATION_ID, or the package " +
+              "this porthole last connected to or saw exit, if either is known.",
+          ),
+        launch: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Launch the app if it is installed but not currently running. Ignored when `restart` is true."),
+        restart: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Force-stop and relaunch the app even if it is already running, for a fresh session and " +
+              "an empty buffer. Takes priority over `launch`.",
+          ),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ serial, packageName, launch, restart }): Promise<ToolResult> => {
+      const adbOptions: AdbCallOptions = { env: adbEnv, binary: adbBinary };
+
+      const listed = await listDevices(adbOptions);
+      if (!listed.ok) return fail(`Could not list attached devices: ${listed.output}`);
+      if (listed.devices.length === 0) {
+        return ok("No Android device or emulator is attached. Plug one in, or start an emulator.", {
+          devices: [],
+        });
+      }
+
+      const resolution = resolveSerial(listed.devices, serial, process.env.PORTHOLE_SERIAL);
+      if (resolution.kind === "none-ready") {
+        return ok(
+          `${listed.devices.length} device(s) attached, but none are ready: ${describeDevices(listed.devices)}. ` +
+            "Check the device screen for a USB-debugging authorization prompt.",
+          { devices: listed.devices },
+        );
+      }
+      if (resolution.kind === "ambiguous") {
+        return ok(
+          `${resolution.devices.length} devices are attached and no serial is configured: ` +
+            `${describeDevices(resolution.devices)}. Pass \`serial\` to pick one.`,
+          { devices: resolution.devices, ambiguous: true },
+        );
+      }
+      const chosenSerial = resolution.serial;
+
+      const forward = await ensureForward(PORT, chosenSerial, adbOptions);
+      if (!forward.ok) {
+        return ok(`Found ${chosenSerial}, but could not forward the port: ${forward.output}`, {
+          serial: chosenSerial,
+          forward,
+        });
+      }
+
+      // Defaulting order: an explicit `packageName` wins, then the app this
+      // server was actually configured for (GRA-197), then whichever app it
+      // last had a confirmed hello from — connected now, or the last one
+      // seen before it exited — since that is almost always still the app
+      // someone is asking about.
+      const targetPackage =
+        packageName || APPLICATION_ID || device.hello?.packageName || device.lastExited?.hello.packageName;
+      if (!targetPackage) {
+        return ok(
+          `Forwarded port ${PORT} to ${chosenSerial}. No package name is known to check — pass ` +
+            "`packageName`, or set PORTHOLE_APPLICATION_ID.",
+          { serial: chosenSerial, forward, devices: listed.devices },
+        );
+      }
+
+      const checked = await checkInstalledApp(targetPackage, chosenSerial, adbOptions);
+      if (!checked.ok) {
+        return ok(`Forwarded the port, but could not check ${targetPackage}: ${checked.output}`, {
+          serial: chosenSerial,
+          forward,
+          packageName: targetPackage,
+        });
+      }
+      const info = checked.info;
+
+      if (!info.installed) {
+        return ok(
+          `${targetPackage} is not installed on ${chosenSerial}. Install the debug build: ` +
+            "./gradlew installDebug",
+          { serial: chosenSerial, forward, packageName: targetPackage, ...info },
+        );
+      }
+      // A release build has no Porthole runtime in it at all (the Gradle
+      // plugin only wires it into the debug variant) — saying so here is
+      // the one diagnosis no amount of retrying `porthole_status` could
+      // ever reach on its own.
+      if (info.debuggable === false) {
+        return ok(
+          `${targetPackage} (${info.versionName ?? "unknown version"}) is installed on ${chosenSerial}, but it ` +
+            "is a release build — the Porthole runtime will not be in it. Install the debug build: " +
+            "./gradlew installDebug",
+          { serial: chosenSerial, forward, packageName: targetPackage, ...info },
+        );
+      }
+
+      if (restart) {
+        const result = await restartAppAsync(targetPackage, { ...adbOptions, serial: chosenSerial });
+        return result.ok
+          ? ok(
+              `Restarted ${targetPackage} on ${chosenSerial}. Expect a new session on the next ` +
+                "porthole_status call.",
+              { serial: chosenSerial, forward, packageName: targetPackage, ...info, restarted: true },
+            )
+          : ok(`Could not restart ${targetPackage}: ${result.output}`, {
+              serial: chosenSerial,
+              forward,
+              packageName: targetPackage,
+              ...info,
+              restarted: false,
+            });
+      }
+
+      if (!info.running) {
+        if (launch) {
+          const result = await launchAppAsync(targetPackage, { ...adbOptions, serial: chosenSerial });
+          return result.ok
+            ? ok(`Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ${chosenSerial}.`, {
+                serial: chosenSerial,
+                forward,
+                packageName: targetPackage,
+                ...info,
+                launched: true,
+              })
+            : ok(`Could not launch ${targetPackage}: ${result.output}`, {
+                serial: chosenSerial,
+                forward,
+                packageName: targetPackage,
+                ...info,
+                launched: false,
+              });
+        }
+        return ok(
+          `${targetPackage} (${info.versionName ?? "unknown version"}) is installed on ${chosenSerial} but not ` +
+            "running. Call this again with `launch: true` to start it.",
+          { serial: chosenSerial, forward, packageName: targetPackage, ...info },
+        );
+      }
+
+      return ok(
+        `${targetPackage} (${info.versionName ?? "unknown version"}) is installed and running on ${chosenSerial}. ` +
+          "If porthole_status still does not report it connected, confirm the Porthole runtime is on " +
+          "the app's debug classpath.",
+        { serial: chosenSerial, forward, packageName: targetPackage, ...info },
+      );
     },
   );
 

@@ -15,6 +15,17 @@ PR that makes the change, not after the fact.
 
 ### Added
 
+- Two new MCP tools so an agent can get itself unstuck instead of asking a
+  human to run `adb` by hand: `porthole_status` now lists attached devices
+  and (re-)establishes the `adb forward` on its own before reporting —
+  idempotent and invisible to the app, so a dropped forward is often
+  invisible too, just call it again — and the new `porthole_connect` tool
+  checks whether the debug build is installed and which version, and can
+  launch or restart the app (the same force-stop-then-launch
+  `capture_system_trace`'s `restartApp` option and the timeline UI's own
+  restart button already use). `porthole_status` stays read-only; only
+  `porthole_connect` can act on the app under test (GRA-62).
+
 ### Changed
 
 ### Fixed

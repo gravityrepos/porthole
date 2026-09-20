@@ -24,6 +24,8 @@ dist/cli.js
 dist/cli.js.map
 dist/device.js
 dist/device.js.map
+dist/devices.js
+dist/devices.js.map
 dist/eventKinds.js
 dist/eventKinds.js.map
 dist/index.js
@@ -54,6 +56,7 @@ src/args.ts
 src/capture.ts
 src/cli.ts
 src/device.ts
+src/devices.ts
 src/eventKinds.ts
 src/index.ts
 src/moment.ts
