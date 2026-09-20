@@ -445,13 +445,27 @@ PR that makes the change, not after the fact.
   `maxNodes` still wins outright, regardless of `detail`. Every truncation
   note that existed before this ticket (`timeline`'s "N matched, M
   returned", `recompositions`' "busiest N of M nodes shown", and the rest)
-  still appears at every level, because it lives in the summary line itself,
-  which is present and unchanged at every `detail` — only the JSON payload
-  block comes and goes. Every level states the bytes it actually returned
-  and what the next level up would cost, measured off the real response,
-  never estimated ahead of building it — the one exception being an
-  approximate "next level" figure for `semantics_tree`, where the actual
-  next size cannot be known without a second round trip to the device.
+  still appears at every level, because it is built from the summary
+  line's own inputs at every level — only the JSON payload block comes and
+  goes with `detail`. Most tools' summary line is otherwise identical at
+  every level apart from the size note; `timeline`'s and `semantics_tree`'s
+  are the two exceptions, precisely: `timeline`'s own event-count clause
+  and truncation note vary with the level's returned-event cap, while its
+  busiest-second/longest-gap/once-only clause does not (QA F1: computed
+  over the whole matched window, never the capped slice — a moment the cap
+  pushed off the end is still named); `semantics_tree`'s whole summary
+  sentence varies at every level, since `"normal"`/`"full"` ask the device
+  for a different node budget outright, before the capture is even taken.
+  Every level states the bytes it actually returned and what the next
+  level up would cost, measured off the real response, never estimated
+  ahead of building it — the one exception being an approximate "next
+  level" figure for `semantics_tree`, where the actual next size cannot be
+  known without a second round trip to the device. `screenshot`'s own note
+  (QA F2) counts its image content block's own bytes alongside the JSON
+  metadata beside it — the image is the entire reason to call this tool,
+  never gated by `detail`, and the note undercounted it by roughly two
+  orders of magnitude before this fix (a real screenshot's base64 is
+  comfortably five figures; the note read a couple of hundred bytes).
   GRA-91's asks are folded into what `"summary"` means for three tools:
   `semantics_tree` reports node count, unlabelled count and
   instrumented-node coverage; `state` names each unattributable field and

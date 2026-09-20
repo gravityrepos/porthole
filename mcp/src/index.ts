@@ -1137,10 +1137,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
    * text — actually live; `findings`' own `evidence` only ever carries a
    * six-line head of it.
    */
-  const LEAK_FOLLOW_UP = { tool: "timeline", why: 'the full trace text and leak count (kinds: ["leak"])' };
+  const LEAK_FOLLOW_UP = {
+    tool: "timeline",
+    why: 'the full trace text and leak count (kinds: ["leak"])',
+  };
 
   function withFollowUp(finding: Finding) {
-    const next = FOLLOW_UP[finding.id] ?? (finding.id.startsWith("leak-") ? LEAK_FOLLOW_UP : undefined);
+    const next =
+      FOLLOW_UP[finding.id] ?? (finding.id.startsWith("leak-") ? LEAK_FOLLOW_UP : undefined);
     return next
       ? { ...finding, next: { tool: next.tool, window: "quote `window` above", shows: next.why } }
       : finding;
@@ -1612,7 +1616,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       }
 
       if (restart) {
-        const result = await restartAppAsync(targetPackage, { ...adbOptions, serial: chosenSerial });
+        const result = await restartAppAsync(targetPackage, {
+          ...adbOptions,
+          serial: chosenSerial,
+        });
         // GRA-233: launchState/totalTimeMs come from `am start -W`'s own
         // stable output, when the launch went through the resolved-activity
         // path rather than the monkey fallback — present here (both on
@@ -1650,15 +1657,18 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
             serial: chosenSerial,
           });
           return result.ok
-            ? ok(`Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ${chosenSerial}.`, {
-                serial: chosenSerial,
-                forward,
-                packageName: targetPackage,
-                ...info,
-                launched: true,
-                launchState: result.launchState,
-                totalTimeMs: result.totalTimeMs,
-              })
+            ? ok(
+                `Launched ${targetPackage} (${info.versionName ?? "unknown version"}) on ${chosenSerial}.`,
+                {
+                  serial: chosenSerial,
+                  forward,
+                  packageName: targetPackage,
+                  ...info,
+                  launched: true,
+                  launchState: result.launchState,
+                  totalTimeMs: result.totalTimeMs,
+                },
+              )
             : ok(`Could not launch ${targetPackage}: ${result.output}`, {
                 serial: chosenSerial,
                 forward,
@@ -3429,9 +3439,21 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         merged: z
           .boolean()
           .optional()
-          .describe("Merged tree (what accessibility services see). Default true, and the one this pass is meant to run against — TalkBack never sees the unmerged tree either."),
-        maxDepth: z.number().int().positive().optional().describe("Depth cap on the capture. Default 40."),
-        maxNodes: z.number().int().positive().optional().describe("Node budget on the capture. Default 1500."),
+          .describe(
+            "Merged tree (what accessibility services see). Default true, and the one this pass is meant to run against — TalkBack never sees the unmerged tree either.",
+          ),
+        maxDepth: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Depth cap on the capture. Default 40."),
+        maxNodes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Node budget on the capture. Default 1500."),
         ...detailShape,
       },
       annotations: { readOnlyHint: true },
@@ -3451,18 +3473,26 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         // carrying no tree — `call`'s own try/catch already covers an
         // unreachable device, so this is this tool's own thing to report,
         // same distinction `semantics_tree` itself draws.
-        (tree) => (tree.error ? tree.error : summarizeAccessibilityResult({
-          findings: tree.findings ?? [],
-          nodesChecked: tree.nodesChecked ?? 0,
-          coverage: tree.coverage ?? [],
-        })),
+        (tree) =>
+          tree.error
+            ? tree.error
+            : summarizeAccessibilityResult({
+                findings: tree.findings ?? [],
+                nodesChecked: tree.nodesChecked ?? 0,
+                coverage: tree.coverage ?? [],
+              }),
         (tree) => {
           if (tree.error) return tree;
           const root = parseSemanticsNode(tree.root);
           const { density, fontScale } = currentDensityAndFontScale();
           recordSemanticsCapture({ capturedAt: tree.capturedAt, root, density, fontScale });
           const lint = lintSemanticsTree(root, { density, fontScale, capturedAt: tree.capturedAt });
-          return { ...tree, findings: lint.findings, nodesChecked: lint.nodesChecked, coverage: lint.coverage };
+          return {
+            ...tree,
+            findings: lint.findings,
+            nodesChecked: lint.nodesChecked,
+            coverage: lint.coverage,
+          };
         },
         // GRA-68: threaded through the same way every other call<T>-based
         // tool is — see okShared's own doc comment.
@@ -3968,9 +3998,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
           : "";
         // GRA-91, folded into GRA-68: "the busiest second, the longest gap,
         // and the thing that happened exactly once" — timeline's own
-        // contribution to detail: "summary", computed off the same `capped`
-        // events this call already resolved.
-        const highlights = describeTimelineHighlights(timelineHighlights(capped));
+        // contribution to detail: "summary". QA F1: computed over `events`
+        // (the full matched window), never `capped` — the whole point of
+        // these three facts is to say something a capped, newest-N slice
+        // can silently cut off. An ANR at the start of a long window, or
+        // the gap right before a burst of 300 recomposes that pushed it
+        // off the end of `capped`, must still be named even though it is
+        // not among the events actually returned.
+        const highlights = describeTimelineHighlights(timelineHighlights(events));
         const summary =
           capped.length === 0
             ? "No events matched. Interact with the app, widen the window, or check `kinds`."
@@ -4120,9 +4155,16 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // omits, the same "no payload block at all" rule every other tool
       // follows; `renderDetail` still decides it, so the size note and the
       // "next level" estimate stay consistent with every other tool's.
+      //
+      // QA F2: `extraBytes` is the image content block's own size —
+      // `result.base64`'s byte length, since that string (not the decoded
+      // binary) is what actually crosses the wire as this block's `data`.
+      // Without it the note reported the ~100-byte JSON metadata alone and
+      // called that "returned" while a ~26KB image went out beside it.
       const decision = renderDetail({
         summary,
         normalPayload: withSinceLast,
+        extraBytes: byteLength(result.base64),
         detail: resolveDetail(detail),
       });
       return {

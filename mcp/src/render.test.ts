@@ -154,6 +154,47 @@ describe("renderDetail — the shared decision every tool's ok() routes through"
     expect(decision.summaryText).not.toMatch(/999\.9KB|1\.0MB/);
     expect(decision.summaryText).toMatch(/normal ≈/);
   });
+
+  it('QA F5: fullBytesHint is ignored at detail: "full" with no distinct fullPayload — nothing left to estimate', () => {
+    // Before the fix, a stray fullBytesHint (left over from an earlier
+    // "normal" call's own estimate, say) would have been reported as what
+    // "full" itself returned, which is not a next-level estimate any more
+    // at this point — it is a claim about *this* response, and it would
+    // have been wrong: what full actually returns here is normalPayload.
+    const decision = renderDetail({
+      summary,
+      normalPayload,
+      fullBytesHint: 999_999,
+      detail: "full",
+    });
+    const actualBytes = byteLength(compactJson(decision.payload));
+    const claimed = /\[(\d+)B returned\]/.exec(decision.summaryText);
+    expect(claimed, `no bare byte count in "${decision.summaryText}"`).not.toBeNull();
+    expect(Number(claimed![1])).toBe(actualBytes);
+    expect(decision.summaryText).not.toMatch(/999\.9KB|1\.0MB/);
+  });
+
+  it('QA F6: at detail: "summary" the returned figure counts the note\'s own bytes too, not just the prose ahead of it', () => {
+    const decision = renderDetail({ summary, normalPayload, detail: "summary" });
+    const claimed = /\[(\d+)B returned/.exec(decision.summaryText);
+    expect(claimed, `no byte count in "${decision.summaryText}"`).not.toBeNull();
+    // The whole point: the claimed figure must equal the actual length of
+    // everything this call returns (there is no payload block at
+    // "summary" — summaryText IS the entire response), not merely the
+    // prose that came before the note started counting.
+    expect(Number(claimed![1])).toBe(byteLength(decision.summaryText));
+  });
+
+  it("QA F2: extraBytes (screenshot's own image block) is folded into every level's shown and next figures", () => {
+    const extraBytes = 26_000; // roughly a real screenshot's base64 size
+    const atSummary = renderDetail({ summary, normalPayload, extraBytes, detail: "summary" });
+    expect(atSummary.summaryText).toMatch(/2[5-7]\.\dKB returned/);
+
+    const atNormal = renderDetail({ summary, normalPayload, extraBytes, detail: "normal" });
+    const claimedNormal = /\[(\d+(?:\.\d)?[A-Za-z]*B) returned/.exec(atNormal.summaryText);
+    expect(claimedNormal).not.toBeNull();
+    expect(atNormal.summaryText).toMatch(/2[5-7]\.\dKB returned/);
+  });
 });
 
 describe("timelineHighlights (GRA-91, folded into GRA-68)", () => {
