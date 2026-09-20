@@ -48,6 +48,8 @@ them they cover:
 | `save_moment` | turns a window of what already happened into a named trace file, no recording required |
 | `open_timeline` | a live timeline UI in the browser |
 | `porthole_status` | whether any of the above can currently reach the device — and, now, why it died last time |
+| `porthole_connect` | the parts of getting connected `porthole_status` cannot do on its own: install/version checks, launching, restarting |
+| `screenshot` | the device screen right now, as an image — scaled, re-encoded, and refused rather than faked when a FLAG_SECURE window is on top |
 
 Everything is debug-only. Release builds link a no-op artifact with identical
 signatures, so the calls stay in your code and compile to nothing.
@@ -282,6 +284,13 @@ Two things worth knowing before you run it:
   for this machine (`PORTHOLE_PROJECT_ROOT`, `PORTHOLE_SDK_DIR`), so commit
   it only if everyone on the project regenerates it with
   `./gradlew portholeMcpConfig` rather than sharing one copy.
+- **If `porthole_status` says "not connected", it already tried to fix the
+  one thing it safely can** before answering: it lists attached devices and
+  re-establishes `adb forward` on its own, so a dropped forward is usually
+  invisible — call it again and it is just connected. It never installs,
+  launches or restarts anything on its own; when the fix needs that (not
+  installed, a release build, installed but not running), it names
+  `porthole_connect`, a second tool that can act on the app under test.
 - **If nothing responds once "connected", something is already holding the
   port** — on either end. `portholeConnect`'s `adb forward` succeeds
   whether or not anything else on this machine is already holding the
@@ -491,6 +500,7 @@ pin — and the previous file is kept as `.mcp.json.bak` either way.
 | `PORTHOLE_SESSIONS_MAX_BYTES` | `524288000` (500MB) | total size before the oldest session is pruned, see [Sessions on disk](#sessions-on-disk) |
 | `PORTHOLE_SESSIONS_MAX_AGE_DAYS` | `7` | age before a session is pruned regardless of size, see [Sessions on disk](#sessions-on-disk) |
 | `PORTHOLE_APPLICATION_ID` | none | the app this server expects — written by `portholeMcpConfig` from AGP's own `applicationId` on an application module, or from `porthole { applicationId.set(...) }` if you set one explicitly. A `hello` naming a different package warns loudly everywhere (`porthole_status`, every tool's banner, the timeline UI's pill) instead of silently answering for whichever app happens to be holding the port |
+| `PORTHOLE_SERIAL` | none | which attached device `porthole_status`/`porthole_connect` should use when more than one is plugged in — same purpose as `porthole { deviceSerial.set(...) }`, for a server started without the generated `.mcp.json`. A tool's own `serial` argument overrides it for that one call |
 
 Two more exist but you should not normally set them by hand: `PORTHOLE_PROJECT_ROOT`
 and `PORTHOLE_SDK_DIR` are written into the generated `.mcp.json` by

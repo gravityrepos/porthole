@@ -51,6 +51,27 @@ PR that makes the change, not after the fact.
   resolution is a fact about where evidence lives on disk and never changes
   a finding's title, severity or detail, and is off entirely (no `where`
   key at all) whenever `PORTHOLE_PROJECT_ROOT` is unset (GRA-201).
+- Two new MCP tools so an agent can get itself unstuck instead of asking a
+  human to run `adb` by hand: `porthole_status` now lists attached devices
+  and (re-)establishes the `adb forward` on its own before reporting —
+  idempotent and invisible to the app, so a dropped forward is often
+  invisible too, just call it again — and the new `porthole_connect` tool
+  checks whether the debug build is installed and which version, and can
+  launch or restart the app (the same force-stop-then-launch
+  `capture_system_trace`'s `restartApp` option and the timeline UI's own
+  restart button already use). `porthole_status` stays read-only; only
+  `porthole_connect` can act on the app under test (GRA-62).
+- New `screenshot` MCP tool: captures the device screen with `adb exec-out
+  screencap -p` and returns it as an image content block, scaled and
+  re-encoded as a ~640px-wide, quality-80 JPEG (capped at 1.5MB) — `findings`
+  and the semantics tree can say a query ran on the main thread, but not that
+  the price is rendering as `$NaN` or that a dialog is covering everything.
+  Refuses rather than returning a black rectangle when a FLAG_SECURE window
+  is on top, since screencap itself returns solid black for one of those.
+  Decoding, downscaling and re-encoding are all pure JS (`pngjs`, `jpeg-js`;
+  no `sharp`, no native module in the `npx` path). Never written to the
+  session file: a screenshot cannot be redacted the way the app's own text
+  events can (GRA-63).
 
 ### Changed
 

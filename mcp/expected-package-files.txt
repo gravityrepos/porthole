@@ -24,6 +24,8 @@ dist/cli.js
 dist/cli.js.map
 dist/device.js
 dist/device.js.map
+dist/devices.js
+dist/devices.js.map
 dist/eventKinds.js
 dist/eventKinds.js.map
 dist/index.js
@@ -36,6 +38,8 @@ dist/report.js
 dist/report.js.map
 dist/save.js
 dist/save.js.map
+dist/screenshot.js
+dist/screenshot.js.map
 dist/sessions.js
 dist/sessions.js.map
 dist/sources.js
@@ -56,12 +60,14 @@ src/args.ts
 src/capture.ts
 src/cli.ts
 src/device.ts
+src/devices.ts
 src/eventKinds.ts
 src/index.ts
 src/moment.ts
 src/perfetto.ts
 src/report.ts
 src/save.ts
+src/screenshot.ts
 src/sessions.ts
 src/sources.ts
 src/system.ts

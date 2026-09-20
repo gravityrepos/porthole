@@ -581,3 +581,20 @@ export async function restartAppAsync(packageName: string, options: RunAdbAsyncO
   );
   return finishRestart(packageName, started);
 }
+
+/**
+ * GRA-62: `restartAppAsync` without the force-stop half, for `porthole_connect`'s
+ * "installed but not running" case — launching an app that is not running
+ * needs no force-stop first, and sending one anyway is not merely redundant:
+ * `am force-stop` on a process that is not there is harmless, but it also
+ * means this could never be told apart from `restartApp` in a test that only
+ * watches which adb calls ran. Shares `finishRestart`'s "Events injected"
+ * check with both restart functions rather than re-deriving it a third time.
+ */
+export async function launchAppAsync(packageName: string, options: RunAdbAsyncOptions = {}): Promise<AdbResult> {
+  const started = await runAdbAsync(
+    ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
+    options,
+  );
+  return finishRestart(packageName, started);
+}

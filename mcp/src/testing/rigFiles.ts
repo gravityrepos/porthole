@@ -25,6 +25,7 @@ export const RIG_FILES = [
   "src/capture.test.ts",
   "src/cli.test.ts",
   "src/device.test.ts",
+  "src/devices.test.ts",
   "src/entrypoints.test.ts",
   "src/index.test.ts",
   "src/save.test.ts",

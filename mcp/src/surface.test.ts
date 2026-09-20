@@ -6,6 +6,10 @@ import { buildTrace, resolveProfile, type Finding } from "./trace.js";
 import type { DeviceEvent } from "./device.js";
 import { buildRig } from "./testing/harness.js";
 import { stripComments } from "./testing/stripComments.js";
+import { buildFakeAdb, fakeAdbArgsKey, type FakeAdb } from "./testing/fakeAdb.js";
+import { buildFakeScreencapAdb } from "./testing/fakeScreencapAdb.js";
+import { PNG } from "pngjs";
+import * as jpeg from "jpeg-js";
 
 /**
  * The shape of the MCP surface, rather than any one tool's output.
@@ -437,12 +441,13 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
 });
 
 describe("the tool surface", () => {
-  // The 17 names `index.ts` registers, in registration order, verified
+  // The 19 names `index.ts` registers, in registration order, verified
   // against the running server rather than copied from the ticket that
   // asked for this test — see the "registers exactly these tools" case
   // below, which is what would have caught this list being wrong.
   const REGISTERED_TOOLS = [
     "porthole_status",
+    "porthole_connect",
     "findings",
     "system_context",
     "ask_system_trace",
@@ -459,6 +464,7 @@ describe("the tool surface", () => {
     "logs",
     "timeline",
     "open_timeline",
+    "screenshot",
   ];
 
   it("registers exactly these tools — a rename or a deletion fails this, named", async () => {
@@ -922,5 +928,284 @@ describe("timeline's kinds param (GRA-200)", () => {
     const block = toolSource("timeline");
     expect(block).toContain("timelineKindsDescription()");
     expect(block).not.toMatch(/kinds: z\s*\.array\(z\.string\(\)\)\s*\.optional\(\)\s*\.describe\(\s*"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-62: the agent connects to the device itself instead of asking for help
+// ---------------------------------------------------------------------------
+
+/** Same default `PORT` computation `index.ts` makes, so these tests track it instead of hardcoding 8677 and drifting if the environment ever sets PORTHOLE_PORT. */
+const PORT = Number(process.env.PORTHOLE_PORT ?? 8677);
+
+describe("porthole_status's one exception stays inert against a test-injected device", () => {
+  it("never calls adb, and deviceDiagnosis is null, when the device was injected (every test in this suite) — the ownsDeviceConnection gate", async () => {
+    // A fake adb that errors loudly (exit 17) on any call — buildRig always
+    // injects its own `device`, so `createPortholeServer`'s
+    // `ownsDeviceConnection` must be false here, and `porthole_status` must
+    // never reach for adb at all. If that gate were ever dropped, this
+    // fake's failure would flow into `deviceDiagnosis`/the summary and this
+    // test would catch it — instead of every other disconnected-state test
+    // in index.test.ts silently starting to depend on this machine's real
+    // adb and real attached devices, which is the regression this pins.
+    const fakeAdb = buildFakeAdb({});
+    const rig = await buildRig({ connectDevice: false, adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const status = await rig.client.callTool("porthole_status", {});
+      expect(status.isError).toBeFalsy();
+      expect(status.json).toMatchObject({ deviceDiagnosis: null });
+      // The exact pre-GRA-62 message, unchanged — this is what every other
+      // disconnected-state test elsewhere in this suite still asserts.
+      expect(status.text).toContain("Not connected to the app on");
+      expect(fakeAdb.calls()).toEqual([]);
+    } finally {
+      await rig.close();
+      fakeAdb.cleanup();
+    }
+  });
+});
+
+describe("porthole_status names porthole_connect for what it cannot fix itself", () => {
+  it("is readOnlyHint:true, and its description names porthole_connect", () => {
+    const block = toolSource("porthole_status");
+    expect(block).toContain("readOnlyHint: true");
+    expect(block).toContain("porthole_connect");
+  });
+});
+
+describe("porthole_connect", () => {
+  it("is readOnlyHint:false — unlike porthole_status, it can act on the app under test", () => {
+    const block = toolSource("porthole_connect");
+    expect(block).toContain("readOnlyHint: false");
+  });
+
+  async function closeAll(rig: Awaited<ReturnType<typeof buildRig>>, adb: FakeAdb): Promise<void> {
+    await rig.close();
+    adb.cleanup();
+  }
+
+  it("names the absence of a device specifically — GRA-62 AC (shared wording with porthole_status)", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("No Android device or emulator is attached");
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("lists both devices and asks for a serial when two are attached and none is configured", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\nB2  device model:Pixel_6\n",
+      },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("A1");
+      expect(result.text).toContain("B2");
+      expect(result.json).toMatchObject({ ambiguous: true });
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("says a release build has no runtime in it, instead of a generic 'not connected' — GRA-62 AC4", async () => {
+    // buildRig's default hello reports packageName "com.example.shop" — the
+    // package porthole_connect's own default-resolution falls back to.
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout: "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ HAS_CODE ]\n",
+      },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("release build");
+      expect(result.json).toMatchObject({ installed: true, debuggable: false });
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("offers to launch an installed-but-not-running debug build, rather than launching unasked — GRA-62 AC4", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
+      },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { exitCode: 1 },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("not running");
+      expect(result.text).toContain("launch: true");
+      expect(result.json).toMatchObject({ installed: true, debuggable: true, running: false });
+      // Did not launch it: no monkey call should have run.
+      expect(adb.calls().some((c) => c.includes("monkey"))).toBe(false);
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("launches the app when asked, issuing the monkey launcher intent", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
+      },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { exitCode: 1 },
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "shell",
+        "monkey",
+        "-p",
+        "com.example.shop",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+      ])]: { stdout: "Events injected: 1\n" },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", { launch: true });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("Launched com.example.shop");
+      expect(result.json).toMatchObject({ launched: true });
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+
+  it("restarts an already-running app when asked — force-stop then the launcher intent, the same pair restartApp always issues", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, `tcp:${PORT}`])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
+      },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { stdout: "12345\n" },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "am", "force-stop", "com.example.shop"])]: {},
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "shell",
+        "monkey",
+        "-p",
+        "com.example.shop",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+      ])]: { stdout: "Events injected: 1\n" },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("porthole_connect", { restart: true });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("Restarted com.example.shop");
+      expect(result.json).toMatchObject({ restarted: true });
+      // Force-stop strictly before the relaunch — a restart that launched
+      // first would leave two processes racing instead of one fresh one.
+      const tags = adb.calls().map((c) => c.join(" "));
+      const stopIndex = tags.findIndex((c) => c.includes("force-stop"));
+      const monkeyIndex = tags.findIndex((c) => c.includes("monkey"));
+      expect(stopIndex).toBeGreaterThanOrEqual(0);
+      expect(monkeyIndex).toBeGreaterThan(stopIndex);
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRA-63: the agent can see the screen
+// ---------------------------------------------------------------------------
+
+describe("screenshot", () => {
+  function solidPng(width: number, height: number, [r, g, b]: [number, number, number] = [0, 0, 0]): Buffer {
+    const png = new PNG({ width, height });
+    for (let i = 0; i < png.data.length; i += 4) {
+      png.data[i] = r;
+      png.data[i + 1] = g;
+      png.data[i + 2] = b;
+      png.data[i + 3] = 255;
+    }
+    return PNG.sync.write(png);
+  }
+
+  it("is readOnlyHint:true — capturing the screen touches nothing on the device", () => {
+    const block = toolSource("screenshot");
+    expect(block).toContain("readOnlyHint: true");
+  });
+
+  it("returns an image content block a multimodal agent can read, plus a text summary and JSON payload", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(1200, 2000, [40, 90, 200]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", {});
+      expect(result.isError).toBeFalsy();
+
+      const image = result.content.find((c) => c.type === "image") as
+        | { type: "image"; data: string; mimeType: string }
+        | undefined;
+      expect(image, "no image content block in the result").toBeDefined();
+      expect(image?.mimeType).toBe("image/jpeg");
+      // Round-trip: what came back must actually decode as a JPEG, not just
+      // be a base64 string of the right shape.
+      const decoded = jpeg.decode(Buffer.from(image!.data, "base64"));
+      expect(decoded.width).toBeGreaterThan(0);
+      expect(decoded.height).toBeGreaterThan(0);
+
+      expect(result.json).toMatchObject({ ok: true, originalWidth: 1200, originalHeight: 2000 });
+      expect(result.text).toContain("Captured");
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  it("refuses a black capture — names FLAG_SECURE, carries no image block", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(200, 400, [0, 0, 0]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("FLAG_SECURE");
+      expect(result.content.some((c) => c.type === "image")).toBe(false);
+      expect(result.json).toMatchObject({ ok: false, reason: "black-frame" });
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  it("passes displayId through to the adb call", async () => {
+    const adb = buildFakeScreencapAdb(solidPng(20, 20, [10, 20, 30]));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      const result = await rig.client.callTool("screenshot", { displayId: 2 });
+      expect(result.isError).toBeFalsy();
+      expect(adb.calls()[0]).toEqual(["exec-out", "screencap", "-p", "-d", "2"]);
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
   });
 });
