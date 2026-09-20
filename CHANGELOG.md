@@ -331,6 +331,25 @@ PR that makes the change, not after the fact.
   negative, or past the same 5000ms line `startup-slow` already draws for
   "this cold startup is excessive." Neither side changes when the other is
   absent (GRA-231).
+- The root lifecycle tasks now mean what their names say. `./gradlew :test`
+  (qualified) used to run only the Gradle plugin's tests — the root `test`
+  task named just the plugin's as a dependency — while unqualified
+  `./gradlew test` also ran the three Android subprojects', reached only by
+  Gradle's own cross-project name-matching; the two commands looked
+  interchangeable and were not (`:check` had the same gap). `test`/`check`
+  now also depend explicitly on `:runtime:test`/`:runtime-noop:test`/
+  `:sample:test` and the equivalent `check`s, so `:test`/`:check` and their
+  unqualified forms depend on the identical task set — confirmed by diffing
+  `./gradlew :test --dry-run` against `./gradlew test --dry-run` (and the
+  `check` pair) task-for-task. `./gradlew build` used to compile the plugin,
+  as a side effect of putting it on this build's classpath, and verify none
+  of it: no root `build` task existed at all (`:build` failed outright,
+  "task 'build' is ambiguous"). `build` is now registered at the root and
+  depends on the plugin's `check` — not its `build`, which is
+  `java-gradle-plugin`'s/`com.gradle.plugin-publish`'s own
+  assemble-and-publish-bundle path that `releaseDryRun` already exercises
+  deliberately elsewhere, and that an ordinary local build has no reason to
+  produce (GRA-121).
 
 ### Fixed
 
@@ -371,6 +390,25 @@ PR that makes the change, not after the fact.
   now permits cleartext for `localhost`/`127.0.0.1` only, wired in via
   `sample/src/debug/AndroidManifest.xml` so release carries no
   `networkSecurityConfig` and is unaffected (GRA-236).
+- Five `McpConfigTest` cases failed on a stock macOS checkout: each compared
+  JUnit's `TemporaryFolder.root` (`/var/folders/...`) against a path
+  `portholeMcpConfig` resolved through Gradle, which canonicalizes the
+  project directory before joining a relative path onto it (`/private/var/
+  folders/...` — macOS's `/var` is itself a symlink into `/private/var`).
+  The assertions now canonicalize whichever side came straight from
+  `java.io.File`, via a shared `canonicalPathOf` test helper, rather than
+  comparing raw `absolutePath`s across that boundary or loosening the
+  comparison to `endsWith` (GRA-223).
+- `./gradlew check` (and `test`) discarded the whole configuration cache
+  entry on every run: `buildSrcTest`'s `doLast { exec { ... } }` called
+  `Project.exec` and a script-defined `gradlewCommand()` function from
+  inside its action, which implicitly captured this build script itself —
+  a type the configuration cache cannot serialize at all, regardless of
+  `notCompatibleWithConfigurationCache`. `buildSrcTest` is now a real `Exec`
+  task whose `commandLine` is resolved once, at configuration time, into a
+  plain `List<String>`; nothing of the script is left for the action to
+  close over. `./gradlew check` now stores a clean configuration cache
+  entry with zero problems and the next run reuses it (GRA-227).
 
 ## [0.2.2] - 2026-09-16
 

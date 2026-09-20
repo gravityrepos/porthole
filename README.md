@@ -2446,9 +2446,9 @@ consumer is most likely to be looking for. It carries Dokka's HTML now.
 ## Building
 
 ```bash
-./gradlew test                           # runtime, no-op and the Gradle plugin
+./gradlew test                           # runtime, no-op, sample and the Gradle plugin
 ./gradlew check                          # the same, plus Android lint
-./gradlew build                          # check, and the artifacts — Android modules only
+./gradlew build                          # check, and the Android modules' own artifacts
 ./gradlew :runtime:testDebugUnitTest     # runtime
 ./gradlew :runtime-noop:testDebugUnitTest  # api parity with the runtime
 ./gradlew -p gradle-plugin test          # plugin alone, ProjectBuilder and TestKit
@@ -2458,13 +2458,20 @@ cd mcp/ui && npm test                    # timeline logic
 
 The plugin is a separate Gradle build, pulled in by `includeBuild` from the
 `pluginManagement` block in `settings.gradle.kts`. An included build's lifecycle
-tasks are not reachable from the including build's, so the root `test` and
-`check` name the plugin's explicitly; without that they walk the three Android
-modules and stop, which is what they used to do. `build` is the exception — it
-still covers the Android modules only, so `check` is the command that verifies
-everything the JVM side can. Two of the plugin's tests, the AGP pair, skip unless
-you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and need the network,
-which is why they are opt-in.
+tasks are not reachable from the including build's by name alone, so the root
+`test` and `check` name the plugin's, and the three Android subprojects' own
+`test`/`check`, explicitly — `:test` and `:check` (qualified) now depend on the
+identical task set their unqualified forms reach by Gradle's own cross-project
+name-matching, so either spelling means the same thing. `build` depends on the
+plugin's `check`, not its `build`: the latter is `java-gradle-plugin`'s/
+`com.gradle.plugin-publish`'s own assemble-and-publish-bundle path, which
+`releaseDryRun` exercises deliberately elsewhere — an ordinary local
+`./gradlew build` only needs to know the plugin still passes its own tests, not
+to assemble artifacts nobody asked for. Two of the plugin's tests, the AGP
+pair, skip unless you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and
+need the network, which is why they are opt-in. Aside from that pair,
+`./gradlew -p gradle-plugin test` is expected to pass with zero failures on
+Linux, macOS and Windows alike.
 
 The runtime tests run the request-body tee against a real client and a real
 socket via MockWebServer. The property they exist to hold down is the boring

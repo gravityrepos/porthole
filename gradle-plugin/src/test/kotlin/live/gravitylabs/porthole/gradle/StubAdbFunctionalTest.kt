@@ -86,6 +86,22 @@ abstract class StubAdbFunctionalTest {
     protected fun quoted(path: String): String = "\"" + path.replace("\\", "\\\\") + "\""
 
     /**
+     * `TemporaryFolder.root` — and anything built from it with plain
+     * `File(...)` — names this test's scratch directory through whatever
+     * symlink the OS happens to put under its temp root (`/var/folders/...`
+     * on macOS, backed by `/private/var/folders/...`), while Gradle
+     * canonicalizes the project directory before resolving a relative path
+     * against it. The plugin's own resolution therefore comes back
+     * canonical; comparing that against this side's raw `absolutePath` makes
+     * an otherwise-correct answer look wrong (GRA-223). Canonicalizing here
+     * — rather than loosening the assertion to an `endsWith` — is what
+     * actually proves the same path, and it is a no-op on a host with no
+     * such symlink, where this is identical to comparing `absolutePath`
+     * directly.
+     */
+    protected fun canonicalPathOf(file: File): String = file.canonicalFile.path
+
+    /**
      * A scratch project whose build script is [body], with the porthole task
      * types imported and the plugin applied.
      *
