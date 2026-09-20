@@ -202,6 +202,13 @@ internal object EventKinds {
 
     /** A periodic heap/native/RAM sample. MemoryCollector. */
     const val MEMORY = "memory"
+
+    /**
+     * A `StrictMode` thread- or VM-policy violation whose stack named a
+     * frame from the app's own package — one Porthole judged actionable,
+     * not every violation the platform noticed. StrictModeCollector.
+     */
+    const val STRICT_VIOLATION = "strict_violation"
 }
 
 /**

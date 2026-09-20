@@ -41,6 +41,7 @@ import live.gravitylabs.porthole.collect.DeviceCollector
 import live.gravitylabs.porthole.collect.ExitInfoCollector
 import live.gravitylabs.porthole.collect.MemoryCollector
 import live.gravitylabs.porthole.collect.Setup
+import live.gravitylabs.porthole.collect.StrictModeCollector
 import live.gravitylabs.porthole.protocol.DbPage
 import live.gravitylabs.porthole.protocol.DbTables
 import live.gravitylabs.porthole.protocol.EventFrame
@@ -110,6 +111,8 @@ object Porthole {
         val exitInfo: ExitInfoCollector,
         val autoWire: AutoWire,
         val watchdog: MainThreadWatchdog,
+        /** Null unless `porthole { strictMode.set(true) }` asked for it — see [StrictModeCollector]'s own doc comment for why this is opt-in. */
+        val strictMode: StrictModeCollector?,
         val nav: NavCollector?,
         val nav3: BackStackCollector,
         val workManager: WorkManagerPorthole?,
@@ -199,6 +202,43 @@ object Porthole {
             if (exitInfo.install(app)) collectors += "exit_info"
             if (autoWire.install(app)) collectors += "autowire"
 
+            // Opt-in (GRA-59): off unless the plugin's `strictMode` flag reached
+            // this build as the `porthole_strict_mode` resource. `Setup` is told
+            // either way, unconditionally, so `setup` always has an opinion about
+            // strict mode rather than the entry silently not existing when it's
+            // off — see Setup.kt's own comment on why this call sits outside
+            // `integrationEntries()`.
+            val strictMode = if (strictModeFromResources(app)) {
+                StrictModeCollector(ring, appPackages).also { collector ->
+                    val ok = collector.install(app)
+                    if (ok) {
+                        collectors += "strictmode"
+                        Setup.recordStrictMode(
+                            installed = true,
+                            note = "Porthole's StrictMode thread and VM policies REPLACED whatever this " +
+                                "process had before install() ran — StrictMode has no public API to read " +
+                                "or chain an existing policy, so this is a replacement, not an addition. " +
+                                "Any penalty (including penaltyDeath) the app's own policy set is no " +
+                                "longer in effect.",
+                        )
+                    } else {
+                        Setup.recordStrictMode(
+                            installed = false,
+                            note = "porthole { strictMode.set(true) } but this device is API " +
+                                "${Build.VERSION.SDK_INT}; StrictMode's penaltyListener needs API 28+, " +
+                                "so nothing was installed (no logcat-scraping fallback).",
+                        )
+                    }
+                }
+            } else {
+                Setup.recordStrictMode(
+                    installed = false,
+                    note = "off by default; enable with porthole { strictMode.set(true) } in the app " +
+                        "module (debug builds only — never set it in release).",
+                )
+                null
+            }
+
             // Snapshotted rather than handed over live: Session used to receive
             // this same mutable list and rely on every append above already
             // having happened by the time anything read `collectors` back, which
@@ -249,6 +289,7 @@ object Porthole {
                 exitInfo = exitInfo,
                 autoWire = autoWire,
                 watchdog = watchdog,
+                strictMode = strictMode,
                 nav = nav,
                 nav3 = BackStackCollector(ring),
                 workManager = workManager,
@@ -289,6 +330,7 @@ object Porthole {
             s.exitInfo.stop()
             s.autoWire.stop()
             s.watchdog.stop()
+            s.strictMode?.stop()
             s.recompositions.stop()
             s.nav?.unregister()
             s.workManager?.stop()
@@ -678,6 +720,20 @@ object Porthole {
     internal fun sanitizeRingCapacity(configured: Int?): Int =
         if (configured != null && configured > 0) configured else EventRing.DEFAULT_CAPACITY
 
+    /**
+     * The Gradle plugin's `strictMode` DSL setting, written the same way as
+     * the port and ring capacity: a generated resource
+     * ([RES_STRICT_MODE]), not a second plugin-to-runtime mechanism. Absent
+     * resource (no plugin, or a plugin build predating GRA-59) reads as
+     * `false` — the same "off unless told otherwise" default the plugin
+     * extension itself uses, so a build applying an old plugin jar against a
+     * new runtime does not accidentally turn this on.
+     */
+    private fun strictModeFromResources(context: Context): Boolean = runCatching {
+        val id = context.resources.getIdentifier(RES_STRICT_MODE, "bool", context.packageName)
+        if (id != 0) context.resources.getBoolean(id) else false
+    }.getOrDefault(false)
+
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
@@ -720,6 +776,7 @@ object Porthole {
 
     private const val RES_PORT = "porthole_port"
     private const val RES_RING_CAPACITY = "porthole_ring_capacity"
+    private const val RES_STRICT_MODE = "porthole_strict_mode"
 }
 
 /**

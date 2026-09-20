@@ -98,6 +98,7 @@ internal object AndroidWiring {
         val debugTypes = extension.debugBuildTypes.get().toSet()
         val port = extension.port.get()
         val ringCapacity = extension.ringCapacity.get()
+        val strictMode = extension.strictMode.get()
 
         if (buildTypes.any { it.name in debugTypes }) {
             // AGP 9 ships resValues off by default, and calling resValue with
@@ -120,6 +121,12 @@ internal object AndroidWiring {
                 // merge fails, and nobody wants that surprise.
                 buildType.resValue("integer", "porthole_port", port.toString())
                 buildType.resValue("integer", "porthole_ring_capacity", ringCapacity.toString())
+                // A `bool` resource, same mechanism, same reason: Porthole.kt
+                // reads it with resources.getBoolean, defaulting to false (off)
+                // when a build predates this flag and the resource is simply
+                // absent — see PortholeExtension.strictMode's own KDoc for why
+                // the default is off rather than on.
+                buildType.resValue("bool", "porthole_strict_mode", strictMode.toString())
             }
         }
     }

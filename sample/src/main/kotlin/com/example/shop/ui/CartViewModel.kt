@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.example.shop.ui
 
+import android.content.Context
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 
 private val CATALOGUE = listOf(
@@ -147,6 +149,25 @@ class CartViewModel(
         val items = dao.loadBlocking(cartId)
         Thread.sleep(450)
         lastResponse = "blocked the main thread reading " + items.size + " items"
+    }
+
+    /**
+     * A synchronous disk **write** on the main thread, not a read: the
+     * default `StrictMode` policy `porthole { strictMode.set(true) }`
+     * installs deliberately leaves out `detectDiskReads()` (GRA-59's EM
+     * re-scope — it is the single noisiest check StrictMode has, and
+     * `db-on-main-thread` already covers the read that matters
+     * categorically), so a plain `File.readText()` here would trip nothing
+     * under that policy. `detectDiskWrites()` is on by default, so this is
+     * what actually demonstrates a `strict_violation` finding end to end —
+     * see `StrictModeTest` for the same shape exercised as a synthetic
+     * violation, without a device.
+     */
+    fun triggerStrictModeViolation(context: Context) {
+        Porthole.mark("strict mode: disk write on main")
+        val file = File(context.filesDir, "strictmode-demo.txt")
+        file.writeText("porthole strictmode demo " + System.currentTimeMillis())
+        lastResponse = "wrote " + file.length() + " bytes synchronously on the main thread"
     }
 
     private val ktor = KtorApi()

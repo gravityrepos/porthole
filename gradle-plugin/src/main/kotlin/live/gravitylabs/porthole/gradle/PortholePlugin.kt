@@ -35,6 +35,7 @@ class PortholePlugin : Plugin<Project> {
             uiCommand.convention(emptyList())
             mcpCommand.convention(emptyList())
             enabled.convention(true)
+            strictMode.convention(false)
         }
 
         var configured = false

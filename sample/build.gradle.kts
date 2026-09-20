@@ -53,6 +53,12 @@ porthole {
     // *registry* version into .mcp.json, the one thing in this sample that
     // would point away from the checkout instead of at it.
     mcpCommand.set(listOf("node", rootProject.file("mcp/dist/cli.js").absolutePath, "mcp"))
+    // GRA-59: on, so the sample's own "StrictMode" button (CartViewModel.
+    // triggerStrictModeViolation) actually demonstrates a strict_violation
+    // finding rather than silently doing nothing. Off is the right default
+    // for a real app; this repo's own sample is exactly the place to turn
+    // it on.
+    strictMode.set(true)
 }
 
 dependencies {

@@ -632,6 +632,47 @@ export function findingsOf(
     });
   }
 
+  // -- GRA-59: strict-mode violations --------------------------------------
+  //
+  // StrictModeCollector already did the filtering (a violation whose stack
+  // never touches the app's own package never becomes an event at all) and
+  // the counting (a flood at one call site is a handful of events, not one
+  // per violation, each carrying the running total — see that collector's
+  // own comment for the exact cap). What is left here is picking, per call
+  // site, the event with the highest count — the collector may emit more
+  // than one update for a site that kept going, and `findings` wants one
+  // entry per site, not one per update.
+  const strictBySite = new Map<string, DeviceEvent>();
+  for (const violation of events.filter((e) => e.event === "strict_violation")) {
+    const site = str(violation.data.site);
+    const prior = strictBySite.get(site);
+    if (!prior || num(violation.data.count) >= num(prior.data.count)) strictBySite.set(site, violation);
+  }
+  for (const violation of strictBySite.values()) {
+    const category = str(violation.data.category);
+    const severity: Severity =
+      category === "main_thread_disk" || category === "main_thread_network"
+        ? "error"
+        : category === "leak"
+          ? "warning"
+          : "note";
+    const count = num(violation.data.count, 1);
+    const type = str(violation.data.type);
+    const site = str(violation.data.site);
+    findings.push({
+      id: `strict-${site}`,
+      severity,
+      confidence: "observed",
+      title: `${type} at ${site}` + (count > 1 ? ` (${count}×)` : ""),
+      detail: str(violation.data.stack).split("\n").slice(0, 3).join("\n") || undefined,
+      count,
+      during: markAt(marks, violation.t),
+      evidence: { site, thread: str(violation.data.thread), category },
+      window: { from: violation.t, to: violation.t },
+    });
+  }
+  // -- end GRA-59 -----------------------------------------------------------
+
   // The only correlated one, and a note for that reason.
   const recompose = events.filter((e) => e.event === "recompose");
   if (recompose.length > 0) {

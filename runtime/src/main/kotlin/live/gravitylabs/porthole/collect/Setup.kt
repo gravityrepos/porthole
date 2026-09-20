@@ -92,8 +92,37 @@ internal object Setup {
         )
     }
 
+    // -- strict mode (GRA-59) ------------------------------------------------
+    //
+    // Not an "integration" in INTEGRATIONS's sense either: there is no
+    // library to be on the classpath or not, only a plugin flag Porthole
+    // either acted on or didn't. Recorded unconditionally by
+    // `Porthole.install()` — once with `installed = false` when
+    // `strictMode` was never turned on, so the entry always exists and an
+    // agent never has to infer "opt-in and currently off" from its absence.
+
+    @Volatile private var strictModeInstalled: Boolean? = null
+    @Volatile private var strictModeNote: String? = null
+
+    /** Called once by `Porthole.install()`, whether or not `strictMode` was enabled. */
+    fun recordStrictMode(installed: Boolean, note: String?) {
+        strictModeInstalled = installed
+        strictModeNote = note
+    }
+
+    private fun strictModeEntry(): SetupEntry? {
+        val installed = strictModeInstalled ?: return null
+        return SetupEntry(
+            name = "strictmode",
+            onClasspath = true,
+            instrumented = installed,
+            hint = strictModeNote,
+        )
+    }
+
     fun report(): List<SetupEntry> = buildList {
         socketEntry()?.let(::add)
+        strictModeEntry()?.let(::add)
         addAll(integrationEntries())
     }
 
