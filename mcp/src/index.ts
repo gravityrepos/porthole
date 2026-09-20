@@ -1499,7 +1499,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "(`./gradlew portholeComposeReport`, not on by default) says is restartable but not " +
         "skippable is promoted to a `warning` and names the unstable parameter and why, in the " +
         "compiler's own words; one that is skippable but still carries an unstable parameter is a " +
-        "different, less urgent finding of its own, never promoted the same way.\n\n" +
+        "different, less urgent finding of its own, never promoted the same way. That report is " +
+        "always compiled with strong skipping off; when your own build has it on, the finding says " +
+        "so and qualifies the claim — the composable still skips whenever the caller passes the " +
+        "same instance, and only a fresh one each time defeats it.\n\n" +
         "`confidence` is load-bearing and worth repeating to whoever reads your answer. 'observed' " +
         "means the device reported it: a query ran on the main thread, a frame missed its deadline. " +
         "'correlated' means two things happened close together, which is ordering and not " +
@@ -2722,6 +2725,12 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         generatedAt: string;
         gitHead: string | null;
         kotlinVersion: string;
+        // The follow-up to GRA-69: whether the *consuming module's real
+        // build* has strong skipping on — this report's own compile
+        // always has it forced off, which is why "not skippable" alone can
+        // be misleading about the running app; see
+        // composeReport.ts's `strongSkippingCaveat`.
+        strongSkippingInBuild: boolean | "unknown";
         stale: false;
         skippable: boolean;
         restartable: boolean;
@@ -2740,6 +2749,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         generatedAt: string;
         gitHead: string | null;
         kotlinVersion: string;
+        strongSkippingInBuild: boolean | "unknown";
         stale: true;
         staleNote: string;
       }
@@ -2759,6 +2769,7 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         generatedAt: join.report.generatedAt,
         gitHead: join.report.gitHead,
         kotlinVersion: join.report.kotlinVersion,
+        strongSkippingInBuild: join.report.strongSkippingInBuild,
       };
       if (join.stale) {
         return { ...common, joined: true, stale: true, staleNote: staleJoinNote(join.report) };
@@ -2818,7 +2829,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "\"no report entry matched\"' or '\"matched more than one report entry\"' (candidates " +
         "listed) means the label could not be tied to one function with confidence — never a " +
         "guess. A stale report ('stale: true' — its own source state has moved on) is still named " +
-        "but never used for a reason.",
+        "but never used for a reason. 'strongSkippingInBuild' says whether your own build (not " +
+        "this report's own always-off compile) has strong skipping on; when it does, " +
+        "'notSkippableReason' says so and qualifies the claim — the composable still skips when " +
+        "the caller passes the same instance, only a fresh one each time defeats it.",
       inputSchema: {
         screen: z
           .string()

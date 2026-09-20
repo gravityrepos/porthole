@@ -96,4 +96,23 @@ internal object ComposeCompilerWiring {
         extension.metricsDestination.set(project.layout.buildDirectory.dir(METRICS_DIR))
         extension.featureFlags.add(ComposeFeatureFlag.StrongSkipping.disabled())
     }
+
+    /**
+     * The consuming module's own `composeCompiler { enableStrongSkippingMode }`,
+     * when the module's build script set it explicitly — read, never
+     * written: [configure] above never touches this particular property
+     * (only `featureFlags`), so there is no ordering concern between the
+     * two reaching the same extension in the same callback. `null` when the
+     * module never set it either way, which is the ordinary case — most
+     * apps take Kotlin's own default rather than naming this explicitly —
+     * and is exactly why [strongSkippingFromPropertyOrKotlinVersion] exists
+     * as the fallback this is checked ahead of (`PortholePlugin
+     * .registerComposeReportTask` calls both, this one second, so an
+     * explicit DSL setting always wins over the property/version guess).
+     */
+    @Suppress("DEPRECATION") // reading the consuming module's own explicit setting, deliberately, not writing it
+    fun explicitStrongSkippingSetting(project: Project): Boolean? {
+        val extension = project.extensions.getByType(ComposeCompilerGradlePluginExtension::class.java)
+        return extension.enableStrongSkippingMode.orNull
+    }
 }

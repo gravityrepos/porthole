@@ -29,7 +29,7 @@ class PortholeComposeReportTaskFunctionalTest {
         file.writeText(text)
     }
 
-    private fun buildScript(): String =
+    private fun buildScript(strongSkippingInBuild: String = "unknown"): String =
         """
         @file:Suppress("UNUSED_IMPORT")
 
@@ -46,6 +46,7 @@ class PortholeComposeReportTaskFunctionalTest {
             variant.set("debug")
             moduleName.set("app")
             kotlinVersion.set("2.1.0")
+            strongSkippingInBuild.set("$strongSkippingInBuild")
             moduleRoot.set(layout.projectDirectory)
             kotlinSources.setFrom(fileTree(".") { include("**/*.kt") })
             composablesTxt.set(layout.projectDirectory.file("reports/app_debug-composables.txt"))
@@ -104,5 +105,43 @@ class PortholeComposeReportTaskFunctionalTest {
         val out = File(projectDir.root, "build/porthole/compose-report.json")
         assertTrue(out.isFile)
         assertTrue(out.readText().contains("\"Foo\""))
+    }
+
+    private fun runWithStrongSkipping(value: String): String {
+        write("settings.gradle.kts", "rootProject.name = \"scratch\"\n")
+        write("build.gradle.kts", buildScript(strongSkippingInBuild = value))
+        write("reports/app_debug-composables.txt", "restartable skippable fun Foo(\n  stable x: Int\n)\n")
+        write("reports/app_debug-classes.txt", "")
+        GradleRunner.create()
+            .withProjectDir(projectDir.root)
+            .withPluginClasspath()
+            .withArguments("composeReport", "--stacktrace")
+            .build()
+        return File(projectDir.root, "build/porthole/compose-report.json").readText()
+    }
+
+    @Test
+    fun `strongSkippingInBuild true serialises as a real JSON boolean, not the string 'true'`() {
+        val json = runWithStrongSkipping("true")
+        // Mutation quoted: `"strongSkippingInBuild" to strongSkippingInBuild.get()`
+        // in place of the `when` in PortholeComposeReportTask.kt's own
+        // generate() — the raw "true"/"false"/"unknown" string this task's
+        // own property already stores internally — is the one-line change
+        // that makes this assertion fail (it would read `"true"`, quoted,
+        // instead of the bare `true` a JSON consumer expects for a boolean).
+        assertTrue(json.contains("\"strongSkippingInBuild\": true"))
+        assertFalse(json.contains("\"strongSkippingInBuild\": \"true\""))
+    }
+
+    @Test
+    fun `strongSkippingInBuild false serialises as a real JSON boolean`() {
+        val json = runWithStrongSkipping("false")
+        assertTrue(json.contains("\"strongSkippingInBuild\": false"))
+    }
+
+    @Test
+    fun `strongSkippingInBuild unknown serialises as the string 'unknown'`() {
+        val json = runWithStrongSkipping("unknown")
+        assertTrue(json.contains("\"strongSkippingInBuild\": \"unknown\""))
     }
 }

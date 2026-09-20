@@ -863,3 +863,82 @@ describe("D8 (QA): the source fingerprint is cached per moduleRoot, not recomput
     expect(staleness(report).stale).toBe(true);
   });
 });
+
+/**
+ * Coordinator follow-up to GRA-69: the report is *always* compiled with
+ * strong skipping forced off (`ComposeCompilerWiring.configure`, Gradle
+ * side), so "restartable but not skippable" is not necessarily true of the
+ * app as it actually ships once the consuming module's own build leaves
+ * Kotlin's modern default (strong skipping on) in place. An agent reads the
+ * finding text and the tool description, never the README, so the caveat
+ * has to be part of the explanation string itself.
+ */
+describe("strongSkippingInBuild caveat (coordinator follow-up)", () => {
+  function joinWith(strongSkippingInBuild: boolean | "unknown"): ComposeJoin & { matched: true } {
+    const root = temporaryRoot();
+    write(
+      root,
+      "app/src/main/kotlin/com/example/shop/ui/Screens.kt",
+      "package com.example.shop.ui\n" +
+        "@Composable\n" +
+        "fun LeakyRow(highlight: RowHighlight) {\n" +
+        '  Modifier.portholeNode("Cart.ItemRow")\n' +
+        "}\n",
+    );
+    const realFingerprint = currentSourceFingerprint(path.join(root, "app"));
+    writeReport(
+      root,
+      "app",
+      baseReport({
+        module: "app",
+        sourceFingerprint: realFingerprint,
+        strongSkippingInBuild,
+        composables: [
+          composable({
+            name: "LeakyRow",
+            packageName: "com.example.shop.ui",
+            skippable: false,
+            parameters: [{ name: "highlight", type: "RowHighlight", stable: false, unused: false }],
+          }),
+        ],
+      }),
+    );
+    useProjectRoot(root);
+    const join = joinComposableNode("Cart.ItemRow");
+    if (!join.matched) throw new Error("expected a match");
+    return join as ComposeJoin & { matched: true };
+  }
+
+  it("appends the caveat when the report was compiled with strong skipping off but the build has it on", () => {
+    const explanation = explainNotSkippable(joinWith(true));
+    // Mutation quoted: flipping strongSkippingCaveat's guard from
+    // `report.strongSkippingInBuild !== true` to
+    // `report.strongSkippingInBuild === true` inverts which branch gets the
+    // sentence — this assertion only passes with the guard as written.
+    expect(explanation).toContain(
+      "Compiled with strong skipping off for this report; your build has it on, so this composable " +
+        "is skipped only when the caller passes the same `RowHighlight` instance — a new instance " +
+        "per recomposition still recomposes it.",
+    );
+  });
+
+  it("says nothing extra when the consuming module's own build also has strong skipping off", () => {
+    const explanation = explainNotSkippable(joinWith(false));
+    expect(explanation).not.toContain("Compiled with strong skipping off for this report");
+    expect(explanation).not.toContain("your build has it on");
+  });
+
+  it("says nothing extra when whether the build has strong skipping on could not be determined", () => {
+    const explanation = explainNotSkippable(joinWith("unknown"));
+    expect(explanation).not.toContain("Compiled with strong skipping off for this report");
+  });
+
+  it("exposes strongSkippingInBuild on the joined report regardless of whether the caveat fires", () => {
+    // The coordinator asked for this to be exposed on the join itself, not
+    // just baked into the prose — a caller building its own message needs
+    // the raw fact.
+    expect(joinWith(true).report.strongSkippingInBuild).toBe(true);
+    expect(joinWith(false).report.strongSkippingInBuild).toBe(false);
+    expect(joinWith("unknown").report.strongSkippingInBuild).toBe("unknown");
+  });
+});

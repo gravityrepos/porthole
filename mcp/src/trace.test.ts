@@ -1465,6 +1465,7 @@ describe("GRA-69: recompose-hotspot joins the compose compiler report", () => {
         stale: true,
         generatedAt: "now",
         gitHead: "abc",
+        strongSkippingInBuild: "unknown",
       },
     });
   });

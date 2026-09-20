@@ -927,6 +927,7 @@ export function findingsOf(
               stale: true as const,
               generatedAt: join.report.generatedAt,
               gitHead: join.report.gitHead,
+              strongSkippingInBuild: join.report.strongSkippingInBuild,
             }
           : {
               enclosingFunction: join.enclosingFunction,
@@ -936,6 +937,7 @@ export function findingsOf(
               restartable: join.composable.restartable,
               generatedAt: join.report.generatedAt,
               gitHead: join.report.gitHead,
+              strongSkippingInBuild: join.report.strongSkippingInBuild,
             }
         : undefined;
       const staleNote = join.matched && join.stale ? staleJoinNote(join.report) : null;
