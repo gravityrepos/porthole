@@ -1515,7 +1515,13 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "all: a Ktor call with no OkHttp engine underneath has no phase breakdown to attribute to, " +
         "and says so rather than guessing. Joins the device's own most recent `network` event in " +
         "force when the call started, so a call that ran on a metered cellular connection says so " +
-        "instead of just looking slow for no stated reason.",
+        "instead of just looking slow for no stated reason.\n\n" +
+        "`ringSnapshot` (present only on an error-severity finding, only while `system_trace_start` " +
+        "has a ring running): a fresh snapshot of it, pulled without blocking this call — a path and " +
+        "byte count once it lands, or `{ inProgress: true }` on the call that kicked it off or is " +
+        "still waiting on one already in flight. `porthole_status`'s `ring.lastSnapshot` carries the " +
+        "same result independently, for when the next `findings` call is not the first place you " +
+        "look.",
       inputSchema: windowShape,
       annotations: { readOnlyHint: true },
     },
@@ -1681,13 +1687,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
 
       const findings = trace.findings.map(withFollowUp);
 
-      // GRA-57: a fresh ring snapshot, attached to every error-severity
-      // finding in this result, when the ring is running and the cooldown
-      // allows it — see `RingController.maybeAutoSnapshotOnError`'s own doc
-      // comment for why this is best-effort and never turns a `findings`
-      // call itself into a failure. `findingsWithRing` (not `findings`) is
-      // what feeds `classify` below, so the attached path survives into the
-      // classified/new/ongoing shape the payload actually returns.
+      // GRA-57, QA R4: a ring snapshot attached to every error-severity
+      // finding in this result, when the ring is running — but never
+      // *awaited* here. `triggerAutoSnapshotOnError` is synchronous with
+      // respect to the snapshot itself: cloning the ring and pulling up to
+      // `bufferKb` worth of trace off the device is exactly the adb work
+      // GRA-89 made `capture_system_trace` non-blocking for, and the first
+      // `findings` call to see a fresh error is not a reason to reintroduce
+      // that block. `attached` is a *previous* call's finished snapshot
+      // (see that function's own doc comment); `inProgress` says one was
+      // just kicked off (or already was) and has not landed yet — `findings`
+      // says so in the finding itself rather than going quiet about it.
+      // `findingsWithRing` (not `findings`) is what feeds `classify` below,
+      // so whichever of the two survives into the classified/new/ongoing
+      // shape the payload actually returns.
       const hasErrorFinding = findings.some((f) => f.severity === "error");
       // `findings` (unlike system_trace_start/snapshot/stop) takes no
       // `serial` parameter of its own — PORTHOLE_SERIAL is the only way this
@@ -1695,16 +1708,20 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       // attached, the same fallback `diagnoseAndReconnect` already reads.
       // Without it, more than one attached device makes every adb call here
       // fail with "more than one device/emulator" — silently, by design
-      // (`maybeAutoSnapshotOnError` never fails `findings` itself), which
-      // was caught on this ticket's own dev host, not assumed.
-      const autoSnapshot = await ring.maybeAutoSnapshotOnError(hasErrorFinding, {
-        serial: process.env.PORTHOLE_SERIAL,
-        env: adbEnv,
-        binary: adbBinary,
-      });
-      const findingsWithRing = autoSnapshot
-        ? findings.map((f) => (f.severity === "error" ? { ...f, ringSnapshot: autoSnapshot } : f))
-        : findings;
+      // (this never fails `findings` itself), which was caught on this
+      // ticket's own dev host, not assumed.
+      const { attached: autoSnapshot, inProgress: autoSnapshotInProgress } = ring.triggerAutoSnapshotOnError(
+        hasErrorFinding,
+        { serial: process.env.PORTHOLE_SERIAL, env: adbEnv, binary: adbBinary },
+      );
+      const findingsWithRing =
+        autoSnapshot || autoSnapshotInProgress
+          ? findings.map((f) =>
+              f.severity === "error"
+                ? { ...f, ringSnapshot: autoSnapshot ?? { inProgress: true as const } }
+                : f,
+            )
+          : findings;
 
       // GRA-200: built from the same windowed `events` `trace` itself came
       // from, so this can never name a different window than the findings
@@ -2335,8 +2352,10 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "device is killed, and every file this feature could have left behind (the PID marker, the " +
         "config, any flushed or snapshotted trace) is removed. Safe to call even when nothing is " +
         "known to be running here — including after this MCP server restarted and no longer " +
-        "remembers starting anything, since this reads the device's own record of the session " +
-        "rather than trusting this process's memory alone.",
+        "remembers starting anything: this reads the device's own pid marker first, and falls back " +
+        "to scanning the device's process table by name when that marker is missing (it is written " +
+        "best-effort and can be absent even for a session that is genuinely running), so a session " +
+        "started by a process this one has no memory of is still found and killed.",
       inputSchema: {
         serial: z.string().optional().describe("Device serial, when more than one is attached."),
       },

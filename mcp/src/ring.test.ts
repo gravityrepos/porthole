@@ -20,17 +20,31 @@ import { buildRig } from "./testing/harness.js";
  * ticket's own research brief named — requires `write_into_file: true`,
  * which turns the on-device *file* into a continuously growing stream, not
  * a ring, and would have meant every snapshot stopped the very recording it
- * exists to preserve. `--background` (a plain detached child, no `--detach`
- * key needed because `unique_session_name` makes the session discoverable
- * by name afterward) plus `--clone-by-name` for a non-disruptive snapshot is
+ * exists to preserve. `--background-wait` (a detached child, blocked on
+ * confirming its own data sources actually started; no `--detach` key
+ * needed because `unique_session_name` makes the session discoverable by
+ * name afterward) plus `--clone-by-name` for a non-disruptive snapshot is
  * what `ring.ts` actually does instead — confirmed on the spike's emulator
  * by finding the source `perfetto` process still listed in `ps` immediately
- * after a `--clone-by-name` pull. This file is the test-suite half of that:
- * a fake adb standing in for the device, proving the plan is written
- * correctly, the right commands run in the right order, a snapshot pulls
- * without touching the running session, and `stop` leaves nothing behind —
- * the real emulator run is evidence in the ticket's report, not something
- * this suite can re-run in CI.
+ * after a `--clone-by-name` pull.
+ *
+ * QA on this ticket's first pass (R1/R2) found the pid `ring.ts` used to
+ * trust — parsed from perfetto's own stdout — was also the single point of
+ * failure that could leave a session running with nothing on this side able
+ * to find it again. `findRunningRingPid` (a `ps -A -o PID,ARGS` scan for the
+ * fixed `-o` target every ring session launches with) replaced it as the
+ * actual source of truth, for pid discovery, for `start`'s "already
+ * running" refusal, and as `stop`'s fallback when its own pid marker file
+ * is missing. This file's fake adb has to simulate that scan too — see
+ * `PORTHOLE_TEST_RING_PROCESS_MARKER`'s own comment below for how.
+ *
+ * This file is the test-suite half of all of it: a fake adb standing in for
+ * the device, proving the plan is written correctly, the right commands run
+ * in the right order, a snapshot pulls without touching the running
+ * session, a launch that forks but then fails is killed before it is
+ * reported as a failure, and `stop` leaves nothing behind even without its
+ * own marker file — the real emulator run is evidence in the ticket's
+ * report, not something this suite can re-run in CI.
  */
 
 // ---------------------------------------------------------------------------
@@ -93,6 +107,7 @@ describe("RingController.status(), with no adb call ever made", () => {
     expect(status.app).toBeNull();
     expect(status.snapshots).toBe(0);
     expect(status.lastSnapshotAt).toBeNull();
+    expect(status.lastSnapshot).toBeNull();
     // Shown even when idle — an agent deciding whether to turn the ring on
     // sees the cost before asking, not after.
     expect(status.overhead).toEqual(MEASURED_OVERHEAD);
@@ -109,6 +124,20 @@ describe("RingController.status(), with no adb call ever made", () => {
 // a fake adb standing in for the device
 // ---------------------------------------------------------------------------
 
+/**
+ * QA (R1/R2) on this ticket's first pass added the two things a fixed
+ * stdout-response table cannot fake: a device-side process the fake itself
+ * has to "remember" is alive across several separate adb invocations (each
+ * one a real, separate OS process — see `setupFakeRingAdb`'s own comment),
+ * and a `ps -A -o PID,ARGS` scan that has to see it. `PORTHOLE_TEST_RING_PROCESS_MARKER`
+ * is that memory: a file on disk that stands in for "the backgrounded
+ * perfetto process is alive on the device" — created when the fake's
+ * `--background-wait` handler decides to simulate a real fork (which is
+ * independent of whether the launch command itself reports success:
+ * `PORTHOLE_TEST_RING_START_ACK_FAIL=1` simulates perfetto forking and then
+ * the *acknowledgement* failing, exactly the QA repro this exists to catch —
+ * a live session, a failed launch command), and removed by `kill -TERM`.
+ */
 const FAKE_RING_ADB_PRELOAD_SOURCE = `
 const fs = require("fs");
 const path = require("path");
@@ -124,6 +153,8 @@ let a = resolved;
 if (a[0] === "-s") a = a.slice(2);
 
 const FAKE_PID = process.env.PORTHOLE_TEST_RING_PID || "9999";
+const PROCESS_MARKER = process.env.PORTHOLE_TEST_RING_PROCESS_MARKER;
+const DEVICE_OUT_PATH = "/data/misc/perfetto-traces/porthole-ring.pftrace";
 
 if (a[0] === "push") {
   logOrder("push");
@@ -136,16 +167,40 @@ if (a[0] === "push") {
   process.exit(0);
 }
 
-if (a[0] === "shell" && typeof a[1] === "string" && a[1].includes("--background")) {
+if (a[0] === "shell" && a[1] === "ps") {
+  logOrder("ps-scan");
+  // Mirrors ring.ts's own findRunningRingPid parsing: "<pid> <argv...>",
+  // matched on "perfetto" and the fixed -o path.
+  if (PROCESS_MARKER && fs.existsSync(PROCESS_MARKER)) {
+    process.stdout.write(
+      "  " + FAKE_PID + " perfetto --txt -c - --background-wait -o " + DEVICE_OUT_PATH + "\\n",
+    );
+  } else {
+    process.stdout.write("  PID ARGS\\n"); // header only — an empty table, same as a real device with nothing running
+  }
+  process.exit(0);
+}
+
+if (a[0] === "shell" && typeof a[1] === "string" && a[1].includes("--background-wait")) {
   logOrder("start");
   if (process.env.PORTHOLE_TEST_RING_START_FAIL === "1") {
+    // Never forked at all — a config/launch error, nothing for a later scan
+    // to find.
     process.stderr.write("fake-ring-adb: could not start\\n");
     process.exit(1);
   }
+  // The fork happens before the wait-for-acknowledgement phase in real
+  // perfetto too, so the marker is created regardless of what this
+  // invocation's own exit code ends up being.
+  if (PROCESS_MARKER) fs.writeFileSync(PROCESS_MARKER, "1");
+  if (process.env.PORTHOLE_TEST_RING_START_ACK_FAIL === "1") {
+    // QA's R1 repro, reframed for --background-wait: the process forked
+    // (the marker above proves it), but the acknowledgement the real flag
+    // waits on never arrived, so the command itself reports failure.
+    process.stderr.write("fake-ring-adb: timed out waiting for acknowledgement\\n");
+    process.exit(1);
+  }
   process.stdout.write(FAKE_PID + "\\n");
-  // A PTY warning perfetto genuinely writes on some hosts — ring.ts's PID
-  // parsing has to see past this, not merely happen to work without it.
-  process.stderr.write("Warning: No PTY.\\n");
   process.exit(0);
 }
 
@@ -156,6 +211,15 @@ if (a[0] === "shell" && typeof a[1] === "string" && a[1].startsWith("printf")) {
 
 if (a[0] === "shell" && typeof a[1] === "string" && a[1].includes("--clone-by-name")) {
   logOrder("clone");
+  // QA (R4): lets a test prove findings() never awaits this — a real clone
+  // of a multi-megabyte ring plus the pull after it takes real, measurable
+  // time; this is that time, under test control, without needing a real
+  // device.
+  const delayMs = Number(process.env.PORTHOLE_TEST_RING_CLONE_DELAY_MS || "0");
+  if (delayMs > 0) {
+    const sab = new SharedArrayBuffer(4);
+    Atomics.wait(new Int32Array(sab), 0, 0, delayMs);
+  }
   if (process.env.PORTHOLE_TEST_RING_CLONE_FAIL === "died") {
     process.stderr.write("perfetto_cmd.cc: no tracing session found matching porthole-ring\\n");
     process.exit(1);
@@ -186,6 +250,7 @@ if (a[0] === "shell" && typeof a[1] === "string" && a[1].startsWith("cat") && a[
 
 if (a[0] === "shell" && typeof a[1] === "string" && a[1].startsWith("kill")) {
   logOrder("kill");
+  if (PROCESS_MARKER && fs.existsSync(PROCESS_MARKER)) fs.unlinkSync(PROCESS_MARKER);
   process.exit(0);
 }
 
@@ -203,6 +268,8 @@ interface FakeRingAdb {
   env: NodeJS.ProcessEnv;
   order(): string[];
   lastPushedConfig(): string;
+  /** Whether the fake's own "device" currently believes a ring process is alive — the ps-scan's source of truth, checkable directly without going through adb. */
+  processMarkerExists(): boolean;
   cleanup(): void;
 }
 
@@ -213,6 +280,14 @@ interface FakeRingAdb {
  * dynamic local paths (a freshly `mkdtempSync`'d config file, a snapshot's
  * pulled-to path) that `testing/fakeAdb.ts`'s fixed-argv response table has
  * no way to key on, since the exact string is different on every test run.
+ *
+ * Each call builds its own root directory, and so its own
+ * `PORTHOLE_TEST_RING_PROCESS_MARKER` path — two fake adbs from two separate
+ * calls never see each other's "device", the same way two real devices
+ * would not. A test that wants two rigs to share one simulated device (a
+ * second MCP process finding the first one's ring) passes the *same*
+ * `FakeRingAdb.env` to both `buildRig` calls, not two separate
+ * `setupFakeRingAdb()` results.
  */
 function setupFakeRingAdb(extraEnv: NodeJS.ProcessEnv = {}): FakeRingAdb {
   const root = mkdtempSync(path.join(tmpdir(), "porthole-fake-ring-adb-"));
@@ -231,6 +306,7 @@ function setupFakeRingAdb(extraEnv: NodeJS.ProcessEnv = {}): FakeRingAdb {
   writeFileSync(orderLogPath, "");
   const lastPushedConfigPath = path.join(root, "last-pushed-config.pbtxt");
   writeFileSync(lastPushedConfigPath, "");
+  const processMarkerPath = path.join(root, "process.marker");
 
   return {
     binaryPath,
@@ -240,12 +316,21 @@ function setupFakeRingAdb(extraEnv: NodeJS.ProcessEnv = {}): FakeRingAdb {
       NODE_OPTIONS: `--require=${preloadPath}`,
       PORTHOLE_TEST_RING_ORDER_LOG: orderLogPath,
       PORTHOLE_TEST_RING_LAST_PUSHED_CONFIG: lastPushedConfigPath,
+      PORTHOLE_TEST_RING_PROCESS_MARKER: processMarkerPath,
     },
     order() {
       return readFileSync(orderLogPath, "utf8").split("\n").filter(Boolean);
     },
     lastPushedConfig() {
       return readFileSync(lastPushedConfigPath, "utf8");
+    },
+    processMarkerExists() {
+      try {
+        readFileSync(processMarkerPath);
+        return true;
+      } catch {
+        return false;
+      }
     },
     cleanup() {
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
@@ -280,7 +365,12 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
       // the point being this used no explicit `app` argument and still scoped
       // correctly, defaulting to the attached package.
       expect(config).toMatch(/atrace_apps: "[^"]+"/);
-      expect(fakeAdb.order()).toEqual(["push", "start", "pid-marker", "rm"]);
+      // A ps-scan before the launch (QA R2: "is one already running, even
+      // one this process did not start") and a second one after it (QA R1:
+      // the pid this controller trusts comes from the device's own process
+      // table, not from parsing perfetto's own stdout) bracket the
+      // push/start/marker/cleanup sequence.
+      expect(fakeAdb.order()).toEqual(["ps-scan", "push", "start", "ps-scan", "pid-marker", "rm"]);
     } finally {
       await rig.close();
     }
@@ -298,6 +388,114 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
     }
   });
 
+  it("QA R2: refuses a start when a session is found only by scanning the device — not this process's own memory of starting one", async () => {
+    // Two rigs sharing one simulated device (same fakeAdb.env, so the same
+    // process-table marker): rig1 starts a ring, rig2 is a fresh
+    // RingController — in-memory `running` is false on rig2, the same as
+    // after an MCP server restart — and must still refuse.
+    const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    try {
+      const started = await rig1.client.callTool("system_trace_start", {});
+      expect(started.isError).toBeFalsy();
+
+      const rig2 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        const secondStart = await rig2.client.callTool("system_trace_start", {});
+        expect(secondStart.isError).toBe(true);
+        expect(secondStart.text).toMatch(/already running/i);
+        expect(secondStart.text).toMatch(/no memory of/i);
+      } finally {
+        await rig2.close();
+      }
+    } finally {
+      await rig1.close();
+    }
+  });
+
+  it("QA R1: a launch that forks but fails its own acknowledgement is killed before start() reports failure, and leaves the config removed", async () => {
+    const rig = await buildRig({
+      adbBinary: fakeAdb.binaryPath,
+      adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_START_ACK_FAIL: "1" },
+    });
+    try {
+      expect(fakeAdb.processMarkerExists()).toBe(false);
+      const start = await rig.client.callTool("system_trace_start", {});
+      // The launch command itself reported failure (the acknowledgement
+      // never arrived) — QA's repro is that the session was nonetheless
+      // left running on the device when this was reported as a plain
+      // failure with nothing cleaned up.
+      expect(start.isError).toBe(true);
+      // QA R2's scan is what finds and kills it — not a pid parsed from a
+      // stdout line that, in this exact scenario, was never trustworthy.
+      const order = fakeAdb.order();
+      expect(order).toEqual(["ps-scan", "push", "start", "ps-scan", "kill", "rm"]);
+      // The device is actually clean, not merely reported as such: the fake
+      // "device"'s own process marker is gone (kill removed it) — proof
+      // independent of the order log, which only proves a command ran, not
+      // that it had the intended effect.
+      expect(fakeAdb.processMarkerExists()).toBe(false);
+
+      // A subsequent, ordinary start against the same (now genuinely clean)
+      // fake device must succeed — proving the failed launch left nothing
+      // behind for a real session to collide with. A fresh rig without the
+      // ACK-fail override, sharing the same fake device (same
+      // fakeAdb.binaryPath/env, so the same process marker path) — reusing
+      // `rig` itself would still be pointed at the ack-fail env for every
+      // call it makes, which would only prove the retry fails the same way,
+      // not that the device is actually clean.
+      const rigRetry = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        const retry = await rigRetry.client.callTool("system_trace_start", {});
+        expect(retry.isError).toBeFalsy();
+      } finally {
+        await rigRetry.close();
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA R3: a launch that never forks at all still removes the pushed config", async () => {
+    const rig = await buildRig({
+      adbBinary: fakeAdb.binaryPath,
+      adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_START_FAIL: "1" },
+    });
+    try {
+      const start = await rig.client.callTool("system_trace_start", {});
+      expect(start.isError).toBe(true);
+      // Nothing forked (no process marker was ever created), so there is
+      // nothing for the ps-scan to find and nothing to kill — but the
+      // config removal must still happen on this failure path.
+      const order = fakeAdb.order();
+      expect(order).toEqual(["ps-scan", "push", "start", "ps-scan", "rm"]);
+      expect(order).not.toContain("kill");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA R5: a snapshot with no outputDir lands under the project root, not the process's own working directory", async () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "porthole-ring-root-"));
+    const previousProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    process.env.PORTHOLE_PROJECT_ROOT = projectRoot;
+    try {
+      const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        await rig.client.callTool("system_trace_start", {});
+        const snap = await rig.client.callTool("system_trace_snapshot", {});
+        expect(snap.isError).toBeFalsy();
+        const snapshotPath = (snap.json as { path: string }).path;
+        expect(snapshotPath.startsWith(path.join(projectRoot, ".porthole", "traces"))).toBe(true);
+      } finally {
+        await rig.close();
+      }
+    } finally {
+      if (previousProjectRoot === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+      else process.env.PORTHOLE_PROJECT_ROOT = previousProjectRoot;
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it("snapshot clones the running session — not attach+stop — and pulls the result without stopping anything", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
@@ -311,7 +509,17 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
       // clone, then pull, then a cleanup rm of the on-device snapshot file —
       // never a "stop"/"kill" anywhere in here, which is the whole point of
       // --clone-by-name over --attach --stop.
-      expect(fakeAdb.order()).toEqual(["push", "start", "pid-marker", "rm", "clone", "pull", "rm"]);
+      expect(fakeAdb.order()).toEqual([
+        "ps-scan",
+        "push",
+        "start",
+        "ps-scan",
+        "pid-marker",
+        "rm",
+        "clone",
+        "pull",
+        "rm",
+      ]);
     } finally {
       await rig.close();
     }
@@ -364,12 +572,51 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
     }
   });
 
-  it("a snapshot whose clone fails because the session died on-device reports that, and status stops claiming it is running", async () => {
+  it("QA R2: stop finds and kills a genuinely running session by scanning the device when the pid marker is missing", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
-      const diedAdb = { ...fakeAdb.env, PORTHOLE_TEST_RING_CLONE_FAIL: "died" };
-      const rigDied = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: diedAdb });
+      const started = await rig.client.callTool("system_trace_start", {});
+      expect(started.isError).toBeFalsy();
+      expect(fakeAdb.processMarkerExists()).toBe(true);
+
+      // A second rig against the same simulated device, with the pid-marker
+      // file made unreadable for this one call only — standing in for a
+      // marker write that never landed (best-effort, per DEVICE_PID_PATH's
+      // own doc comment) rather than trusting the in-memory `this.pid` this
+      // fresh RingController does not have either.
+      const rigNoMarker = await buildRig({
+        adbBinary: fakeAdb.binaryPath,
+        adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_NO_PID_MARKER: "1" },
+      });
+      try {
+        const stop = await rigNoMarker.client.callTool("system_trace_stop", {});
+        expect(stop.isError).toBeFalsy();
+        const payload = stop.json as { wasRunning: boolean };
+        expect(payload.wasRunning).toBe(true);
+        const order = fakeAdb.order();
+        // pid-read fails first (the marker file is "missing"), then the
+        // scan finds it, then it is killed.
+        const stopOrder = order.slice(order.indexOf("pid-read"));
+        expect(stopOrder).toEqual(["pid-read", "ps-scan", "kill", "rm"]);
+        expect(fakeAdb.processMarkerExists()).toBe(false);
+      } finally {
+        await rigNoMarker.close();
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("a snapshot whose clone fails because the session died on-device reports that, and status stops claiming it is running", async () => {
+    // A second, independent fake adb — its own process-table marker, its
+    // own simulated "device" — rather than reusing `fakeAdb`: `start` now
+    // refuses a second session even one it did not itself start (QA R2), so
+    // sharing one fake device between two rigs here would make `rigDied`'s
+    // own `system_trace_start` see the first rig's still-"running" marker
+    // and correctly refuse, which is not what this test is about.
+    const diedFakeAdb = setupFakeRingAdb({ PORTHOLE_TEST_RING_CLONE_FAIL: "died" });
+    try {
+      const rigDied = await buildRig({ adbBinary: diedFakeAdb.binaryPath, adbEnv: diedFakeAdb.env });
       try {
         await rigDied.client.callTool("system_trace_start", {});
         const snap = await rigDied.client.callTool("system_trace_snapshot", {});
@@ -382,7 +629,7 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
         await rigDied.close();
       }
     } finally {
-      await rig.close();
+      diedFakeAdb.cleanup();
     }
   });
 
@@ -403,11 +650,22 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
       expect(ringAfter.snapshots).toBe(0);
 
       const snapshotOutputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-status-out-"));
-      await rig.client.callTool("system_trace_snapshot", { outputDir: snapshotOutputDir });
+      const snap = await rig.client.callTool("system_trace_snapshot", { outputDir: snapshotOutputDir });
       const afterSnapshot = await rig.client.callTool("porthole_status", {});
-      const ringAfterSnapshot = (afterSnapshot.json as { ring: Record<string, unknown> }).ring;
+      const ringAfterSnapshot = (afterSnapshot.json as {
+        ring: { snapshots: number; lastSnapshotAt: string | null; lastSnapshot: unknown };
+      }).ring;
       expect(ringAfterSnapshot.snapshots).toBe(1);
       expect(ringAfterSnapshot.lastSnapshotAt).not.toBeNull();
+      // QA (R4): porthole_status.ring.lastSnapshot carries the same result
+      // an explicit system_trace_snapshot call just returned — the same
+      // field `findings`' own fire-and-forget auto-snapshot populates
+      // without `findings` ever returning it directly.
+      expect(ringAfterSnapshot.lastSnapshot).toEqual({
+        path: (snap.json as { path: string }).path,
+        bytes: (snap.json as { bytes: number }).bytes,
+        auto: false,
+      });
     } finally {
       await rig.close();
     }
@@ -431,6 +689,32 @@ describe("system_trace_start / system_trace_snapshot / system_trace_stop", () =>
 // auto-snapshot on an error-severity finding
 // ---------------------------------------------------------------------------
 
+/**
+ * Polls `porthole_status` until its `ring.lastSnapshot` is set — the actual
+ * fact these tests care about, set at the very end of `RingController.snapshot`
+ * (after the clone, the pull, and its own on-device cleanup `rm` have all
+ * finished). Waiting on `fakeAdb.order()` containing "pull" instead is a
+ * race: that tag is written the instant the pull's OS process starts, not
+ * once `snapshot()`'s promise — which still has a cleanup `rm` and a
+ * `statSync` ahead of it — actually resolves and updates `pendingAutoSnapshot`.
+ */
+async function waitForAutoSnapshot(
+  rig: { client: { callTool(name: string, args?: Record<string, unknown>): Promise<{ json: unknown }> } },
+  timeoutMs = 3_000,
+): Promise<{ path: string; bytes: number; auto: boolean }> {
+  const start = Date.now();
+  for (;;) {
+    const status = await rig.client.callTool("porthole_status", {});
+    const lastSnapshot = (status.json as { ring: { lastSnapshot: { path: string; bytes: number; auto: boolean } | null } })
+      .ring.lastSnapshot;
+    if (lastSnapshot) return lastSnapshot;
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitForAutoSnapshot timed out after ${timeoutMs}ms waiting for ring.lastSnapshot`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 describe("findings auto-snapshots the ring on an error-severity finding", () => {
   let fakeAdb: FakeRingAdb;
 
@@ -452,14 +736,18 @@ describe("findings auto-snapshots the ring on an error-severity finding", () => 
     rmSync(path.join(process.cwd(), ".porthole", "traces"), { recursive: true, force: true });
   });
 
-  it("attaches a ringSnapshot to an error finding while the ring is running, and does not when it is not", async () => {
+  it("QA R4: the finding says a snapshot is in progress immediately, then carries the path once a later call asks again", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       const now = 10_000;
       // A main-thread stall long enough to be an error-severity finding —
       // the exact shape `trace.ts`'s own analyser already recognises.
       await rig.pushEvents([
-        { event: "blocked", t: now, data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" } },
+        {
+          event: "blocked",
+          t: now,
+          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+        },
       ]);
 
       const withoutRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
@@ -470,15 +758,67 @@ describe("findings auto-snapshots the ring on an error-severity finding", () => 
       expect(errorWithoutRing?.ringSnapshot).toBeUndefined();
 
       await rig.client.callTool("system_trace_start", {});
-      const withRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
-      const errorWithRing = (withRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
+
+      // The first call to see the error with the ring running kicks the
+      // snapshot off but does not wait for it (QA R4) — the finding says so
+      // rather than going quiet about it.
+      const firstWithRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
+      const firstError = (firstWithRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
         (f) => f.severity === "error",
       );
-      expect(errorWithRing).toBeDefined();
-      expect(errorWithRing?.ringSnapshot).toBeTruthy();
-      const ringSnapshot = errorWithRing?.ringSnapshot as { path: string; bytes: number };
+      expect(firstError).toBeDefined();
+      expect(firstError?.ringSnapshot).toEqual({ inProgress: true });
+
+      const lastSnapshot = await waitForAutoSnapshot(rig);
+
+      const secondWithRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
+      const secondError = (secondWithRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
+        (f) => f.severity === "error",
+      );
+      expect(secondError?.ringSnapshot).toBeTruthy();
+      const ringSnapshot = secondError?.ringSnapshot as { path: string; bytes: number };
       expect(readFileSync(ringSnapshot.path, "utf8")).toContain("porthole: fake-ring-label");
-      expect(fakeAdb.order()).toContain("clone");
+
+      // QA R4: porthole_status.ring.lastSnapshot independently carries the
+      // same finished result, `auto: true` since findings triggered it.
+      expect(lastSnapshot).toEqual({ path: ringSnapshot.path, bytes: ringSnapshot.bytes, auto: true });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA R4: findings returns before the fire-and-forget snapshot's own clone resolves", async () => {
+    const rig = await buildRig({
+      adbBinary: fakeAdb.binaryPath,
+      adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_CLONE_DELAY_MS: "1500" },
+    });
+    try {
+      await rig.client.callTool("system_trace_start", {});
+      await rig.pushEvents([
+        {
+          event: "blocked",
+          t: 10_000,
+          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+        },
+      ]);
+
+      const startedAt = Date.now();
+      const result = await rig.client.callTool("findings", { from: 0, to: 11_000 });
+      const elapsedMs = Date.now() - startedAt;
+      // The fake adb's own clone step alone takes 1.5s when it runs to
+      // completion — findings returning in well under that is what proves
+      // this call never awaited it, the same reasoning GRA-89 already
+      // established for capture_system_trace's adb calls.
+      expect(elapsedMs).toBeLessThan(1_000);
+      const errorFinding = (result.json as { findings: Array<Record<string, unknown>> }).findings.find(
+        (f) => f.severity === "error",
+      );
+      expect(errorFinding?.ringSnapshot).toEqual({ inProgress: true });
+
+      // Let the delayed clone (and the pull after it) actually finish
+      // before tearing the rig down — tidiness, not part of the assertion
+      // above.
+      await waitForAutoSnapshot(rig);
     } finally {
       await rig.close();
     }
@@ -489,10 +829,15 @@ describe("findings auto-snapshots the ring on an error-severity finding", () => 
     try {
       await rig.client.callTool("system_trace_start", {});
       await rig.pushEvents([
-        { event: "blocked", t: 10_000, data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" } },
+        {
+          event: "blocked",
+          t: 10_000,
+          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+        },
       ]);
 
       await rig.client.callTool("findings", { from: 0, to: 11_000 });
+      await waitForAutoSnapshot(rig);
       const cloneCallsAfterFirst = fakeAdb.order().filter((tag) => tag === "clone").length;
       expect(cloneCallsAfterFirst).toBe(1);
 
