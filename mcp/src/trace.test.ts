@@ -1452,12 +1452,20 @@ describe("GRA-69: recompose-hotspot joins the compose compiler report", () => {
     // Never promoted, and never built into prose (see explainNotSkippable's
     // own guard in composeReport.ts) — but a stale match is still worth
     // saying so about, transparently, rather than reading identically to
-    // "there is no report at all": `stale: true` is the fact that answers
-    // "say how old and against which source state" (GRA-69's own wording)
-    // without ever letting a stale report change severity or title.
+    // "there is no report at all": `generatedAt`/`gitHead` are the fact
+    // that answers "say how old and against which source state" (GRA-69's
+    // own wording), and `skippable` is deliberately ABSENT (D6, QA) — a
+    // stale report's own verdict may no longer be true of the current
+    // source, so it is never quoted as fact.
     expect(finding?.evidence).toEqual({
       composable: "Cart.ItemRow",
-      composeReport: { enclosingFunction: "LeakyRow", module: "app", skippable: false, stale: true },
+      composeReport: {
+        enclosingFunction: "LeakyRow",
+        module: "app",
+        stale: true,
+        generatedAt: "now",
+        gitHead: "abc",
+      },
     });
   });
 

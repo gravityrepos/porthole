@@ -2757,6 +2757,77 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     }
   });
 
+  it("D6 (QA): recompositions never publishes a stale report's skippable verdict, but does say how old it is", async () => {
+    savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+    resetSourceIndexForTests();
+    resetComposeReportCacheForTests();
+    withProjectRoot(FIXTURE_ROOT);
+    const moduleRoot = path.join(FIXTURE_ROOT, "app");
+    const reportDir = path.join(moduleRoot, "build", "porthole");
+    mkdirSync(reportDir, { recursive: true });
+    const reportFile = path.join(reportDir, "compose-report.json");
+    writeFileSync(
+      reportFile,
+      JSON.stringify({
+        generatedAt: "2026-09-20T04:10:00.000Z",
+        variant: "debug",
+        module: "app",
+        kotlinVersion: "2.1.0",
+        gitHead: "a1b2c3d",
+        // Never equal to a real computed hash — stale by construction.
+        sourceFingerprint: "stale-fingerprint-that-never-matches",
+        composables: [
+          {
+            name: "FixtureCartScreen",
+            packageName: "com.example.shop.ui",
+            restartable: true,
+            skippable: false,
+            parameters: [],
+          },
+        ],
+        classes: [],
+      }),
+    );
+    const rig = await buildRig({
+      handlers: {
+        recompositions: () => ({
+          nodes: [{ name: "Fixture.PromoField", count: 900, triggeredBy: [] }],
+          totalNodes: 1,
+          truncated: false,
+          unattributedWrites: [],
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("recompositions", {});
+      expect(result.isError).toBeFalsy();
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      // Mutation quoted: dropping the `if (join.stale) { return {...,
+      // stale: true, staleNote: ... } }` early-return branch in
+      // composeReportNodeInfo (index.ts) is what makes this assertion
+      // fail — it would fall through to the fresh-match branch and publish
+      // `skippable: false` as though the report still described the
+      // current source.
+      expect(nodes[0].composeReport).toEqual({
+        joined: true,
+        enclosingFunction: "FixtureCartScreen",
+        module: "app",
+        generatedAt: "2026-09-20T04:10:00.000Z",
+        gitHead: "a1b2c3d",
+        kotlinVersion: "2.1.0",
+        stale: true,
+        staleNote: "report from 2026-09-20T04:10:00.000Z at git a1b2c3d, sources have changed since — not used for a reason.",
+      });
+      expect(nodes[0].composeReport).not.toHaveProperty("skippable");
+    } finally {
+      await rig.close();
+      withProjectRoot(savedProjectRoot);
+      resetSourceIndexForTests();
+      rmSync(reportDir, { recursive: true, force: true });
+      resetComposeReportCacheForTests();
+    }
+  });
+
   it("recompositions says 'no report entry matched' with candidates rather than guessing, when nothing matches", async () => {
     savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
     resetSourceIndexForTests();

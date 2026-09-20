@@ -28,13 +28,71 @@ class ComposeReportParserTest {
     @Test
     fun `parses every composable in the fixture, not a subset`() {
         val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
-        // Mutation: change 6 to 5 — a truncated parse still "passes" any
-        // fewer-than check, only an exact count catches it.
-        assertEquals(6, report.composables.size)
+        // Mutation: change 9 to 8 — a truncated parse still "passes" any
+        // fewer-than check, only an exact count catches it. QaNoArgs
+        // (zero-parameter, D3), QaDefaultInt and QaDefaultClass (default
+        // parameter values, D2) were added to this fixture's own capture
+        // specifically to pin those two QA fixes against real output — see
+        // PROVENANCE.md.
+        assertEquals(9, report.composables.size)
         assertEquals(
-            listOf("HomeScreen", "CartScreen", "Controls", "LeakyRow", "ScopedRow", "RowBody"),
+            listOf(
+                "QaNoArgs",
+                "QaDefaultInt",
+                "QaDefaultClass",
+                "HomeScreen",
+                "CartScreen",
+                "Controls",
+                "LeakyRow",
+                "ScopedRow",
+                "RowBody",
+            ),
             report.composables.map { it.name },
         )
+    }
+
+    @Test
+    fun `D3 (QA) - a zero-parameter composable emitted on one line is parsed, not dropped`() {
+        // The exact regression: `restartable skippable fun QaNoArgs()` has
+        // no separate parameter block and no separate closing line at all
+        // — before this fix, the header regex required a line ending in a
+        // bare `(`, which this line never has, so the whole entry (name,
+        // restartable, skippable) was silently skipped. Real measured
+        // effect before the fix: 21 composables in this fixture's own
+        // `.txt`, 20 parsed by `parseComposablesTxt` — now 9 and 9 (the
+        // enlarged fixture's own real total, not the original 6-composable
+        // capture's).
+        val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
+        val noArgs = report.composables.single { it.name == "QaNoArgs" }
+        assertTrue(noArgs.restartable)
+        assertTrue(noArgs.skippable)
+        assertEquals(emptyList<Any>(), noArgs.parameters)
+    }
+
+    @Test
+    fun `D2 (QA) - a default parameter value never leaks into the captured type`() {
+        // Real measured bug: `count: Int = @static 1` parsed as type
+        // "Int = @static 1" before this fix — never a real class name, and
+        // useless to `findClass`'s lookup on the MCP side. `modifier:
+        // Modifier = Modifier` (rendered `Modifier? = @static Companion` by
+        // the compiler's own static-value printer) is this shape on nearly
+        // every real composable, which is why QaDefaultInt's own second
+        // parameter is exactly that.
+        val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
+        val defaultInt = report.composables.single { it.name == "QaDefaultInt" }
+        assertEquals(
+            listOf("count" to "Int", "modifier" to "Modifier?"),
+            defaultInt.parameters.map { it.name to it.type },
+        )
+    }
+
+    @Test
+    fun `D2 (QA) - a class-typed default value strips just as cleanly`() {
+        val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
+        val defaultClass = report.composables.single { it.name == "QaDefaultClass" }
+        val holder = defaultClass.parameters.single { it.name == "holder" }
+        assertEquals("QaDefaultHolder?", holder.type)
+        assertFalse(holder.stable)
     }
 
     @Test
@@ -111,7 +169,9 @@ class ComposeReportParserTest {
     @Test
     fun `parses every class in the fixture`() {
         val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
-        assertEquals(10, report.classes.size)
+        // 10 from the original capture, plus QaDefaultHolder (D2/D3 fixture
+        // enlargement).
+        assertEquals(11, report.classes.size)
     }
 
     @Test
@@ -128,6 +188,7 @@ class ComposeReportParserTest {
         // distinction ComposeReportParserTest and mcp/composeReport.ts's
         // stability-reason prose both key off.
         assertTrue(prop.stable)
+        assertEquals("stable", prop.stability)
     }
 
     @Test
@@ -137,6 +198,40 @@ class ComposeReportParserTest {
         assertFalse(cartApi.stable)
         assertTrue(cartApi.properties.all { !it.mutable })
         assertTrue(cartApi.properties.any { !it.stable })
+        // B2 (QA): `stable` alone cannot tell "proven unstable" apart from
+        // "runtime/uncertain" — `stability` is what mcp/composeReport.ts's
+        // fixed `stabilityReason` actually keys off to prefer this over
+        // CartViewModel's own merely-"runtime" `dao: CartStore`.
+        assertTrue(cartApi.properties.any { it.stability == "unstable" })
+    }
+
+    @Test
+    fun `B2 (QA) - CartViewModel's own dao field is runtime, not unstable — the distinction the old code collapsed`() {
+        // `runtime val dao: CartStore` — an interface, whose real stability
+        // depends on which implementation shows up at runtime — is a
+        // genuinely different, weaker claim than `unstable val api: CartApi`
+        // right below it in the same real class. Both used to read
+        // `stable: false` and be indistinguishable; `stability` is what
+        // fixed that.
+        val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
+        val cartViewModel = report.classes.single { it.name == "CartViewModel" }
+        val dao = cartViewModel.properties.single { it.name == "dao" }
+        val api = cartViewModel.properties.single { it.name == "api" }
+        assertEquals("runtime", dao.stability)
+        assertFalse(dao.stable)
+        assertEquals("unstable", api.stability)
+        assertFalse(api.stable)
+    }
+
+    @Test
+    fun `B2 (QA) - CartViewModel's delegate-backed vars all read stable, never the false instability cause`() {
+        val report = ComposeReportParser.parse(composablesTxt, composablesCsv = null, classesTxt)
+        val cartViewModel = report.classes.single { it.name == "CartViewModel" }
+        val delegates = cartViewModel.properties.filter { it.name.endsWith("\$delegate") }
+        assertEquals(5, delegates.size)
+        assertTrue(delegates.all { it.mutable })
+        assertTrue(delegates.all { it.stable })
+        assertTrue(delegates.all { it.stability == "stable" })
     }
 
     @Test

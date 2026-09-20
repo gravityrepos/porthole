@@ -1,3 +1,11 @@
+restartable skippable fun QaNoArgs()
+restartable skippable fun QaDefaultInt(
+  unused stable count: Int = @static 1
+  unused stable modifier: Modifier? = @static Companion
+)
+restartable skippable fun QaDefaultClass(
+  unused unstable holder: QaDefaultHolder? = @static null
+)
 restartable skippable scheme("[androidx.compose.ui.UiComposable]") fun HomeScreen(
   stable onOpenCart: Function1<String, Unit>
 )

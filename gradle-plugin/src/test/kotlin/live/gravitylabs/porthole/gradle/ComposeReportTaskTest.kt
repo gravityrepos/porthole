@@ -3,9 +3,7 @@
 package live.gravitylabs.porthole.gradle
 
 import org.gradle.api.GradleException
-import org.gradle.testfixtures.ProjectBuilder
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -77,38 +75,15 @@ class KotlinCompileTaskNameTest {
     }
 }
 
-class ComposeReportRequestedTest {
-
-    @Test
-    fun `true when the bare task name was requested`() {
-        val project = ProjectBuilder.builder().build()
-        project.gradle.startParameter.setTaskNames(listOf("portholeComposeReport"))
-        assertTrue(composeReportRequested(project))
-    }
-
-    @Test
-    fun `true when a project-qualified task name was requested`() {
-        val project = ProjectBuilder.builder().build()
-        project.gradle.startParameter.setTaskNames(listOf(":sample:portholeComposeReport"))
-        assertTrue(composeReportRequested(project))
-    }
-
-    @Test
-    fun `false for an ordinary build with no mention of the task`() {
-        val project = ProjectBuilder.builder().build()
-        project.gradle.startParameter.setTaskNames(listOf("assembleDebug", "test"))
-        assertFalse(composeReportRequested(project))
-    }
-
-    @Test
-    fun `a task name that merely contains the substring does not count`() {
-        // Regression guard: naive `contains` would wrongly match a
-        // hypothetical "myPortholeComposeReportThing" task.
-        val project = ProjectBuilder.builder().build()
-        project.gradle.startParameter.setTaskNames(listOf("notPortholeComposeReport"))
-        assertFalse(composeReportRequested(project))
-    }
-}
+// composeReportRequested(project) — a string match against
+// startParameter.taskNames — used to be tested here. D4 (QA, GRA-69)
+// removed it entirely: it does not see past a Gradle task-name abbreviation
+// (`pCR` for `portholeComposeReport`), which let a real, abbreviated
+// invocation skip the compose-compiler DSL while still running the report
+// task against stale `.txt` output — a stale-looking-fresh report. See
+// ComposeReportTask.kt's own KDoc on TASK_NAME, and
+// ComposeReportAbbreviationTest for the graph-based mechanism that replaced
+// it.
 
 class SourceFingerprintTest {
 

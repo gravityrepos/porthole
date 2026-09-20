@@ -132,29 +132,48 @@ PR that makes the change, not after the fact.
   with no hook any engine agrees on — and the OkHttp engine remains the
   documented way to get it anyway (GRA-66).
 - `portholeComposeReport` enables the Kotlin compose compiler's own metrics
-  for the debug variant (only when actually requested — an ordinary
-  `assembleDebug`/`test` build never pays the extra compile cost), and
-  parses its `*-composables.txt`/`*-classes.txt`/`*-composables.csv` reports
-  into `build/porthole/compose-report.json`: per composable, whether it is
-  restartable and skippable and why each parameter is or is not stable; per
-  class, whether it is stable and, when not, whether that is because of a
-  `var` property or an unstable-typed field. `recompositions` and
-  `findings`' `recompose-hotspot` now join a high-count composable against
-  this report — by resolving its `portholeNode`/`PortholeScreen` label to
-  source (reusing GRA-201's own index) and reading the enclosing
+  for the debug variant — gated on `project.gradle.taskGraph.whenReady`
+  finding the task in the *resolved* execution graph, not a string match
+  against the command line, so a Gradle task-name abbreviation
+  (`./gradlew :sample:pCR`) is recognised exactly like the full name rather
+  than silently running the report against stale, previously-cached compile
+  output — and parses its `*-composables.txt`/`*-classes.txt`/
+  `*-composables.csv` reports into `build/porthole/compose-report.json`: per
+  composable, whether it is restartable and skippable and why each
+  parameter is or is not stable (default parameter values, and a
+  zero-parameter composable's own one-line form, both parsed correctly, not
+  leaked into the type or dropped); per class, whether it is stable and,
+  when not, whether that is because of a `var` property Compose cannot
+  observe (never one it recognises as a `by mutableStateOf(...)`-style
+  delegate) or a field the compiler proved unstable (preferred over one it
+  could merely not determine). `recompositions` and `findings` now join a
+  composable against this report — by resolving its `portholeNode`/
+  `PortholeScreen` label to source (reusing GRA-201's own index, package-
+  narrowed every time the label's own declared package is known, not only
+  when more than one same-named candidate exists) and reading the enclosing
   `@Composable fun` from there, since the report is keyed by Kotlin function
-  name, never the label — and report the compiler's own reason in its own
-  words: `"LeakyRow is restartable but not skippable: parameter highlight:
-  RowHighlight is unstable. RowHighlight is unstable because it has a var
-  property (tappedAt)."` A hotspot that joins to a genuinely not-skippable
-  composable is promoted to `warning` (above the bare, ordering-only note it
-  used to be, and above one that IS skippable but still carries an unstable
-  parameter — busy, not broken, and reported under its own id); one that
-  does not join at all — no report, no source match, or more than one
-  same-named candidate with nothing to narrow by — reads exactly as it did
-  before this ticket, `id: "recompose-hotspot"`, never a guess. A report
-  older than the sources it describes is detected by a content fingerprint
-  and refused rather than joined silently (GRA-69).
+  name, never the label — and report the compiler's own reason and a remedy,
+  in its own words: `"LeakyRow is restartable but not skippable: parameter
+  highlight: RowHighlight is unstable. RowHighlight is unstable because it
+  has a var property (tappedAt). Annotate it @Immutable/@Stable, or make the
+  property val."` (a parameter typed as something this project never
+  compiled with the Compose compiler at all gets a different remedy — a
+  stability configuration file). A hotspot that joins to a genuinely
+  not-skippable composable is promoted to `warning` under
+  `id: "recompose-not-skippable"` (above the bare, ordering-only note it
+  used to be); one that is skippable but still carries an unstable parameter
+  is `"recompose-skippable-but-unstable"` — busy, not broken; one the
+  compiler never called restartable at all (`inline`,
+  `@NonRestartableComposable`) is `"recompose-not-restartable"`, described
+  truthfully rather than as "restartable but not skippable" — none of these
+  three is ever promoted above the first. One that does not join at all —
+  no report, no source match, or an unresolved same-name ambiguity — reads
+  exactly as it did before this ticket, `id: "recompose-hotspot"`, never a
+  guess. A report older than the sources it describes is detected by a
+  content fingerprint (cached per module, not recomputed per node) and
+  refused rather than joined silently — a stale match still names the
+  report's own age and the composable it would have joined, but never its
+  `skippable` verdict (GRA-69).
 - `ask_system_trace` puts three more questions to a trace: `startup` (launch
   type, duration and the platform's own attribution of what slowed it —
   binder, lock contention, GC, dex opening, bindApplication), `monitor_contention`

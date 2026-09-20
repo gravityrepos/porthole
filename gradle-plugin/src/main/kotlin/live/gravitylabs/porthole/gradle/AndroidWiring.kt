@@ -68,7 +68,6 @@ internal object AndroidWiring {
             val buildType = variant.buildType
             if (buildType != null && buildType in extension.debugBuildTypes.get()) {
                 debugVariantNames += variant.name
-                forceComposeReportRecompile(project, variant.name)
             }
         }
         return project.provider { debugVariantNames.toList() }
@@ -96,54 +95,9 @@ internal object AndroidWiring {
             val buildType = variant.buildType
             if (buildType != null && buildType in extension.debugBuildTypes.get()) {
                 debugVariantNames += variant.name
-                forceComposeReportRecompile(project, variant.name)
             }
         }
         return project.provider { debugVariantNames.toList() }
-    }
-
-    /**
-     * GRA-69: whenever `portholeComposeReport` was actually requested (see
-     * [composeReportRequested]'s own KDoc), the Kotlin compile task for
-     * [variantName] is told never to track its state at all — not merely
-     * "rerun me", `doNotTrackState` also stops a *future* run from caching
-     * this one, since a compile with reports on and one with them off would
-     * otherwise be indistinguishable cache entries once the reports
-     * themselves are int-not-tracked. See
-     * [PortholeComposeReportTask]'s own KDoc for the `FROM-CACHE`-with-zero-
-     * report-files failure mode this exists to close — measured against the
-     * real Kotlin 2.1 compose-compiler plugin, not assumed. Called for every
-     * debug variant, not only the one `-Pporthole.variant` will eventually
-     * resolve to: which variant that is is not known this early (see
-     * `resolveComposeReportVariant`'s own comment on why [application]'s own
-     * `debugVariantNames` has to be resolved this same asynchronous way), so
-     * this errs toward disabling caching on every candidate — inert on any
-     * variant that never actually gets built this run.
-     */
-    private fun forceComposeReportRecompile(project: Project, variantName: String) {
-        if (!composeReportRequested(project)) return
-        // `matching { }.configureEach { }`, not `named(name).configure { }`:
-        // this callback (AGP's own `onVariants`) can fire before the Kotlin
-        // Android plugin — a *different* listener on the same AGP variant
-        // API — has registered its own compile task for this variant, and
-        // `named()` throws immediately (`UnknownTaskException`) for a task
-        // that does not exist yet, `matching` does not — it is the lazy,
-        // exists-now-or-added-later form, and is what actually failed
-        // without it (measured: `Task with name 'compileRoomDebugKotlin' not
-        // found`, calling this from directly inside `onVariants`).
-        val taskName = kotlinCompileTaskName(variantName)
-        project.tasks.matching { it.name == taskName }.configureEach {
-            // Not `doNotTrackState`: tried first, and it makes the Kotlin
-            // compile task fail outright — "Changes are not tracked, unable
-            // determine incremental changes" — because Kotlin's own
-            // incremental compiler expects task-history tracking to still be
-            // available even when Gradle's up-to-date check is bypassed.
-            // `upToDateWhen { false }` + `cacheIf { false }` gets the same
-            // "always actually run" outcome this needs without turning off
-            // the tracking Kotlin's own incremental engine still wants.
-            outputs.upToDateWhen { false }
-            outputs.cacheIf { false }
-        }
     }
 
     /**
