@@ -289,6 +289,25 @@ PR that makes the change, not after the fact.
   `main-thread-stall` pointed at the app. The sample gets a
   `debugImplementation` LeakCanary dependency and a deliberate,
   clearly-marked Activity leak behind a "Leak activity" button (GRA-64).
+- Three more device-context signals, each a callback rather than a poll:
+  `PowerManager.addThermalStatusListener` (API 29+) reports every thermal
+  transition the instant it happens, with `getThermalHeadroom` (API 30+, a
+  10-second forecast) riding along where the platform supports it; every
+  Activity's `onCreate`/`onDestroy` now carries `isChangingConfigurations`
+  and whether a saved instance state came back, telling a rotation (both
+  halves fire, marked as a configuration change) apart from a process-death
+  restore (`onCreate` alone, with saved state, not marked as one); and the
+  app's current permission grant set — one `checkSelfPermission` pass over
+  exactly the permissions the manifest declared — is reported at install and
+  again on every foreground transition, so a permission revoked while the
+  app was backgrounded shows up the next time it matters. All three ride the
+  same `Application.ActivityLifecycleCallbacks` `StartupCollector` and this
+  collector's own foreground/background tracking already register — no
+  second, competing observer. `findings` correlates a SEVERE-or-worse
+  thermal span sustained past ten seconds with any dropped frames inside
+  that same window into a `thermal-throttling` finding — `warning`,
+  `correlated` (never `observed`: two things sharing a window is ordering,
+  not proof one caused the other) (GRA-73).
 
 ### Changed
 

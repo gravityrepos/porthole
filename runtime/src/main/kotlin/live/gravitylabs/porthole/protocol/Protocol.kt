@@ -307,6 +307,15 @@ internal object DeviceEventKinds {
 
     /** The active network transport changed, or was lost. */
     const val NETWORK = "network"
+
+    /** `PowerManager`'s thermal status changed. DeviceCollector (GRA-73). */
+    const val THERMAL = "thermal"
+
+    /** An Activity's onCreate/onDestroy, classified rotation vs process restore. DeviceCollector (GRA-73). */
+    const val ACTIVITY_LIFECYCLE = "activityLifecycle"
+
+    /** The app's current permission grant set, at install and on every foreground transition. DeviceCollector (GRA-73). */
+    const val PERMISSIONS = "permissions"
 }
 
 // ---------------------------------------------------------------------------

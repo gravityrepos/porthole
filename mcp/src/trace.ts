@@ -603,6 +603,66 @@ export function heapDumpWindowsOf(events: DeviceEvent[]): Array<{ from: number; 
   return [...seen.values()];
 }
 
+/** `DeviceCollector.kt`'s own thermal status ordering, mirrored (GRA-73). */
+const THERMAL_ORDER: Record<string, number> = {
+  none: 0,
+  light: 1,
+  moderate: 2,
+  severe: 3,
+  critical: 4,
+  emergency: 5,
+  shutdown: 6,
+};
+
+/**
+ * GRA-73: how long a SEVERE-or-worse thermal span has to last before it is
+ * "sustained" rather than a momentary blip a transition or two would
+ * produce on its own. No AC named an exact number; ten seconds is chosen to
+ * sit in the same order of magnitude as this file's other duration
+ * thresholds (`HTTP_SLOW_THRESHOLD_MS` above is 3s; a stall is 100ms) while
+ * being long enough that a single thermal reading flapping between LIGHT
+ * and SEVERE for a second or two does not read as "sustained."
+ */
+const THERMAL_SUSTAINED_MS = 10_000;
+
+/**
+ * GRA-73: the closed SEVERE-or-worse thermal spans a session's `thermal`
+ * sub-kind events describe — `from` the transition into SEVERE-or-worse,
+ * `to` the transition back out of it. A span still open at the end of the
+ * events given (the device was still throttling when the capture ended) is
+ * deliberately not returned: GRA-84's own lesson was that an invented
+ * ceiling is worse than an omitted one, and nothing here can honestly say
+ * when a still-open span would have ended.
+ */
+export function thermalSevereSpansOf(
+  events: DeviceEvent[],
+): Array<{ from: number; to: number; worst: string }> {
+  const thermal = events
+    .filter((e) => e.event === "device" && str(e.data.kind) === "thermal")
+    .sort((a, b) => a.t - b.t);
+
+  const spans: Array<{ from: number; to: number; worst: string }> = [];
+  let openFrom: number | null = null;
+  let worst = "";
+  for (const event of thermal) {
+    const status = str(event.data.status);
+    const rank = THERMAL_ORDER[status] ?? 0;
+    if (rank >= THERMAL_ORDER.severe) {
+      if (openFrom === null) {
+        openFrom = event.t;
+        worst = status;
+      } else if (rank > (THERMAL_ORDER[worst] ?? 0)) {
+        worst = status;
+      }
+    } else if (openFrom !== null) {
+      spans.push({ from: openFrom, to: event.t, worst });
+      openFrom = null;
+      worst = "";
+    }
+  }
+  return spans;
+}
+
 export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
@@ -923,6 +983,33 @@ export function findingsOf(
     });
   }
   // -- end GRA-64 -------------------------------------------------------
+
+  // -------------------------------------------------------------------
+  // GRA-73: thermal throttling correlated with frame drops. `confidence:
+  // "correlated"`, never "observed" — two things sharing a window is
+  // ordering, not proof the throttle caused the drops (the same
+  // distinction the recompose-hotspot section below already draws for
+  // recompositions and the state writes near them). Delimited so branches
+  // editing trace.ts in parallel do not collide with this section.
+  // -------------------------------------------------------------------
+  for (const span of thermalSevereSpansOf(events)) {
+    const durationMs = span.to - span.from;
+    if (durationMs < THERMAL_SUSTAINED_MS) continue;
+    const droppedInWindow = frames.filter((f) => f.t >= span.from && f.t <= span.to);
+    if (droppedInWindow.length === 0) continue;
+    const missed = droppedInWindow.reduce((sum, e) => sum + num(e.data.missedFrames, 1), 0);
+    findings.push({
+      id: "thermal-throttling",
+      severity: "warning",
+      confidence: "correlated",
+      title:
+        `${span.worst} thermal throttling sustained ${Math.round(durationMs / 1000)}s, ` +
+        `${missed} dropped ${missed === 1 ? "frame" : "frames"} in the same window`,
+      count: missed,
+      window: { from: span.from, to: span.to },
+    });
+  }
+  // -- end GRA-73 -------------------------------------------------------
 
   const retried = work.filter((w) => w.data.retrying === "true");
   if (retried.length > 0) {

@@ -17,6 +17,7 @@ import {
   frameBudgetMs,
   metricsOf,
   resolveProfile,
+  thermalSevereSpansOf,
 } from "./trace.js";
 
 function event(name: string, t: number, data: Record<string, unknown> = {}): DeviceEvent {
@@ -812,6 +813,105 @@ describe("findingsOf: GRA-64 LeakCanary", () => {
     const findings = find(events);
     expect(findings.some((f) => f.id === "main-thread-stall-heap-dump")).toBe(false);
     expect(findings.find((f) => f.id === "main-thread-stall")?.count).toBe(1);
+  });
+});
+
+describe("thermalSevereSpansOf and findingsOf: GRA-73 thermal throttling", () => {
+  const find = (events: DeviceEvent[]) => findingsOf(events, [], 60);
+
+  function thermalEvent(t: number, status: string) {
+    return event("device", t, { kind: "thermal", status, statusCode: "0" });
+  }
+
+  function frameEvent(t: number, missedFrames = 1) {
+    return event("frame", t, { missedFrames, totalMs: 30 });
+  }
+
+  it("returns no span at all below severe", () => {
+    const spans = thermalSevereSpansOf([thermalEvent(0, "none"), thermalEvent(1_000, "light")]);
+    expect(spans).toEqual([]);
+  });
+
+  it("opens a span at severe and closes it at the transition back below severe", () => {
+    const spans = thermalSevereSpansOf([
+      thermalEvent(1_000, "severe"),
+      thermalEvent(21_000, "moderate"),
+    ]);
+    expect(spans).toEqual([{ from: 1_000, to: 21_000, worst: "severe" }]);
+  });
+
+  it("tracks the worst status reached inside one span, critical outranking severe", () => {
+    const spans = thermalSevereSpansOf([
+      thermalEvent(0, "severe"),
+      thermalEvent(5_000, "critical"),
+      thermalEvent(10_000, "severe"),
+      thermalEvent(20_000, "light"),
+    ]);
+    expect(spans).toEqual([{ from: 0, to: 20_000, worst: "critical" }]);
+  });
+
+  it("a span still open at the end of the events is not returned — no invented ceiling (GRA-84)", () => {
+    const spans = thermalSevereSpansOf([thermalEvent(0, "severe")]);
+    expect(spans).toEqual([]);
+  });
+
+  it("two separate severe episodes become two separate spans", () => {
+    const spans = thermalSevereSpansOf([
+      thermalEvent(0, "severe"),
+      thermalEvent(5_000, "none"),
+      thermalEvent(100_000, "severe"),
+      thermalEvent(115_000, "none"),
+    ]);
+    expect(spans).toEqual([
+      { from: 0, to: 5_000, worst: "severe" },
+      { from: 100_000, to: 115_000, worst: "severe" },
+    ]);
+  });
+
+  // -- the finding itself: sustained, correlated, and only with frame drops --
+
+  it("a sustained severe span with dropped frames inside it becomes a correlated warning", () => {
+    const events = [
+      thermalEvent(0, "severe"),
+      frameEvent(5_000, 2),
+      thermalEvent(15_000, "none"),
+    ];
+    const finding = find(events).find((f) => f.id === "thermal-throttling");
+    expect(finding).toMatchObject({
+      severity: "warning",
+      confidence: "correlated",
+      count: 2,
+      window: { from: 0, to: 15_000 },
+    });
+    expect(finding?.title).toContain("severe");
+    expect(finding?.title).toContain("15s");
+    // No causal wording — the EM was explicit that this is ordering, not proof.
+    expect(finding?.title.toLowerCase()).not.toContain("caused");
+    expect(finding?.title.toLowerCase()).not.toContain("because");
+  });
+
+  it("a sustained severe span with no frame drops in it produces no finding", () => {
+    const events = [thermalEvent(0, "severe"), thermalEvent(15_000, "none")];
+    expect(find(events).some((f) => f.id === "thermal-throttling")).toBe(false);
+  });
+
+  it("a severe span shorter than the sustained threshold produces no finding, even with frame drops inside it", () => {
+    const events = [thermalEvent(0, "severe"), frameEvent(1_000), thermalEvent(2_000, "none")];
+    expect(find(events).some((f) => f.id === "thermal-throttling")).toBe(false);
+  });
+
+  it("a frame drop outside the thermal span's own window does not count toward it", () => {
+    const events = [
+      thermalEvent(0, "severe"),
+      thermalEvent(15_000, "none"),
+      frameEvent(20_000), // five seconds after the span already closed
+    ];
+    expect(find(events).some((f) => f.id === "thermal-throttling")).toBe(false);
+  });
+
+  it("moderate throttling, however long, never becomes this finding", () => {
+    const events = [thermalEvent(0, "moderate"), frameEvent(5_000), thermalEvent(30_000, "none")];
+    expect(find(events).some((f) => f.id === "thermal-throttling")).toBe(false);
   });
 });
 

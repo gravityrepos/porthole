@@ -10,6 +10,7 @@ import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.ConnectivityManager
 import android.net.Network
@@ -48,12 +49,17 @@ internal class DeviceCollector(private val ring: EventRing) {
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
     private var componentCallbacks: ComponentCallbacks2? = null
 
+    /** GRA-73: null below API 29, where there is nothing to unregister on [stop]. */
+    private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+
     fun install(app: Application): Boolean {
         emitProfile(app)
         watchLifecycle(app)
         watchConfiguration(app)
         watchPower(app)
         watchNetwork(app)
+        watchThermal(app)
+        emitPermissions(app, trigger = "install")
         return true
     }
 
@@ -70,6 +76,13 @@ internal class DeviceCollector(private val ring: EventRing) {
         lifecycleCallbacks = null
         componentCallbacks?.let { runCatching { app.unregisterComponentCallbacks(it) } }
         componentCallbacks = null
+        thermalListener?.let { listener ->
+            runCatching {
+                (app.getSystemService(Context.POWER_SERVICE) as? PowerManager)
+                    ?.removeThermalStatusListener(listener)
+            }
+        }
+        thermalListener = null
     }
 
     // -- the machine it is running on ---------------------------------------
@@ -151,6 +164,13 @@ internal class DeviceCollector(private val ring: EventRing) {
                 if (started == 1 && !foreground) {
                     foreground = true
                     emit(DeviceEventKinds.FOREGROUND, mapOf("activity" to activity.javaClass.simpleName))
+                    // GRA-73: the current grant set, re-checked on every
+                    // foreground transition — a permission revoked while the
+                    // app was backgrounded (Settings, or `adb shell pm
+                    // revoke` for this ticket's own AC) only ever shows up
+                    // to the OS, and therefore to this check, the next time
+                    // the app is resumed.
+                    emitPermissions(app, trigger = "foreground")
                 }
             }
 
@@ -162,11 +182,47 @@ internal class DeviceCollector(private val ring: EventRing) {
                 }
             }
 
-            override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+            // GRA-73: filled in here rather than through a second
+            // registration — GRA-60's StartupCollector already registers
+            // its own ActivityLifecycleCallbacks for a different reason
+            // (launch timing), and this class already has one of its own
+            // for foreground/background; a third competing observer would
+            // double-count the same callbacks for no reason. These two were
+            // the only no-ops left in this class's own lifecycle object.
+            override fun onActivityCreated(activity: Activity, state: Bundle?) {
+                emit(
+                    DeviceEventKinds.ACTIVITY_LIFECYCLE,
+                    mapOf(
+                        "phase" to "create",
+                        "activity" to activity.javaClass.simpleName,
+                        // True for both halves of a configuration-driven
+                        // recreate (a rotation, say) — false for a fresh
+                        // process handed a saved instance state back
+                        // (`am kill` + relaunch), which is exactly the
+                        // "rotation vs process restore" distinction this
+                        // event exists to carry: the same `savedInstanceState
+                        // != null` is true in both cases, so it alone cannot
+                        // tell them apart, but this flag can.
+                        "isChangingConfigurations" to activity.isChangingConfigurations.toString(),
+                        "savedInstanceState" to (state != null).toString(),
+                    ),
+                )
+            }
+
+            override fun onActivityDestroyed(activity: Activity) {
+                emit(
+                    DeviceEventKinds.ACTIVITY_LIFECYCLE,
+                    mapOf(
+                        "phase" to "destroy",
+                        "activity" to activity.javaClass.simpleName,
+                        "isChangingConfigurations" to activity.isChangingConfigurations.toString(),
+                    ),
+                )
+            }
+
             override fun onActivityResumed(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, out: Bundle) = Unit
-            override fun onActivityDestroyed(activity: Activity) = Unit
         }
         lifecycleCallbacks = callbacks
         app.registerActivityLifecycleCallbacks(callbacks)
@@ -324,6 +380,101 @@ internal class DeviceCollector(private val ring: EventRing) {
     private fun connectivity(app: Application): ConnectivityManager? =
         app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
+    // -- thermal throttling (GRA-73) -----------------------------------------
+
+    /**
+     * `PowerManager.addThermalStatusListener` — a real callback, not a poll:
+     * the system calls this exactly when the platform's own thermal status
+     * classification changes, so there is nothing here to schedule on a
+     * timer. API 29+; below that, this is a no-op and `thermalListener`
+     * stays null, which [stop] already treats as "nothing to unregister."
+     *
+     * `getThermalHeadroom` (API 30+, read fresh on every transition rather
+     * than cached) forecasts how close the device is to throttling further,
+     * [FORECAST_SECONDS] out — the system's own recommended way to get
+     * ahead of a transition rather than only ever reacting to one after it
+     * already happened. Omitted below API 30, or when the platform itself
+     * returns `NaN` (undocumented headroom on this device).
+     */
+    private fun watchThermal(app: Application) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val power = app.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        val listener = PowerManager.OnThermalStatusChangedListener { status ->
+            emit(
+                DeviceEventKinds.THERMAL,
+                buildMap {
+                    put("status", thermalStatusName(status))
+                    put("statusCode", status.toString())
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        val headroom = runCatching { power.getThermalHeadroom(FORECAST_SECONDS) }.getOrNull()
+                        if (headroom != null && !headroom.isNaN()) {
+                            put("thermalHeadroom", headroom.toString())
+                        }
+                    }
+                },
+            )
+        }
+        thermalListener = listener
+        // The single-argument overload (main thread), not the Executor one:
+        // the callback only ever builds a small map and emits an event, so
+        // there is nothing to gain from a second thread, and Robolectric's
+        // own shadow (DeviceCollectorTest) only shadows this overload —
+        // the Executor one silently reaches the real, unshadowed framework
+        // method under test, which is indistinguishable from "broken."
+        runCatching { power.addThermalStatusListener(listener) }
+            .onFailure { thermalListener = null }
+    }
+
+    private fun thermalStatusName(status: Int): String = when (status) {
+        PowerManager.THERMAL_STATUS_NONE -> "none"
+        PowerManager.THERMAL_STATUS_LIGHT -> "light"
+        PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+        PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+        PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+        PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+        else -> "unknown($status)"
+    }
+
+    // -- permission set (GRA-73) ---------------------------------------------
+
+    /**
+     * The app's current grant set — one [Context.checkSelfPermission] pass
+     * over exactly the permissions the manifest declared, read from
+     * [android.content.pm.PackageManager] rather than a fixed list, so this
+     * says something about *this* app rather than the platform's full
+     * permission catalogue. Called once at install (the set at launch) and
+     * again on every foreground transition (see [watchLifecycle]) — a
+     * revocation made while the app was backgrounded (Settings, or `adb
+     * shell pm revoke`) is invisible to the process until the OS hands
+     * control back to it, which is exactly when this fires next.
+     */
+    private fun emitPermissions(app: Application, trigger: String) {
+        val requested = runCatching {
+            app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
+                .requestedPermissions
+        }.getOrNull() ?: return
+        if (requested.isEmpty()) return
+
+        val granted = mutableListOf<String>()
+        val denied = mutableListOf<String>()
+        for (permission in requested) {
+            val isGranted = runCatching {
+                app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+            }.getOrDefault(false)
+            (if (isGranted) granted else denied) += permission
+        }
+
+        emit(
+            DeviceEventKinds.PERMISSIONS,
+            mapOf(
+                "trigger" to trigger,
+                "granted" to granted.joinToString(","),
+                "denied" to denied.joinToString(","),
+            ),
+        )
+    }
+
     private fun transportName(caps: NetworkCapabilities): String = when {
         caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
         caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
@@ -372,5 +523,10 @@ internal class DeviceCollector(private val ring: EventRing) {
                 },
             ),
         )
+    }
+
+    private companion object {
+        /** `getThermalHeadroom`'s forecast window — the value Android's own docs use. */
+        const val FORECAST_SECONDS = 10
     }
 }

@@ -996,6 +996,14 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       tool: "blocking",
       why: "confirms the pause sat inside the heap dump's own reconstructed window",
     },
+    // GRA-73: correlated, not observed — `timeline` (kinds: ["frame",
+    // "device"]) is where an agent checks whether the drops line up with
+    // the thermal span itself, or with something else that happened to
+    // share it.
+    "thermal-throttling": {
+      tool: "timeline",
+      why: 'the thermal transitions and the dropped frames side by side (kinds: ["frame", "device"])',
+    },
   };
 
   /**

@@ -2042,6 +2042,44 @@ inside it: a stall LeakCanary's own dump caused is reported as exactly
 that — "heap dump by LeakCanary", `note`, not the app's defect — instead of
 becoming a `main-thread-stall` finding pointed at the wrong culprit.
 
+## Thermal, activity lifecycle and permissions
+
+Three more device-context signals, each a callback rather than a poll —
+nothing here is on a timer.
+
+**Thermal.** `PowerManager.addThermalStatusListener` (API 29+) reports every
+transition the platform itself declares — `none` through `shutdown` — the
+instant it happens, with `getThermalHeadroom` (API 30+, a 10-second forecast)
+riding along when the platform supports it. This is the app's own,
+timeline-correlated half of thermal state; [`system_context`](#system-traces)
+is the other half — a live, on-demand snapshot pulled from the device's own
+thermal sensors over `adb shell`, useful for "what is the device doing right
+now" in a way a stream of past transitions is not. `findings` correlates the
+two only loosely: a SEVERE-or-worse span sustained past ten seconds, with
+dropped frames inside that same window, becomes a `thermal-throttling`
+finding — `warning`, and deliberately `correlated`, never `observed`. Two
+things sharing a window is ordering, not proof one caused the other, and this
+finding's own wording says so: it reports what coincided, not what caused
+what.
+
+**Activity lifecycle.** Every Activity's `onCreate`/`onDestroy` is reported
+with `isChangingConfigurations` and whether a saved instance state came back
+— which is what tells a rotation (both halves fire, marked as a configuration
+change) apart from a process-death restore (`onCreate` alone, with a saved
+state, `isChangingConfigurations` false, because there was no in-process
+`onDestroy` to mark — the old process is already gone). Wired into the same
+`Application.ActivityLifecycleCallbacks` [`StartupCollector`](#startup) and
+this collector's own foreground/background tracking already register —
+exactly one registration for the whole app, not a second, competing observer
+that would double-count the same callbacks.
+
+**Permissions.** The current grant set — one `checkSelfPermission` pass over
+exactly the permissions the manifest declared, read from `PackageManager`
+rather than a fixed list — reported once at install and again on every
+foreground transition. A permission revoked while the app was backgrounded
+(Settings, or `adb shell pm revoke`) is invisible to the process until the OS
+hands control back to it, which is exactly when the next check runs.
+
 ## Startup
 
 Every other collector attaches after the process is already up, so none of
