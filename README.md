@@ -34,6 +34,7 @@ them they cover:
 | `findings` | start here: what is wrong right now, ranked, each with the tool that shows its evidence |
 | `recompositions` | which composables recomposed, how often, and which state keys were written just before |
 | `semantics_tree` | the semantics tree with an id that stays stable across captures |
+| `accessibility` | a lint pass over a fresh semantics capture: missing labels, small touch targets, click/role mismatches, undescribed images, duplicated descriptions, text tight at a large font scale |
 | `nav_state` | back stack, arguments on each entry, and the deep link that got you here |
 | `state` | current values of your ViewModel state, named automatically, and whether writes to it are attributable |
 | `inflight` | open HTTP calls with the phase each is stuck in, running queries, WorkManager jobs |
@@ -1911,6 +1912,76 @@ cost is always counted in refreshes. Dividing by a relaxed deadline reported a
 
 Needs API 24. Below that the only techniques available force a vsync, so the
 collector reports nothing rather than lying.
+
+## Accessibility
+
+Porthole already captures the merged Compose semantics tree — what TalkBack
+reads: bounds, roles, text, state descriptions, actions and stable ids
+(`semantics_tree`, above) — and until GRA-72 used it only to line a node up
+with its own recomposition count. The same tree answers a short list of
+categorical, checkable questions nobody in that loop otherwise answers.
+`accessibility` runs the pass on a fresh capture:
+
+- **`warning`** — an interactive node (clickable, or carrying a role like
+  `Button`/`Checkbox`) with no `text` and no `contentDescription` at all: a
+  screen reader has nothing to announce for it. A **decorative** icon with
+  no description is correct, not a defect, and is never flagged here — only
+  a node that is actually interactive, or a non-decorative image (below),
+  ever reaches this rule.
+- **`warning`/`note`** — a touch target measurably under the 48dp minimum,
+  converted from the captured pixel bounds using the device's own density
+  (`DisplayMetrics.density`, carried on the `profile` device event this
+  reads through `ProfileData.density`). Compose's own
+  `minimumInteractiveComponentSize` modifier — wired into `IconButton`,
+  `Checkbox`, `RadioButton`, `Switch` and friends by default — pads a
+  visually smaller target back up to 48dp at touch time, invisibly to the
+  semantics tree (`bounds` here is always the *visual* size, never the
+  padded touch target, and nothing in the captured tree says whether a
+  parent disabled the minimum). So a target between 24dp and 48dp is a
+  `note` — that automatic padding may already have fixed it — and only a
+  target under 24dp, too small for that padding to plausibly explain away,
+  is a `warning`. Every finding says exactly this, not only the number.
+- **`note`** — a node whose role implies it is actionable (`Button`,
+  `Checkbox`, `Switch`, `RadioButton`, `Tab`, `DropdownList`) but carries no
+  click action, or the reverse: a click action with no semantic role a
+  screen reader would announce as actionable.
+- **`note`** — a `Role.Image` node with no `contentDescription`, not marked
+  `invisibleToUser` (Compose's own way of saying "deliberately decorative,"
+  the same marker TalkBack itself reads to skip a node entirely).
+- **`note`** — a description repeated across two or more siblings: a screen
+  reader announces the same thing for each, with nothing to tell them apart.
+- **`note`, `confidence: "correlated"`** — text whose box sits within 4dp of
+  its parent's on every edge, only when the system font scale is over 1.3×.
+  Conservative on purpose: this is where overflow at a larger scale is
+  plausible, never a confirmed clip.
+
+Every finding names the node's `stableId`, its path in the tree and any
+`testTag`. **There is no screenshot annotation** — visually marking the
+defect on a captured frame was cut from this build — so pairing a finding
+to what is actually on screen is by `stableId` through `semantics_tree`'s
+own output only, one more call away, never a picture. Coverage is stated
+honestly, always: only the Compose semantics tree is checked — a node drawn
+by a plain Android `View`, or anything Compose itself marked
+`invisibleToUser`, is invisible to this pass the same way it is invisible
+to TalkBack reading the merged tree — and a clean screen says so
+explicitly, `"nothing found, N node(s) checked"`, never a bare empty list
+indistinguishable from "did not look."
+
+`findings` folds these findings in too, but **only when a semantics capture
+already landed inside the window being asked about** — from `semantics_tree`
+or `accessibility`, either counts. `findings` never triggers a fresh
+capture of its own: that would add a live round trip to a tool every caller
+runs constantly, most of whom never asked about accessibility. Call
+`accessibility` (or `semantics_tree`) yourself first, then `findings` over
+a window covering that moment, and the accessibility findings ride along
+for free; ask `findings` about a window with no capture in it and they are
+silently absent, at no extra cost.
+
+Out of scope, on purpose: colour contrast (nothing captured here carries a
+rendered colour), a View hierarchy's own accessibility tree, and any claim
+of WCAG or platform compliance — this proves what the captured tree proves,
+never a certification. The TalkBack check on a real device remains the
+hardware pass this cannot replace.
 
 ## Main thread blocking
 

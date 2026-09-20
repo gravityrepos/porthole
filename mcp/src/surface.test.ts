@@ -474,6 +474,7 @@ describe("the tool surface", () => {
     "what_was_happening",
     "recompositions",
     "semantics_tree",
+    "accessibility",
     "nav_state",
     "state",
     "inflight",

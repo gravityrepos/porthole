@@ -223,6 +223,10 @@ describe("SessionWriter", () => {
       deviceRamMb: 12_288,
       refreshHz: 120,
       lowRamDevice: false,
+      // GRA-72: 0, not absent -- profileFromEvent's own documented "not
+      // present on this profile" sentinel, since this event carries no
+      // density field.
+      density: 0,
     });
   });
 
@@ -469,6 +473,7 @@ describe("SessionWriter: GRA-191 QA follow-up", () => {
         deviceRamMb: 12_288,
         refreshHz: 120,
         lowRamDevice: false,
+        density: 0,
       });
     } finally {
       vi.mocked(SessionWriter.prototype.flush).mockRestore();
