@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package live.gravitylabs.porthole.collect
 
+import android.app.Activity
 import android.app.Application
 import android.os.SystemClock
+import androidx.activity.ComponentActivity
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -11,6 +13,8 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import live.gravitylabs.porthole.Porthole
+import live.gravitylabs.porthole.protocol.EventFrame
 import live.gravitylabs.porthole.protocol.EventKinds
 import live.gravitylabs.porthole.store.EventRing
 import org.junit.Assert.assertEquals
@@ -19,6 +23,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
@@ -260,4 +265,234 @@ class StartupCollectorTest {
 
         assertTrue("stop() must not leave the emission still pending", startupEvents(ring).isEmpty())
     }
+}
+
+private class PlainActivity : Activity()
+
+private class TestComponentActivity : ComponentActivity()
+
+/**
+ * The GRA-60 follow-up: warm and hot launches observed live, not only
+ * classified in [StartupAssembly]. Drives a real Robolectric
+ * `ActivityController` through cold, then hot (the same Activity instance
+ * merely stopped and restarted), then warm (that instance destroyed and a
+ * fresh one created) — the same three shapes the coordinator's own follow-up
+ * names. `armNextFrame` is wired to a local variable rather than a real
+ * `FrameCollector`, the same way [StartupCollectorTest] drives `onFirstFrame`
+ * directly: what fires it is [FrameWiringTest] below, once, which is the
+ * seam this suite does not need to re-prove per scenario.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], manifest = Config.NONE)
+class StartupLiveRelaunchTest {
+
+    private val app: Application get() = RuntimeEnvironment.getApplication()
+
+    private fun startupEvents(ring: EventRing) = ring.since(0).filter { it.event == EventKinds.STARTUP }
+
+    private fun JsonElement.asObject(): JsonObject = this as JsonObject
+
+    private fun classificationOf(frame: EventFrame): String =
+        frame.data.asObject()["classification"]?.jsonPrimitive?.contentOrNull ?: "?"
+
+    @Test
+    fun `cold, then hot, then warm — each a real launch this collector observes live`() {
+        val ring = EventRing()
+        val collector = StartupCollector(ring)
+        var armedCallback: ((Long) -> Unit)? = null
+        collector.armNextFrame = { callback -> armedCallback = callback }
+        collector.install(app)
+
+        // -- cold: the process's first Activity --
+        val first = Robolectric.buildActivity(PlainActivity::class.java)
+        first.create().start().resume()
+        collector.onFirstFrame(SystemClock.uptimeMillis() + 10L)
+        ShadowLooper.idleMainLooper(2_000, TimeUnit.MILLISECONDS)
+
+        val afterCold = startupEvents(ring)
+        assertEquals(1, afterCold.size)
+        assertEquals("cold", classificationOf(afterCold[0]))
+        assertNull("armNextFrame must not arm during the cold launch itself", armedCallback)
+
+        // -- hot: the same instance, merely stopped and brought back — no onCreate --
+        first.pause().stop()
+        assertNull("no pending launch should be armed while the app is merely backgrounded", armedCallback)
+        // restart() alone dispatches onRestart *and* onStart (Robolectric's
+        // ActivityController combines them, matching the real framework
+        // sequence for coming back from stopped) — a separate start() call
+        // after it double-counts onActivityStarted, which is what the first
+        // version of this test got wrong and diagnosed via startedCount.
+        first.restart().resume()
+        assertTrue("the 0-to-1 transition should have armed the next-frame hook", armedCallback != null)
+        armedCallback!!.invoke(SystemClock.uptimeMillis() + 40L)
+        armedCallback = null
+
+        val afterHot = startupEvents(ring)
+        assertEquals(2, afterHot.size)
+        val hot = afterHot[1]
+        assertEquals("hot", classificationOf(hot))
+        assertFalse(
+            "a hot launch must not report an Application.onCreate phase",
+            hot.data.asObject().containsKey("onCreateEntryMs"),
+        )
+        assertFalse(
+            "a hot launch has no fresh Activity.onCreate either",
+            hot.data.asObject().containsKey("activityOnCreateMs"),
+        )
+        assertTrue(hot.data.asObject().containsKey("activityOnResumeMs"))
+
+        // -- warm: that instance destroyed, a fresh one created --
+        first.pause().stop().destroy()
+        val second = Robolectric.buildActivity(PlainActivity::class.java)
+        second.create()
+        assertTrue("onCreate on a fresh instance should arm the next-frame hook immediately", armedCallback != null)
+        second.start().resume()
+        armedCallback!!.invoke(SystemClock.uptimeMillis() + 80L)
+        armedCallback = null
+
+        val afterWarm = startupEvents(ring)
+        assertEquals(3, afterWarm.size)
+        val warm = afterWarm[2]
+        assertEquals("warm", classificationOf(warm))
+        assertFalse(
+            "a warm launch must not report an Application.onCreate phase either",
+            warm.data.asObject().containsKey("onCreateEntryMs"),
+        )
+        assertTrue(
+            "a warm launch's whole distinguishing feature is a fresh Activity.onCreate",
+            warm.data.asObject().containsKey("activityOnCreateMs"),
+        )
+
+        // "cold only once per process" — the property EM's follow-up asked to keep and test.
+        assertEquals(listOf("cold", "hot", "warm"), afterWarm.map(::classificationOf))
+        assertTrue(afterWarm.drop(1).none { it.data.asObject().containsKey("onCreateEntryMs") })
+    }
+
+    @Test
+    fun `a second launch cannot begin before the cold event has actually been emitted`() {
+        val ring = EventRing()
+        val collector = StartupCollector(ring)
+        var armedCallback: ((Long) -> Unit)? = null
+        collector.armNextFrame = { callback -> armedCallback = callback }
+        collector.install(app)
+
+        val first = Robolectric.buildActivity(PlainActivity::class.java)
+        first.create().start().resume()
+        // No onFirstFrame() yet — the cold event has not been emitted. A
+        // second activity showing up now (a second window in a
+        // multi-activity app's own launch sequence, say) must not be
+        // mistaken for a relaunch: startedCount never reached zero.
+        val second = Robolectric.buildActivity(PlainActivity::class.java)
+        second.create().start().resume()
+
+        assertNull("no relaunch should be armed before the process's own cold event exists", armedCallback)
+        assertTrue(startupEvents(ring).isEmpty())
+    }
+}
+
+/**
+ * androidx.activity 1.7's own `ComponentActivity.reportFullyDrawn()` observed
+ * automatically — GRA-60's follow-up 2. No `Porthole.reportFullyDrawn()` call
+ * anywhere in this test; the platform API alone is enough.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], manifest = Config.NONE)
+class ComponentActivityReportFullyDrawnTest {
+
+    private val app: Application get() = RuntimeEnvironment.getApplication()
+
+    private fun startupEvents(ring: EventRing) = ring.since(0).filter { it.event == EventKinds.STARTUP }
+
+    private fun JsonElement.asObject(): JsonObject = this as JsonObject
+
+    @Test
+    fun `Activity_reportFullyDrawn on a ComponentActivity is caught with no app code`() {
+        val ring = EventRing()
+        val collector = StartupCollector(ring)
+        collector.install(app)
+
+        val controller = Robolectric.buildActivity(TestComponentActivity::class.java)
+        controller.create().start().resume()
+
+        collector.onFirstFrame(SystemClock.uptimeMillis() + 10L)
+        // The standard platform API — not Porthole.reportFullyDrawn().
+        controller.get().reportFullyDrawn()
+        ShadowLooper.idleMainLooper(2_000, TimeUnit.MILLISECONDS)
+
+        val events = startupEvents(ring)
+        assertEquals(1, events.size)
+        assertTrue(
+            "expected reportFullyDrawnMs from the automatic ComponentActivity hook",
+            events.single().data.asObject().containsKey("reportFullyDrawnMs"),
+        )
+    }
+
+    @Test
+    fun `a plain, non-ComponentActivity gets no automatic hook, and no crash either`() {
+        val ring = EventRing()
+        val collector = StartupCollector(ring)
+        collector.install(app)
+
+        val controller = Robolectric.buildActivity(PlainActivity::class.java)
+        controller.create().start().resume()
+
+        collector.onFirstFrame(SystemClock.uptimeMillis() + 10L)
+        ShadowLooper.idleMainLooper(2_000, TimeUnit.MILLISECONDS)
+
+        val events = startupEvents(ring)
+        assertEquals(1, events.size)
+        assertFalse(events.single().data.asObject().containsKey("reportFullyDrawnMs"))
+    }
+}
+
+/**
+ * The regression this suite otherwise cannot catch: [FrameCollector.onFirstDraw]
+ * is a field [live.gravitylabs.porthole.Porthole.install] sets, not something
+ * [StartupCollector] reaches on its own. Deleting that one wiring line would
+ * leave every test above green — they all call `collector.onFirstFrame(...)`
+ * directly — while a real device would never emit a `startup` event at all.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], manifest = Config.NONE)
+class FrameWiringTest {
+
+    private val app: Application get() = RuntimeEnvironment.getApplication()
+
+    @Test
+    fun `Porthole install wires FrameCollector's first-draw callback into StartupCollector`() {
+        Porthole.install(app, port = 0)
+        try {
+            val session = currentSessionOrNull() ?: error("Porthole.install did not leave a session behind")
+            val fields = sessionFields(session)
+            val frames = fields["frames"] as? FrameCollector ?: error("Session has no `frames` field")
+            val ring = fields["ring"] as? EventRing ?: error("Session has no `ring` field")
+
+            val callback = frames.onFirstDraw
+            assertTrue("Porthole.install should have wired FrameCollector.onFirstDraw", callback != null)
+
+            // Calling it directly is exactly what FrameCollector's own frame
+            // listener does once it sees a first-draw frame — the one part of
+            // that path a real FrameMetrics object (no public constructor)
+            // cannot be manufactured to exercise here.
+            callback!!(SystemClock.uptimeMillis() + 5L)
+            ShadowLooper.idleMainLooper(2_000, TimeUnit.MILLISECONDS)
+
+            val events = ring.since(0).filter { it.event == EventKinds.STARTUP }
+            assertEquals(1, events.size)
+        } finally {
+            Porthole.shutdown()
+        }
+    }
+
+    private fun currentSessionOrNull(): Any? {
+        val field = Class.forName("live.gravitylabs.porthole.Porthole").getDeclaredField("session")
+        field.isAccessible = true
+        return field.get(Porthole)
+    }
+
+    private fun sessionFields(session: Any): Map<String, Any?> =
+        session.javaClass.declaredFields.associate { f ->
+            f.isAccessible = true
+            f.name to f.get(session)
+        }
 }

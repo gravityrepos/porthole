@@ -182,8 +182,12 @@ object Porthole {
                 // GRA-60: the only way StartupCollector learns "first frame
                 // drawn" is from this same listener — see FrameCollector's
                 // own `onFirstDraw` doc comment for why it is a plain field
-                // rather than something StartupCollector polls for.
+                // rather than something StartupCollector polls for. A warm
+                // or hot launch has no first-draw frame of its own, so it
+                // arms FrameCollector's separate one-shot `armNextFrame` hook
+                // instead, on demand, each time it detects one.
                 frames.onFirstDraw = { atMs -> startup.onFirstFrame(atMs) }
+                startup.armNextFrame = { callback -> frames.armNextFrame(callback) }
             }
             if (startup.install(app)) collectors += "startup"
             watchdog.start()
@@ -391,19 +395,21 @@ object Porthole {
     }
 
     /**
-     * Tells the `startup` event when the app considers itself fully drawn —
-     * everything on screen, not just the first frame.
-     *
-     * Android has no way for anything outside the app to observe a plain
+     * The documented fallback. Call `Activity.reportFullyDrawn()` — the
+     * standard Android API — and in a Compose app, or any app whose Activity
+     * extends `androidx.activity.ComponentActivity`, that is already enough:
+     * [live.gravitylabs.porthole.integration.ComponentActivityPorthole]
+     * hooks `ComponentActivity`'s own `fullyDrawnReporter` automatically, no
+     * app code at all. This exists for the Activity that is not one — Android
+     * otherwise gives nothing outside the app a way to observe a plain
      * `Activity.reportFullyDrawn()` call: there is no listener for it, and
      * the system's own logcat line naming it is written by `system_server`,
      * under a different uid than the app's own — the same restriction
      * [live.gravitylabs.porthole.collect.LogCollector]'s doc comment already
      * describes for why that collector can only ever see the app's own
-     * output. Call this next to (or instead of) `Activity.reportFullyDrawn()`
-     * if you want the gap to first-fully-useful measured; skip it and
-     * `findings` says once, as a note, that it was never observed — which is
-     * an honest "we don't know", not a claim that the app is slow to draw.
+     * output. Skip both and `findings` says once, as a note, that it was
+     * never observed — an honest "we don't know", not a claim that the app
+     * is slow to draw.
      *
      * A no-op once the `startup` event has already been emitted (see
      * `StartupCollector`'s grace window) — late is better than a second,
