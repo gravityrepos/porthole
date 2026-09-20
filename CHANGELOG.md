@@ -61,15 +61,30 @@ PR that makes the change, not after the fact.
   interrupting it (a spike found the ticket's own proposed `--detach`/
   `--attach --stop` sequence requires `write_into_file: true`, which turns
   the on-device file into a growing stream rather than a ring, and would
-  have stopped the recording on every snapshot). `system_trace_stop` kills
-  the backgrounded session and removes every file it could have left behind,
-  reading the device's own record of the pid so it works even after an MCP
-  server restart. Any error-severity finding `findings` reports while the
-  ring is running gets a fresh snapshot attached to it automatically
-  (rate-limited to once per ten seconds). `porthole_status` carries the
-  ring's running state, depth and a measured-on-emulator overhead figure
-  (0.45% of one core under a light synthetic workload); a hardware
-  measurement is a separate, still-open pass (GRA-57).
+  have stopped the recording on every snapshot; full transcript in
+  `docs/spikes/GRA-57-perfetto-ring.md`), and reports the same
+  `portholeLabels` count `capture_system_trace` does. The ring's own
+  TraceConfig declares the same data sources `capture_system_trace`'s
+  light-config shorthand resolves to — `android.surfaceflinger.frametimeline`,
+  `linux.process_stats`, `linux.system_info` alongside `linux.ftrace` — after
+  QA found a ring snapshot answered zero `ask_system_trace` questions with
+  `linux.ftrace` alone. `system_trace_stop` kills the backgrounded session
+  and removes every file it could have left behind, reading the device's own
+  pid marker first and falling back to a process-table scan when that marker
+  is missing or was never written (a launch that forks but then fails is
+  killed by the same scan before it is ever reported as a failure — a bad
+  launch cannot leave a live session behind). `porthole_status` and
+  `system_trace_snapshot` fall back to that same device check on a cache
+  miss, so a restarted MCP server can still see, snapshot from, or warn
+  about a ring it did not itself start. Any error-severity finding
+  `findings` reports while the ring is running gets a fresh snapshot
+  attached to it automatically, fired in the background rather than
+  awaited (`{ inProgress: true }` until a later call or
+  `porthole_status`'s `ring.lastSnapshot` has it), rate-limited to once per
+  ten seconds. `porthole_status` carries the ring's running state, depth and
+  a measured-on-emulator overhead figure (0.45% of one core under a light
+  synthetic workload); a hardware measurement is a separate, still-open pass
+  (GRA-57).
 
 - A slow HTTP call now says which part was slow. `installPorthole()` reports
   OkHttp's own `EventListener` phase breakdown (`dns`, `connect`,

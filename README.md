@@ -1318,15 +1318,26 @@ place of the `--detach`/`--attach --stop` sequence originally proposed for it
 (that sequence needs `write_into_file: true`, which turns the on-device file
 into a continuously growing stream rather than a ring, and stopping-to-flush
 would have interrupted the very recording a snapshot exists to preserve).
-`system_trace_stop`
-kills the backgrounded process and removes every file the feature could have
-left behind, and does so even after an MCP server restart that no longer
-remembers starting anything — it reads the device's own record of the pid,
-not just this process's memory. Any error-severity finding produced by
-`findings` while the ring is running gets a snapshot attached to it
-automatically (`ringSnapshot` on the finding), rate-limited to once per ten
-seconds so an agent polling `findings` for an ongoing problem does not pull a
-fresh multi-megabyte trace on every call.
+`system_trace_stop` kills the backgrounded process and removes every file the
+feature could have left behind, and does so even after an MCP server restart
+that no longer remembers starting anything: it reads the device's own pid
+marker first, and — QA on this ticket's first pass found that write is itself
+best-effort, so a dropped write or a process killed before it lands must not
+make the session unreachable — falls back to scanning the device's own process
+table by name when the marker is missing. `system_trace_start` uses the same
+scan to refuse a second session even one it did not itself start, and to make
+sure a failed launch never leaves a session running with nothing on this side
+able to find it again: any adb failure after perfetto has actually forked is
+followed by that same scan-and-kill before the tool reports failure, not
+after. Any error-severity finding produced by `findings` while the ring is
+running gets a snapshot attached to it automatically (`ringSnapshot` on the
+finding), rate-limited to once per ten seconds so an agent polling `findings`
+for an ongoing problem does not pull a fresh multi-megabyte trace on every
+call — and, per the same QA pass, never awaited inline: cloning and pulling
+the ring is exactly the adb work GRA-89 made `capture_system_trace`
+non-blocking for, so `findings` fires it in the background and reports
+`{ inProgress: true }` until a later call (or `porthole_status`'s
+`ring.lastSnapshot`) can hand back the finished path.
 
 **Overhead, measured on an emulator (`porthole-gra57`, Pixel 6 profile, API
 36, arm64-v8a) — hardware pending.** 20 seconds of synthetic input (alternating
@@ -1349,7 +1360,30 @@ would normally allow. Doze was not usefully testable on an emulator —
 without the real hardware path (actual CPU or radio suspension), so a pass
 there proves only that the simulated state does not kill the session, not
 that genuine deep sleep on a phone would not. That is left to the hardware
-pass along with the overhead number above.
+pass along with the overhead number above. The full transcript — every
+command, the `--detach`/`write_into_file` dead end, and the data-source gap
+below — is in
+[docs/spikes/GRA-57-perfetto-ring.md](docs/spikes/GRA-57-perfetto-ring.md).
+
+**The ring's own config declares the same data sources `capture_system_trace`
+gets from its light-config shorthand**, not `linux.ftrace` alone: a QA pass
+found `ask_system_trace` got zero findings from every ring snapshot until
+`android.surfaceflinger.frametimeline`, `linux.process_stats` and
+`linux.system_info` were added to match what `perfetto`'s bare-category CLI
+form actually resolves to (confirmed by reading a real capture's own embedded
+config back with `trace_processor_shell`, not assumed from the docs — see
+the spike writeup). `system_trace_snapshot`'s own `portholeLabels` field
+reports the same runtime-annotation count `capture_system_trace` does, so the
+GRA-186 acceptance criterion has evidence on the ring path too.
+
+**`porthole_status` and `system_trace_snapshot` consult the device, not just
+this process's memory**, on a cache miss: a restarted MCP server used to
+report a genuinely-running ring as `running: false` and refuse to snapshot
+it, unable to see (or warn about) a session still costing CPU. Both now fall
+back to the same pid-marker-then-process-scan check `system_trace_stop`
+already used — a ring discovered this way reports `running: true` with an
+honestly-`null` `app`/`startedAt`/`bufferKb`, since a process that did not
+start a session has no way to know its plan.
 
 `ask_system_trace` turns that file into an answer without anyone opening a
 trace viewer. It runs a fixed set of eight questions — jank, thread states,
