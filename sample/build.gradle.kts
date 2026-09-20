@@ -92,6 +92,17 @@ dependencies {
 
     // The sample serves its own API from inside the app so the demo is
     // self-contained and deterministic. Swapping in a real base URL is one line.
+    //
+    // GRA-64 emulator finding: mockwebserver's own MockWebServer class
+    // extends org.junit.rules.ExternalResource, so junit:junit has to stay
+    // a real, resolvable-at-runtime dependency here — excluding it (even
+    // with a compileOnly fallback for the compiler) crashes
+    // ShopApplication.onCreate with NoClassDefFoundError the moment a
+    // MockWebServer is actually constructed. That real junit on the
+    // classpath is also exactly what leakcanary-android's own classpath
+    // probe reads as "this is an instrumented test process, not a real
+    // app" and disables itself for — see debug/res/values/leak_canary.xml
+    // for the actual fix, a resource LeakCanary itself reads.
     implementation(libs.mockwebserver)
 
     // GRA-64: debugImplementation, the same as every real app would use it —

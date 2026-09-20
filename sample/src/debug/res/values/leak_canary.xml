@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright 2026 Gravity Labs
+  SPDX-License-Identifier: Apache-2.0
+-->
+<!--
+  GRA-64 emulator finding: LeakCanary decides "this process is an
+  instrumented test, not a real app" by checking whether
+  `leak_canary_test_class_name` (org.junit.Test, by default) is on the
+  classpath — a heuristic square/leakcanary#1968 documents as a known false
+  positive for exactly this app's own shape: MockWebServer's
+  `okhttp3.mockwebserver.MockWebServer` extends
+  `org.junit.rules.ExternalResource`, which keeps junit:junit a real,
+  resolvable-at-runtime dependency of this debug build (see
+  sample/build.gradle.kts's own comment on why it cannot simply be
+  excluded), and LeakCanary reads that presence as a test run and disables
+  itself entirely — silently: `setup`'s `leakcanary` row still reports
+  hooked, because the disablement happens deeper, inside LeakCanary's own
+  heap-dump trigger, not at the point this project's hook attaches.
+  square/leakcanary#2048 added this exact override for the exact case named
+  in its own doc: "when apps may ship JUnit in their debug classpaths"
+  (OkHttp's MockWebServer, by name). Pointed at a class this app's own
+  runtime classpath never has — LeakCanary's probe is `Class.forName`,
+  which simply never finds it, so the "am I in a test" check never fires
+  true.
+-->
+<resources>
+    <string name="leak_canary_test_class_name" translatable="false">live.gravitylabs.porthole.LeakCanaryNeverPresentInThisApp</string>
+</resources>
