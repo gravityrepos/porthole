@@ -69,8 +69,8 @@ describe("SelectionPanel's ask-the-trace action (GRA-115 ruling 1)", () => {
 describe("SelectionPanel's no-coverage message (ruling 3)", () => {
   it("says plainly that no capture covers the moment, naming it, and offers a copy control instead of an ask button", () => {
     render(<SelectionPanel hit={frameHit(5000, 34)} traces={[]} selectedTraceId={null} contextWindow={null} />);
-    // Frame at t=5000, totalMs=34 -> raw [4966, 5000] -> floored to [4883, 5083].
-    expect(screen.getByText("No capture on file covers device uptime 4883–5083ms.")).toBeTruthy();
+    // Frame at t=5000 (its vsync), totalMs=34 -> raw [5000, 5034] -> floored to [4917, 5117].
+    expect(screen.getByText("No capture on file covers device uptime 4917–5117ms.")).toBeTruthy();
     expect(screen.queryByText("ask the trace")).toBeNull();
     expect(screen.getByText("copy prompt")).toBeTruthy();
   });
@@ -107,7 +107,7 @@ describe("SelectionPanel's answer, once a covering trace is chosen", () => {
       confidence: "observed",
       title: "the frame timeline recorded a miss",
       source: "trace",
-      window: { from: 4883, to: 5083 },
+      window: { from: 4917, to: 5117 },
     };
     const fetchMock = stubFetch(findingsPayload({ findings: [finding] }));
     vi.stubGlobal("fetch", fetchMock);
@@ -224,9 +224,9 @@ describe("the outgoing request carries the hit's own window, never a view (rulin
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const url = String(fetchMock.mock.calls[0][0]);
-    // Frame at t=5000, totalMs=34 -> raw [4966, 5000] -> floored to [4883, 5083].
-    expect(url).toContain("from=4883");
-    expect(url).toContain("to=5083");
+    // Frame at t=5000 (its vsync), totalMs=34 -> raw [5000, 5034] -> floored to [4917, 5117].
+    expect(url).toContain("from=4917");
+    expect(url).toContain("to=5117");
     expect(url).not.toContain("from=-50000");
     expect(url).not.toContain("to=500000");
   });

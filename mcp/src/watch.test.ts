@@ -322,7 +322,9 @@ describe("runWatch(): human-readable stdout", () => {
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain("ERROR");
       expect(lines[0]).toContain("main thread blocked for 6240ms");
-      expect(lines[0]).toContain("t=2088311..2094551");
+      // `blocked` is stamped at the stall's start (MainThreadWatchdog's
+      // `at = startedAt`), so the window runs forward from t by durationMs.
+      expect(lines[0]).toContain("t=2094551..2100791");
       expect(lines[0]).toContain("CartViewModel.blockTheMainThread(CartViewModel.kt:146)");
     },
     10_000,
