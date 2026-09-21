@@ -60,6 +60,7 @@ class LeakCanaryTest {
         LeakCanaryPorthole.uninstall()
         LeakCanary.config = LeakCanary.Config()
         LeakCanaryPorthole.lastHookThreadName = null
+        LeakCanaryPorthole.lastHookThread = null
     }
 
     private fun EventFrame.field(key: String) = (data as JsonObject).getValue(key).jsonPrimitive
@@ -76,13 +77,17 @@ class LeakCanaryTest {
      */
     private fun installAndAwaitHook(ring: EventRing) {
         assertTrue(LeakCanaryPorthole.install(ring))
-        val deadlineAt = System.currentTimeMillis() + 5_000
-        while (Setup.report().none { it.name == "leakcanary" }) {
-            if (System.currentTimeMillis() > deadlineAt) {
-                fail("LeakCanaryPorthole's background hook thread did not finish within 5s")
-            }
-            Thread.sleep(5)
-        }
+        // Join the thread this install actually started rather than polling
+        // Setup.report(): that row is process-wide and still says "hooked"
+        // from the previous test, so polling it returned before this
+        // install's own thread had run (the CI-only failures of 2026-09-20).
+        val thread = requireNotNull(LeakCanaryPorthole.lastHookThread) { "install() started no hook thread" }
+        thread.join(5_000)
+        if (thread.isAlive) fail("LeakCanaryPorthole's background hook thread did not finish within 5s")
+        assertTrue(
+            "expected Setup to report leakcanary as hooked after the thread finished",
+            Setup.report().any { it.name == "leakcanary" },
+        )
     }
 
     private fun leakTrace(className: String, retainedBytes: Int?) = LeakTrace(

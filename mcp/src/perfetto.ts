@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants, existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { resolveProjectRoot } from "./adb.js";
+import { resolveProjectRoot, spawnOptionsFor } from "./adb.js";
 import type { Finding } from "./trace.js";
 
 /**
@@ -1250,7 +1250,9 @@ const MAX_STDOUT_BYTES = 32 * 1024 * 1024;
 export function runScript(binary: string, args: string[], sql: string, timeoutMs: number): Promise<RunResult> {
   return new Promise((resolvePromise) => {
     const start = Date.now();
-    const child = spawn(binary, args);
+    // spawnOptionsFor: a .cmd/.bat binary (the test double on Windows) needs
+    // shell: true since Node refuses to spawn batch files directly.
+    const child = spawn(binary, args, spawnOptionsFor(binary, {}));
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     let stdout = "";

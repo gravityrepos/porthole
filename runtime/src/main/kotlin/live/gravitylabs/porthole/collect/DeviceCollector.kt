@@ -77,9 +77,14 @@ internal class DeviceCollector(private val ring: EventRing) {
         componentCallbacks?.let { runCatching { app.unregisterComponentCallbacks(it) } }
         componentCallbacks = null
         thermalListener?.let { listener ->
-            runCatching {
-                (app.getSystemService(Context.POWER_SERVICE) as? PowerManager)
-                    ?.removeThermalStatusListener(listener)
+            // The listener only ever exists on API 29+ (watchThermal returns
+            // early below it), but lint cannot see that: guard the removal the
+            // same way the registration is guarded.
+            if (Build.VERSION.SDK_INT >= 29) {
+                runCatching {
+                    (app.getSystemService(Context.POWER_SERVICE) as? PowerManager)
+                        ?.removeThermalStatusListener(listener)
+                }
             }
         }
         thermalListener = null

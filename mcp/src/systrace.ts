@@ -626,7 +626,11 @@ export async function stopAndPullSystraceCapture(
   localPath: string,
   adbOptions: RunAdbAsyncOptions,
 ): Promise<SystraceStopResult> {
-  await runAdbAsync(["shell", `kill -TERM ${handle.pid}`], adbOptions);
+  // Separate arguments, not one "kill -TERM <pid>" string: `adb shell` joins
+  // them with spaces either way, and a single space-containing argument is
+  // re-split by cmd.exe on Windows (adb.ts spawns .cmd shims through a
+  // shell there), which made the fake adb see a different call per platform.
+  await runAdbAsync(["shell", "kill", "-TERM", String(handle.pid)], adbOptions);
   await waitForCaptureToExit(handle.plan.devicePath, adbOptions);
 
   const pulled = await runAdbAsync(["pull", handle.plan.devicePath, localPath], adbOptions);

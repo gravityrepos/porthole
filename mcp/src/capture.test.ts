@@ -730,7 +730,7 @@ describe("porthole capture --systrace (GRA-103)", () => {
       [fakeAdbArgsKey(["shell", "ps", "-A", "-o", "PID,ARGS"])]: {
         stdout: `PID ARGS\n${pid} perfetto --background-wait -o ${plan.devicePath} -t ${plan.seconds}s\n`,
       },
-      [fakeAdbArgsKey(["shell", `kill -TERM ${pid}`])]: { stdout: "" },
+      [fakeAdbArgsKey(["shell", "kill", "-TERM", String(pid)])]: { stdout: "" },
       [fakeAdbArgsKey(["pull", plan.devicePath, pftracePath])]: { stdout: "1 file pulled" },
       [fakeAdbArgsKey(["shell", "rm", "-f", plan.devicePath])]: { stdout: "" },
     });
@@ -797,7 +797,7 @@ describe("porthole capture --systrace (GRA-103)", () => {
       [fakeAdbArgsKey(["shell", "ps", "-A", "-o", "PID,ARGS"])]: {
         stdout: `PID ARGS\n${pid} perfetto --background-wait -o ${plan.devicePath} -t ${plan.seconds}s\n`,
       },
-      [fakeAdbArgsKey(["shell", `kill -TERM ${pid}`])]: { stdout: "" },
+      [fakeAdbArgsKey(["shell", "kill", "-TERM", String(pid)])]: { stdout: "" },
       [fakeAdbArgsKey(["pull", plan.devicePath, pftracePath])]: { stdout: "1 file pulled" },
       [fakeAdbArgsKey(["shell", "rm", "-f", plan.devicePath])]: { stdout: "" },
     });
@@ -841,7 +841,7 @@ describe("porthole capture --systrace (GRA-103)", () => {
       [fakeAdbArgsKey(["shell", "ps", "-A", "-o", "PID,ARGS"])]: {
         stdout: `PID ARGS\n${pid} perfetto --background-wait -o ${plan.devicePath} -t ${plan.seconds}s\n`,
       },
-      [fakeAdbArgsKey(["shell", `kill -TERM ${pid}`])]: { stdout: "" },
+      [fakeAdbArgsKey(["shell", "kill", "-TERM", String(pid)])]: { stdout: "" },
       [fakeAdbArgsKey(["pull", plan.devicePath, pftracePath])]: { stdout: "1 file pulled" },
       [fakeAdbArgsKey(["shell", "rm", "-f", plan.devicePath])]: { stdout: "" },
     });
@@ -889,7 +889,7 @@ describe("porthole capture --systrace (GRA-103)", () => {
       [fakeAdbArgsKey(["shell", "ps", "-A", "-o", "PID,ARGS"])]: {
         stdout: `PID ARGS\n${pid} perfetto --background-wait -o ${plan.devicePath} -t ${plan.seconds}s\n`,
       },
-      [fakeAdbArgsKey(["shell", `kill -TERM ${pid}`])]: { stdout: "" },
+      [fakeAdbArgsKey(["shell", "kill", "-TERM", String(pid)])]: { stdout: "" },
       [fakeAdbArgsKey(["pull", plan.devicePath, pftracePath])]: {
         stderr: "adb: error: failed to stat remote object",
         exitCode: 1,

@@ -75,6 +75,23 @@ internal object LeakCanaryPorthole {
     @Volatile internal var lastHookThreadName: String? = null
 
     /**
+     * The most recent background hook thread [install] started, so a test
+     * can `join()` it instead of polling [Setup.report] — whose `leakcanary`
+     * row is process-wide state that survives from one test to the next,
+     * and so says "hooked" before *this* install's thread has run at all.
+     */
+    @Volatile internal var lastHookThread: Thread? = null
+
+    /**
+     * Bumped by every [install] and every [uninstall]. The hook thread
+     * captures the value at launch and [hook] refuses to touch
+     * `LeakCanary.config` if it has moved on since — an uninstall (or a
+     * re-install) that overtook a still-pending thread must not have that
+     * thread come back later and chain a stale listener over the top.
+     */
+    private var generation = 0L
+
+    /**
      * Probes the classpath and, if LeakCanary is there, hooks it — off the
      * main thread.
      *
@@ -120,9 +137,10 @@ internal object LeakCanaryPorthole {
      */
     fun install(ring: EventRing): Boolean {
         if (!classPresent(PROBE_CLASS)) return false
-        Thread({
+        val launched = synchronized(this) { ++generation }
+        val thread = Thread({
             lastHookThreadName = Thread.currentThread().name
-            runCatching { hook(ring) }
+            runCatching { hook(ring, launched) }
                 .onSuccess { Setup.recordLeakCanary(present = true, hooked = true, hint = null) }
                 .onFailure { t ->
                     // leakcanary-android is on the classpath (the probe
@@ -146,8 +164,9 @@ internal object LeakCanaryPorthole {
                 }
         }, "porthole-leakcanary-hook").apply {
             isDaemon = true
-            start()
         }
+        lastHookThread = thread
+        thread.start()
         return true
     }
 
@@ -167,7 +186,10 @@ internal object LeakCanaryPorthole {
     // lock in the overwhelmingly common case: shutdown() is a test/reinstall
     // path, not a hot one) so `chained` and `LeakCanary.config` are never
     // read and written from both at once.
-    private fun hook(ring: EventRing): Unit = synchronized(this) {
+    private fun hook(ring: EventRing, launched: Long): Unit = synchronized(this) {
+        // Overtaken by an uninstall() or a later install(): do nothing, and
+        // leave no trace — Setup's row is the newer call's to fill in.
+        if (launched != generation) return
         val existing = LeakCanary.config.onHeapAnalyzedListener
         chained = existing
         LeakCanary.config = LeakCanary.config.copy(
@@ -190,6 +212,7 @@ internal object LeakCanaryPorthole {
      * `stop()` regardless of whether that collector ever started.
      */
     fun uninstall(): Unit = synchronized(this) {
+        generation++
         val previous = chained ?: return
         chained = null
         runCatching { LeakCanary.config = LeakCanary.config.copy(onHeapAnalyzedListener = previous) }
