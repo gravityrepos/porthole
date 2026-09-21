@@ -3190,13 +3190,13 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**2158 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**2435 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 686 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 678
-passed, 0 failed, 8 skipped), 1159 in the MCP server (`cd mcp && npm test` —
-1153 passed, 0 failed, 6 skipped), and 313 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 313 passed, 0 failed, 0
+[Testing](#testing)): 771 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 763
+passed, 0 failed, 8 skipped), 1352 in the MCP server (`cd mcp && npm test` —
+1346 passed, 0 failed, 6 skipped), and 312 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 312 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
 XML, and when 2158 disagrees with the sum of the three suites' totals stated
