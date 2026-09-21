@@ -1212,8 +1212,10 @@ One that cannot be resolved with confidence carries `resolved: false` and
 why — `"not found"` (nothing under the root has that name), `"ambiguous"`
 (more than one thing does — a bare `CartViewModel.kt` is not enough in a
 multi-module app with two of them; the finding also carries `candidates`,
-every path it actually found, so an agent can say which files rather than
-just "more than one"), `"not in project"` (the evidence named a package,
+every distinct path it actually found — a name declared twice in one file,
+a class and a function sharing an identifier, still counts as one candidate
+file, not two — so an agent can say which files rather than just "more than
+one"), `"not in project"` (the evidence named a package,
 and nothing under the root is authored in it at all — a library frame,
 `okhttp3.internal.connection.RealCall`, an androidx class: the class is
 real, but none of its own source ever shipped in this checkout), or
@@ -2106,27 +2108,68 @@ categorical, checkable questions nobody in that loop otherwise answers.
   `Checkbox`, `Switch`, `RadioButton`, `Tab`, `DropdownList`) but carries no
   click action, or the reverse: a click action with no semantic role a
   screen reader would announce as actionable.
-- **`note`** — a `Role.Image` node with no `contentDescription`, not marked
-  `invisibleToUser` (Compose's own way of saying "deliberately decorative,"
-  the same marker TalkBack itself reads to skip a node entirely).
-- **`note`** — a description repeated across two or more siblings: a screen
-  reader announces the same thing for each, with nothing to tell them apart.
+- **`note`** — a `Role.Image` node with no `contentDescription`. A node
+  Compose itself marked `invisibleToUser` never reaches any rule at all —
+  see "invisibleToUser" below — so this branch no longer needs its own
+  decorative-image check the way an earlier build did.
+- **`note`** — a description repeated across two or more (visible) siblings:
+  a screen reader announces the same thing for each, with nothing to tell
+  them apart.
 - **`note`, `confidence: "correlated"`** — text whose box sits within 4dp of
   its parent's on every edge, only when the system font scale is over 1.3×.
   Conservative on purpose: this is where overflow at a larger scale is
   plausible, never a confirmed clip.
 
-Every finding names the node's `stableId`, its path in the tree and any
-`testTag`. **There is no screenshot annotation** — visually marking the
-defect on a captured frame was cut from this build — so pairing a finding
-to what is actually on screen is by `stableId` through `semantics_tree`'s
-own output only, one more call away, never a picture. Coverage is stated
-honestly, always: only the Compose semantics tree is checked — a node drawn
-by a plain Android `View`, or anything Compose itself marked
-`invisibleToUser`, is invisible to this pass the same way it is invisible
-to TalkBack reading the merged tree — and a clean screen says so
-explicitly, `"nothing found, N node(s) checked"`, never a bare empty list
-indistinguishable from "did not look."
+**`invisibleToUser` hides a node and its whole subtree, not just one rule.**
+Compose's own `invisibleToUser` marker — the same one TalkBack itself reads
+to skip a node entirely — used to be honoured only by the image rule: a
+node that was both `clickable` and `invisibleToUser`, well under the
+touch-target minimum, still earned a missing-label warning *and* a
+touch-target warning, even though no assistive technology ever reaches it.
+Every rule now skips a hidden node and everything beneath it outright — none
+of it is walked for `nodesChecked` either — and `coverage` counts them
+separately: `"N node(s) hidden from assistive technology, not checked."`
+
+**Attribution: a finding whose node the app cannot be said to own is not
+reported.** An EM ruling on this ticket, not a guess: "a finding whose node
+is not attributable to the app's own composables is not a finding. `stableId`
+is ours, and the instrumented-node coverage number says how much of the
+screen we can speak for. Use both." A raw Compose semantics tree includes
+framework and library UI Porthole had no hand in — a bare
+`Modifier.clickable {}` with no explicit role is the ordinary spelling for a
+plain clickable `Card`/`Row`, and without this rule every one of those (a
+whole list of them, say) reads as its own click-mismatch note. A node
+counts as attributable, and so does everything beneath it, when it or an
+ancestor carries a `testTag` (a Porthole `portholeNode`/`PortholeScreen` id
+becomes the wire `testTag` the same way a plain `Modifier.testTag(...)`
+does, and both count — this is "an app author named this," not about which
+API did the naming), or its own `text`/`contentDescription` resolves
+through the project's own source the same way `where` does elsewhere. A
+finding that fails all three is not listed — it is counted instead,
+honestly: `"M possible defect(s) on nodes outside instrumented composables,
+not reported."`
+
+Every finding that *is* reported names the node's `stableId`, its path in
+the tree and any `testTag`. **There is no screenshot annotation** —
+visually marking the defect on a captured frame was cut from this build —
+so pairing a finding to what is actually on screen is by `stableId` through
+`semantics_tree`'s own output only, one more call away, never a picture.
+
+**Coverage is stated honestly, always**, and — since QA F7 — it is not
+buried behind an extra call to see: at `detail: "summary"` (the default,
+GRA-68), the summary line itself carries every coverage sentence, the tally
+by severity, and the worst few findings (`<severity> <id> <stableId>
+<path/testTag> — <title>`, capped at five with a "+N more" note), not only
+a bare "N finding(s) over M node(s) checked." Coverage itself says: only the
+Compose semantics tree is checked — a node drawn by a plain Android `View`
+is invisible to this pass the same way it is invisible to TalkBack reading
+the merged tree; how many nodes were hidden (`invisibleToUser`) and never
+checked; how many possible defects went unreported for being unattributable;
+and the instrumented-node fraction `semantics_tree`'s own summary already
+computes, reused rather than a second count of the same thing. A clean,
+fully-attributed, fully-visible screen says so explicitly, `"nothing found,
+N node(s) checked"`, never a bare empty list indistinguishable from "did not
+look."
 
 `findings` folds these findings in too, but **only when a semantics capture
 already landed inside the window being asked about** — from `semantics_tree`

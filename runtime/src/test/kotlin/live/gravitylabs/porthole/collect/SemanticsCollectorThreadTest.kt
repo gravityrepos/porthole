@@ -14,11 +14,15 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.semantics
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import live.gravitylabs.porthole.protocol.SemanticsNodeDto
 import live.gravitylabs.porthole.protocol.SemanticsTree
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -158,5 +162,48 @@ class SemanticsCollectorThreadTest {
         assertTrue("expected the wait to be bounded, took ${elapsedMs}ms", elapsedMs < 5_000)
         assertEquals(null, tree.root)
         assertTrue("expected the error to name the timeout, was: ${tree.error}", tree.error?.contains("150ms") == true)
+    }
+
+    /**
+     * QA F10 (GRA-72 follow-up): pins the wire flag `accessibility.ts`'s
+     * decorative-image rule (mcp/src/accessibility.ts) depends on. Not a
+     * threading test itself — co-located here only because this is the
+     * one existing `SemanticsCollector` test file; a node's own capture
+     * happens on the main thread regardless (this test's `capture()` call
+     * is made from the (Robolectric) main thread directly, the ordinary
+     * case every other collector behaviour is proven against).
+     */
+    @Test
+    fun `a node marked invisibleToUser carries the flag, a sibling without it does not`() {
+        val collector = SemanticsCollector(mainThreadTimeoutMs = 5_000)
+        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+        val composeView = ComposeView(activity)
+        activity.setContentView(composeView)
+        composeView.setContent {
+            val view = LocalView.current
+            DisposableEffect(view) {
+                collector.attach(view)
+                onDispose { collector.detach(view) }
+            }
+            TestNode(tag = "hidden", modifier = Modifier.semantics { invisibleToUser() })
+            TestNode(tag = "visible")
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val tree = collector.capture(merged = true, maxDepth = 20, maxNodes = 200)
+        val root = requireNotNull(tree.root) { "capture returned no tree: ${tree.error}" }
+        val hidden = requireNotNull(findByTestTag(root, "hidden")) { "no node tagged 'hidden' in the capture" }
+        val visible = requireNotNull(findByTestTag(root, "visible")) { "no node tagged 'visible' in the capture" }
+
+        assertTrue("expected 'hidden' to carry invisibleToUser, flags were: ${hidden.flags}", hidden.flags.contains("invisibleToUser"))
+        assertFalse("expected 'visible' not to carry invisibleToUser, flags were: ${visible.flags}", visible.flags.contains("invisibleToUser"))
+    }
+
+    private fun findByTestTag(node: SemanticsNodeDto, tag: String): SemanticsNodeDto? {
+        if (node.testTag == tag) return node
+        for (child in node.children) {
+            findByTestTag(child, tag)?.let { return it }
+        }
+        return null
     }
 }

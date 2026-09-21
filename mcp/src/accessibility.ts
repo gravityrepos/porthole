@@ -1,5 +1,7 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
+import { describeSemanticsTreeStats, semanticsTreeStats } from "./render.js";
+import { whereForName } from "./sources.js";
 import type { Confidence, Finding, Severity } from "./trace.js";
 
 /**
@@ -21,20 +23,52 @@ import type { Confidence, Finding, Severity } from "./trace.js";
  *  - text whose box leaves it no room to grow at a large system font scale
  *    (`note`, `confidence: "correlated"` — see `TEXT_OVERFLOW_MARGIN_DP`)
  *
- * This module is deliberately independent of the live device: every export
- * below is a pure function over a tree already captured, plus the one small
- * piece of device state (density, font scale) needed to turn pixel bounds
- * into something a human threshold means anything against. `index.ts` is
- * the only thing that knows how to fetch a tree or a device profile; it
- * calls in here once it has both.
+ * This module never talks to a live device — every export below is a pure
+ * function over a tree already captured, plus the one small piece of
+ * device state (density, font scale) needed to turn pixel bounds into
+ * something a human threshold means anything against, and (QA F9,
+ * `isAttributed` below) the project's own source tree, read the same
+ * read-only, no-device way `sources.ts`'s `whereForName` already is from
+ * `trace.ts`. `index.ts` is the only thing that knows how to fetch a tree
+ * or a device profile; it calls in here once it has both.
+ *
+ * **Attribution (QA F9 — the EM's own ruling, 2026-09-13): "a finding
+ * whose node is not attributable to the app's own composables is not a
+ * finding. `stableId` is ours, and the instrumented-node coverage number
+ * says how much of the screen we can speak for. Use both."** A raw
+ * Compose semantics tree includes framework and library UI Porthole had no
+ * hand in — `Modifier.clickable {}` with no explicit role is the ordinary
+ * spelling for a plain clickable `Card`/`Row`, and library composables use
+ * it constantly. Flagging every one of those is one note per list row, not
+ * a defect anyone asked about. A node counts as attributable — and so does
+ * everything beneath it, since a `PortholeScreen`/`portholeNode` wrapping a
+ * whole screen or a whole row does not repeat itself on every descendant —
+ * when it, or an ancestor, carries a `testTag` (a Porthole
+ * `portholeNode`/`PortholeScreen` id becomes the wire `testTag` the same
+ * way a plain `Modifier.testTag(...)` does, and both count: this is about
+ * "an app author named this," not about which API did the naming), or its
+ * own `text`/`contentDescription` resolves through `whereForName` to a
+ * real declaration under the project root. A finding whose node (and every
+ * ancestor) fails all three is not reported — it is counted in `coverage`
+ * instead ("M possible defect(s) on nodes outside instrumented composables,
+ * not reported"), never silently dropped.
  *
  * **Coverage, stated honestly.** This only ever sees what Compose's own
  * merged semantics tree exposes — a node drawn by a plain Android `View`
- * (no Compose wrapper), or anything Compose itself decided is
- * `invisibleToUser`, is invisible to this pass the same way it is invisible
- * to `semantics_tree` itself. `lintSemanticsTree`'s own `coverage` array is
- * what turns that into sentences a reader can act on rather than a silent
- * gap.
+ * (no Compose wrapper) is invisible to this pass the same way it is
+ * invisible to `semantics_tree` itself. A node Compose itself marked
+ * `invisibleToUser` (QA F8) is skipped entirely, subtree and all — TalkBack
+ * never reaches it either, so linting it would report defects on UI that
+ * cannot actually be a defect in the one sense that matters here (nobody
+ * using a screen reader ever encounters it) — and is counted separately
+ * ("N node(s) hidden from assistive technology, not checked") rather than
+ * folded into `nodesChecked`, which is reserved for nodes this pass
+ * actually evaluated. `lintSemanticsTree`'s own `coverage` array is what
+ * turns all of this into sentences a reader can act on rather than a
+ * silent gap — including, always, the instrumented-node fraction
+ * `render.ts`'s `semanticsTreeStats` already computes for `semantics_tree`
+ * itself, reused here rather than a second, possibly-drifting copy of the
+ * same number.
  *
  * **Explicitly out of scope** (do not extend this file to cover these
  * without a new ticket): colour contrast (nothing in the captured tree
@@ -217,6 +251,21 @@ function pointFinding(
 }
 
 /**
+ * QA F9: is `node` itself attributable to the app? Three ways, any one is
+ * enough — see this module's own doc comment for the EM ruling this
+ * implements. `whereForName` is `undefined` (not merely unresolved)
+ * whenever `PORTHOLE_PROJECT_ROOT` is unset, in which case this degrades to
+ * "has a testTag" alone, the same conservative "off means off, never a
+ * guess" rule `sources.ts` already follows everywhere else.
+ */
+function isAttributed(node: SemanticsNode): boolean {
+  if (node.testTag) return true;
+  if (node.text && whereForName(node.text)?.resolved) return true;
+  if (node.contentDescription && whereForName(node.contentDescription)?.resolved) return true;
+  return false;
+}
+
+/**
  * Walks the whole tree once, producing every finding in one pass rather
  * than one traversal per rule — the tree can legitimately be 1500 nodes
  * (`semantics_tree`'s own `maxNodes` default) and this runs on every
@@ -228,20 +277,47 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
   const findings: Finding[] = [];
   const coverage = [
     "Only the Compose semantics tree is checked — a node drawn by a plain " +
-      "Android View, or anything Compose itself marked invisibleToUser, is " +
-      "invisible to this pass the same way it is invisible to TalkBack " +
-      "reading the merged tree.",
+      "Android View is invisible to this pass the same way it is invisible " +
+      "to TalkBack reading the merged tree.",
   ];
   let nodesChecked = 0;
+  let hiddenCount = 0;
+  let unattributedCount = 0;
   let sawTruncation = false;
   const density = options.density && options.density > 0 ? options.density : null;
   if (!density) {
     coverage.push("Device density was not available, so touch-target-size checks were skipped entirely.");
   }
 
-  function visit(node: SemanticsNode, parent: SemanticsNode | null, path: string): void {
+  /**
+   * QA F8: `invisibleToUser` hides `node` and, per Compose semantics,
+   * everything beneath it from every assistive technology — never counted
+   * toward `nodesChecked`, never the subject of a rule (a clickable node
+   * that is also invisibleToUser used to still earn a missing-label
+   * warning; TalkBack never reaches it at all, so that warning was never
+   * true), and never walked for its own children's sake either, since they
+   * inherit the same invisibility.
+   */
+  function countHidden(node: SemanticsNode): void {
+    hiddenCount++;
+    for (const child of node.children) countHidden(child);
+  }
+
+  /** QA F9: records `candidate` as a real finding only when `attributed`; otherwise it becomes one of `unattributedCount`'s "possible defects," never silently dropped and never listed either. */
+  function record(candidate: Finding, attributed: boolean): void {
+    if (attributed) findings.push(candidate);
+    else unattributedCount++;
+  }
+
+  function visit(node: SemanticsNode, parent: SemanticsNode | null, path: string, ancestorAttributed: boolean): void {
+    if (node.flags.includes("invisibleToUser")) {
+      countHidden(node);
+      return;
+    }
+
     nodesChecked++;
     if (node.truncated) sawTruncation = true;
+    const attributed = ancestorAttributed || isAttributed(node);
 
     const isClickable = node.flags.includes("clickable");
     const isInteractiveLooking = isClickable || (node.role !== null && INTERACTIVE_ROLES.has(node.role));
@@ -253,7 +329,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
     // correct, not a defect, and never reaches this branch (it has neither
     // a click action nor an interactive role).
     if (isInteractiveLooking && !hasLabel) {
-      findings.push(
+      record(
         pointFinding(
           "a11y-missing-label",
           "warning",
@@ -264,6 +340,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
           { stableId: node.stableId, path, testTag: node.testTag, role: node.role },
           options.capturedAt,
         ),
+        attributed,
       );
     }
 
@@ -274,7 +351,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
       const minSide = Math.min(w, h);
       if (minSide < TOUCH_TARGET_MIN_DP) {
         const warning = minSide < TOUCH_TARGET_WARNING_DP;
-        findings.push(
+        record(
           pointFinding(
             "a11y-touch-target-small",
             warning ? "warning" : "note",
@@ -295,6 +372,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
             },
             options.capturedAt,
           ),
+          attributed,
         );
       }
     }
@@ -308,7 +386,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
     // not), and the reverse (is interactive, carries no role a screen
     // reader would announce as actionable).
     if (node.role !== null && INTERACTIVE_ROLES.has(node.role) && !isClickable) {
-      findings.push(
+      record(
         pointFinding(
           "a11y-click-mismatch",
           "note",
@@ -318,9 +396,10 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
           { stableId: node.stableId, path, testTag: node.testTag, role: node.role },
           options.capturedAt,
         ),
+        attributed,
       );
     } else if (isClickable && node.role === null) {
-      findings.push(
+      record(
         pointFinding(
           "a11y-click-mismatch",
           "note",
@@ -330,16 +409,18 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
           { stableId: node.stableId, path, testTag: node.testTag },
           options.capturedAt,
         ),
+        attributed,
       );
     }
 
     // -- decorative-vs-real image ---------------------------------------------
-    if (
-      node.role === "Image" &&
-      !node.contentDescription &&
-      !node.flags.includes("invisibleToUser")
-    ) {
-      findings.push(
+    // GRA-72 open question 1: a decorative image marked invisibleToUser
+    // never reaches here at all any more (F8 skips its whole node before
+    // any rule runs), so the `!node.flags.includes("invisibleToUser")`
+    // guard this used to need is gone — dead by construction now, not by
+    // coincidence.
+    if (node.role === "Image" && !node.contentDescription) {
+      record(
         pointFinding(
           "a11y-image-no-description",
           "note",
@@ -350,6 +431,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
           { stableId: node.stableId, path, testTag: node.testTag },
           options.capturedAt,
         ),
+        attributed,
       );
     }
 
@@ -367,7 +449,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
       const bottom = (parent.bounds.bottom - node.bounds.bottom) / density;
       const tight = [left, right, top, bottom].every((gap) => gap >= 0 && gap <= TEXT_OVERFLOW_MARGIN_DP);
       if (tight) {
-        findings.push(
+        record(
           pointFinding(
             "a11y-text-overflow-risk",
             "note",
@@ -379,14 +461,16 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
             { stableId: node.stableId, path, testTag: node.testTag, fontScale: options.fontScale },
             options.capturedAt,
           ),
+          attributed,
         );
       }
     }
 
-    // -- duplicated descriptions among this node's own children --------------
-    if (node.children.length > 1) {
+    // -- duplicated descriptions among this node's own (visible) children ----
+    const visibleChildren = node.children.filter((c) => !c.flags.includes("invisibleToUser"));
+    if (visibleChildren.length > 1) {
       const byDescription = new Map<string, SemanticsNode[]>();
-      for (const child of node.children) {
+      for (const child of visibleChildren) {
         if (!child.contentDescription) continue;
         const list = byDescription.get(child.contentDescription);
         if (list) list.push(child);
@@ -394,7 +478,7 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
       }
       for (const [description, siblings] of byDescription) {
         if (siblings.length < 2) continue;
-        findings.push(
+        record(
           pointFinding(
             "a11y-duplicate-description",
             "note",
@@ -408,36 +492,98 @@ export function lintSemanticsTree(root: SemanticsNode | null, options: Accessibi
             },
             options.capturedAt,
           ),
+          attributed,
         );
       }
     }
 
-    node.children.forEach((child, i) => visit(child, node, `${path}/${pathSegment(child, i)}`));
+    node.children.forEach((child, i) => visit(child, node, `${path}/${pathSegment(child, i)}`, attributed));
   }
 
-  if (root) visit(root, null, pathSegment(root, 0));
+  if (root) visit(root, null, pathSegment(root, 0), false);
 
   if (sawTruncation) {
     coverage.push(
       "The capture was truncated -- it hit its own node/depth budget partway through, so part of the tree was never checked.",
     );
   }
+  if (hiddenCount > 0) {
+    coverage.push(`${hiddenCount} node(s) hidden from assistive technology, not checked.`);
+  }
+  if (unattributedCount > 0) {
+    coverage.push(
+      `${unattributedCount} possible defect(s) on nodes outside instrumented composables, not reported.`,
+    );
+  }
+  // QA F9: the instrumented-node fraction `render.ts` already computes for
+  // `semantics_tree`'s own summary, reused rather than a second, possibly-
+  // drifting count of the same thing.
+  const stats = semanticsTreeStats(root);
+  const statsLine = describeSemanticsTreeStats(stats);
+  if (statsLine) coverage.push(statsLine);
 
   return { findings, nodesChecked, coverage };
 }
 
+/** Sort order for `summarizeAccessibilityResult`'s own top-findings list — the same severity ordering `trace.ts`'s `sortBySeverity` uses. */
+const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
+
+/** How many findings `summarizeAccessibilityResult` names before saying "+N more" — same "cut list" convention `describeUnattributableFields` (render.ts) already uses. */
+const SUMMARY_FINDING_CAP = 5;
+
 /**
- * The one line every caller (the `accessibility` tool, `findings`'
- * fold-in) wants: honest about a clean result rather than silent about it
- * — GRA-72's own acceptance criterion is that a correct screen says
- * "nothing found, N nodes checked" explicitly, not merely an empty list.
+ * QA F7 (blocker): at `detail: "summary"` — the default since GRA-68 — this
+ * string *is* the entire user-visible answer; no payload is attached at
+ * all. The one-line "N finding(s) over M node(s) checked" this used to
+ * return failed the ticket's own acceptance criteria the moment GRA-68
+ * shipped: no stableId, no path, no title, no coverage, at the level an
+ * agent actually sees by default. This now carries, in order: the headline
+ * count; the tally by severity; every coverage sentence
+ * (`lintSemanticsTree`'s own array — hidden/unattributed/instrumented-
+ * fraction included); and the worst `SUMMARY_FINDING_CAP` findings, each as
+ * `<severity> <id> <stableId> <path/testTag> — <title>` (a touch-target
+ * finding's `title` already carries its own measured size).
  */
 export function summarizeAccessibilityResult(result: AccessibilityResult): string {
-  const base =
+  const lines: string[] = [];
+
+  lines.push(
     result.findings.length === 0
       ? `nothing found, ${result.nodesChecked} node(s) checked`
-      : `${result.findings.length} finding(s) over ${result.nodesChecked} node(s) checked`;
-  return base;
+      : `${result.findings.length} finding(s) over ${result.nodesChecked} node(s) checked`,
+  );
+
+  if (result.findings.length > 0) {
+    const bySeverity = new Map<string, number>();
+    for (const f of result.findings) bySeverity.set(f.severity, (bySeverity.get(f.severity) ?? 0) + 1);
+    const tally = (["error", "warning", "note"] as const)
+      .filter((s) => bySeverity.has(s))
+      .map((s) => `${bySeverity.get(s)} ${s}`)
+      .join(", ");
+    lines.push(tally);
+  }
+
+  for (const sentence of result.coverage) lines.push(sentence);
+
+  if (result.findings.length > 0) {
+    const sorted = [...result.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+    const shown = sorted.slice(0, SUMMARY_FINDING_CAP);
+    for (const f of shown) {
+      const evidence = (f.evidence ?? {}) as Record<string, unknown>;
+      const stableId = typeof evidence.stableId === "string" ? evidence.stableId : "";
+      const where =
+        (typeof evidence.path === "string" && evidence.path) ||
+        (typeof evidence.testTag === "string" && evidence.testTag) ||
+        "";
+      lines.push(`${f.severity} ${f.id} ${stableId} ${where} -- ${f.title}`);
+    }
+    const remaining = sorted.length - shown.length;
+    if (remaining > 0) {
+      lines.push(`+${remaining} more finding(s) -- call at detail: "normal" or "full" for the rest.`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
