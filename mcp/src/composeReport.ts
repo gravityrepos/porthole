@@ -565,7 +565,9 @@ export function joinComposableNode(nodeName: string): ComposeJoin {
     return { matched: false, reason: "the node's label did not resolve to a source location", where };
   }
 
-  const fn = enclosingFunctionName(root, where.path, where.line ?? 1);
+  // GRA-205: `where.line` is never optional once `resolved: true` — no `?? 1`
+  // fallback needed any more.
+  const fn = enclosingFunctionName(root, where.path, where.line);
   if (!fn) {
     return { matched: false, reason: "no function declaration was found enclosing that location" };
   }

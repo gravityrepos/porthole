@@ -4,8 +4,19 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { DeviceClient, isConnected, type ConnectionState, type DeviceEvent } from "./device.js";
 import { renderComparison, renderReport, shouldColor } from "./report.js";
-import { buildTrace, resolveProfile, type Trace } from "./trace.js";
-import { parseFailOn, parsePort, readTrace, requiredValue, type FailOn } from "./args.js";
+import { buildTrace, resolveProfile, str, type Finding, type Trace } from "./trace.js";
+import { parseFailOn, parseSeconds, parsePort, readTrace, requiredValue, type FailOn } from "./args.js";
+import type { RunAdbAsyncOptions } from "./adb.js";
+import {
+  countPortholeLabels,
+  planCapture,
+  startSystraceCapture,
+  stopAndPullSystraceCapture,
+  type CapturePlan,
+  type SystraceCaptureHandle,
+} from "./systrace.js";
+import { askTrace, findTraceProcessor } from "./perfetto.js";
+import { fromBootMs, toBoot } from "./moment.js";
 
 /**
  * Recording a run with nobody watching.
@@ -32,6 +43,25 @@ export interface CaptureOptions {
   applicationId?: string;
   /** GRA-199: see `devices.ts`'s `forwardTarget`. Defaults to `PORTHOLE_LEGACY_TCP_PORT` being set. */
   legacyTcpPort: boolean;
+  /**
+   * GRA-103: also record an on-device Perfetto system trace for the lifetime
+   * of the child command, ask it the same eight questions
+   * `ask_system_trace` does, and merge the answers into this trace's own
+   * `findings` — see `capture()`'s own `#systrace` section for the whole
+   * story.
+   */
+  systrace: boolean;
+  /** The on-device recording's own safety ceiling — `planCapture`'s 1-120s clamp. Defaults to the max (120) when `--systrace` is given with no explicit value, since the *intended* bound is the child's own lifetime, not this one. */
+  systraceSeconds?: number;
+  systraceCategories?: string[];
+  /** Test-only: overrides `findAdb()`'s resolution for every adb call `--systrace` makes. Same seam `PortholeServerOptions.adbBinary` (index.ts) gives `capture_system_trace`. */
+  adbBinary?: string;
+  /** Test-only, same reasoning as `adbBinary`. */
+  adbEnv?: NodeJS.ProcessEnv;
+  /** Test-only: overrides `findTraceProcessor()` — "the lookup pointed at nothing" is how a rig test proves `--systrace` still succeeds, .pftrace and all, with no `trace_processor_shell` on the machine. */
+  findTraceProcessor?: () => string | null;
+  /** Test-only: threaded into `planCapture`'s own `now` — the on-device path is stamped with it, so a test can predict the exact adb args `--systrace` will send instead of racing `Date.now()`. */
+  systraceNow?: number;
 }
 
 export const CAPTURE_USAGE = `
@@ -50,6 +80,12 @@ porthole capture — record a run and write a trace
   --application-id <id>  the app the abstract socket is named for (default PORTHOLE_APPLICATION_ID)
   --legacy-tcp-port      forward to the old shared TCP port instead (default PORTHOLE_LEGACY_TCP_PORT)
   --no-forward           skip 'adb forward'; use it if the bridge is already up
+  --systrace              also record an on-device Perfetto trace for the run, and merge its
+                          findings into this trace's own — writes <out>.pftrace beside <out>
+  --systrace-seconds <n>  the on-device recording's own safety ceiling, 1-120s (default 120;
+                          the command's own lifetime is the real bound, whichever ends first)
+  --systrace-categories <a,b>  atrace categories for --systrace (default: the same set
+                          capture_system_trace uses)
 
   porthole report <trace.json>
   porthole compare <baseline.json> <trace.json>
@@ -105,6 +141,45 @@ export async function capture(options: CaptureOptions): Promise<number> {
   }
   process.stderr.write(`recording "${options.scenario}"\n`);
 
+  // ---------------------------------------------------------------------
+  // #systrace (GRA-103): start the on-device recording before the child
+  // runs, so its window covers exactly the command's own lifetime — see
+  // systrace.ts's `#capture-integration` section for why a backgrounded,
+  // `-t`-bounded capture is what makes that possible without blocking here.
+  // ---------------------------------------------------------------------
+  const adbOptions: RunAdbAsyncOptions = { serial: options.serial, env: options.adbEnv, binary: options.adbBinary };
+  let systracePlan: CapturePlan | undefined;
+  let systraceHandle: SystraceCaptureHandle | undefined;
+  const systraceNotes: string[] = [];
+  if (options.systrace) {
+    // Guaranteed non-null: `device.hello` is set the moment `awaitConnection`
+    // resolves true (GRA-157), same as the `hello` local built further down.
+    const packageName = str(device.hello?.packageName);
+    if (!packageName) {
+      systraceNotes.push(
+        "--systrace: no package to scope the system trace to (no packageName on the handshake), so it was skipped.",
+      );
+    } else {
+      // The intended bound is the child's own lifetime — stopAndPullSystraceCapture
+      // below stops it the moment the child exits. --systrace-seconds's real job is
+      // a safety ceiling for a child that hangs or runs long, so it defaults to the
+      // max planCapture allows rather than planCapture's own short default.
+      systracePlan = planCapture({
+        seconds: options.systraceSeconds ?? 120,
+        categories: options.systraceCategories,
+        apps: [packageName],
+        now: options.systraceNow,
+      });
+      systraceNotes.push(...systracePlan.notes);
+      const started = await startSystraceCapture(systracePlan, adbOptions);
+      if (!started.ok) {
+        systraceNotes.push(`--systrace: ${started.message} — continuing without a system trace.`);
+      } else {
+        systraceHandle = started.handle;
+      }
+    }
+  }
+
   const startedAt = Date.now();
   const exitCode = await run(options.command);
   const durationMs = Date.now() - startedAt;
@@ -118,6 +193,131 @@ export async function capture(options: CaptureOptions): Promise<number> {
   // above only returns once DeviceClient has actually set hello (GRA-157).
   const hello = device.hello as Record<string, unknown> | null;
   device.stop();
+
+  // ---------------------------------------------------------------------
+  // #systrace (GRA-103), continued: stop the recording now that the child
+  // has exited (whichever ends first, this or the plan's own `-t` ceiling),
+  // pull it beside the trace JSON, and ask it the same eight questions
+  // `ask_system_trace` does — converting Porthole's uptime clock to the
+  // trace's boot clock exactly the way that tool does (moment.ts's `toBoot`/
+  // `fromBootMs`, off the same `clocks` samples).
+  // ---------------------------------------------------------------------
+  let systraceBlock: Trace["systrace"] | undefined;
+  let traceFindings: Array<Finding & { source: "trace" }> = [];
+  const extraFindings: Array<Finding & { source: "porthole" }> = [];
+  if (systracePlan && systraceHandle) {
+    const pftracePath = systracePathFor(options.out);
+    const stopped = await stopAndPullSystraceCapture(systraceHandle, pftracePath, adbOptions);
+    if (!stopped.ok) {
+      // QA (F11): this used to only push a note here and never assign
+      // `systraceBlock` at all — the `else if (options.systrace)` fallback
+      // below only covers a capture that never *started*, so a pull failure
+      // (the recording ran, `adb pull` itself failed) fell through with no
+      // `trace.systrace` in the artifact and these notes written nowhere a
+      // reader would ever see them. `pulled: false` here is honest: nothing
+      // reached `pftracePath`, and `stopped.message` (systrace.ts) already
+      // names the on-device copy this call left in place rather than
+      // deleting, so `notes` alone is enough to recover it by hand.
+      systraceNotes.push(`--systrace: ${stopped.message}`);
+      systraceBlock = {
+        path: "",
+        bytes: 0,
+        pulled: false,
+        seconds: systracePlan.seconds,
+        categories: systracePlan.categories,
+        apps: systracePlan.apps,
+        portholeLabels: 0,
+        questionsAsked: false,
+        notes: systraceNotes,
+      };
+    } else {
+      const portholeLabels = await countPortholeLabels(pftracePath);
+      if (portholeLabels === 0) {
+        const detail =
+          systracePlan.apps.length === 0
+            ? "No app was named, so the app trace tag was never enabled."
+            : "Either the app was not running with the runtime attached, or this device only reads " +
+              "the app trace tag at process start, in which case a process already running before " +
+              "the capture began would never pick it up.";
+        systraceNotes.push(`0 Porthole labels in the system trace — ${detail}`);
+        // GRA-103 AC: "portholeLabels: 0 produces a warning in the artifact" —
+        // a structural finding, not only a sentence in `notes`, so a reader
+        // of the trace JSON sees it the same way it sees every other warning.
+        extraFindings.push({
+          id: "systrace-no-porthole-labels",
+          severity: "warning",
+          confidence: "observed",
+          title: "the system trace has no Porthole labels in it",
+          detail,
+          source: "porthole",
+        });
+      }
+
+      const traceProcessorLookup = options.findTraceProcessor ?? findTraceProcessor;
+      const binary = process.env.PORTHOLE_TRACE_PROCESSOR ?? traceProcessorLookup();
+      let questionsAsked = false;
+      if (!binary) {
+        systraceNotes.push(
+          "No trace_processor_shell found, so the system trace's questions were not asked — the " +
+            ".pftrace was still written. Run `./gradlew portholeTraceProcessor` in the app's " +
+            "project to fetch it, or set PORTHOLE_TRACE_PROCESSOR.",
+        );
+      } else {
+        // GRA-113/GRA-103: the window the capture actually covered — the
+        // earliest to the latest event this run saw, the same "no window
+        // narrower than the whole run" reasoning `resolveProfile` below
+        // already uses for the profile. `toBoot` picks whichever `clocks`
+        // sample was in force at each boundary separately, exactly as
+        // `ask_system_trace` (index.ts) does.
+        const from = events.length ? events[0].t : 0;
+        const to = events.length ? events[events.length - 1].t : from;
+        const bootFrom = toBoot(events, from);
+        const bootTo = toBoot(events, to);
+        const toUptimeMs = (bootNs: number) => fromBootMs(events, bootNs / 1e6)?.at ?? null;
+
+        const asked = await askTrace({
+          binary,
+          trace: pftracePath,
+          packageName: str(hello?.packageName),
+          fromNs: bootFrom.ns,
+          toNs: bootTo.ns,
+          toUptimeMs,
+        });
+        questionsAsked = true;
+        traceFindings = asked.findings.map((finding) => ({ ...finding, source: "trace" as const }));
+        systraceNotes.push(...asked.unanswered);
+      }
+
+      systraceBlock = {
+        path: pftracePath,
+        bytes: stopped.bytes,
+        pulled: true,
+        seconds: systracePlan.seconds,
+        categories: systracePlan.categories,
+        apps: systracePlan.apps,
+        portholeLabels,
+        questionsAsked,
+        notes: systraceNotes,
+      };
+    }
+  } else if (options.systrace) {
+    // --systrace was asked for but never actually started (no package, or
+    // startSystraceCapture failed) — still worth saying so in the artifact,
+    // even with no .pftrace to point at. Whatever the plan resolved (categories,
+    // seconds) still rides along when there was one; there is none at all when
+    // the failure was "no package to scope this to" (systracePlan itself null).
+    systraceBlock = {
+      path: "",
+      bytes: 0,
+      pulled: false,
+      seconds: systracePlan?.seconds ?? 0,
+      categories: systracePlan?.categories ?? [],
+      apps: systracePlan?.apps ?? [],
+      portholeLabels: 0,
+      questionsAsked: false,
+      notes: systraceNotes,
+    };
+  }
 
   // GRA-185: `capture` has no window narrower than the whole run, so
   // `windowTo: Infinity` — a profile emitted anywhere in `events` (in
@@ -133,6 +333,22 @@ export async function capture(options: CaptureOptions): Promise<number> {
     withEvents: options.withEvents,
     profile,
   });
+
+  if (options.systrace) {
+    // GRA-103: every finding `findingsOf` already produced is porthole-sourced
+    // by construction — tagged here, not inside trace.ts, so a plain
+    // `porthole capture` (no --systrace) never carries a `source` field at
+    // all and its JSON stays byte-for-byte what it always was. Merged with
+    // whatever the trace answered and re-sorted by severity, the same order
+    // `findingsOf`/`interpret` each already produce on their own.
+    const rank: Record<Finding["severity"], number> = { error: 0, warning: 1, note: 2 };
+    trace.findings = [
+      ...trace.findings.map((finding): Finding => ({ ...finding, source: "porthole" })),
+      ...extraFindings,
+      ...traceFindings,
+    ].sort((a, b) => rank[a.severity] - rank[b.severity]);
+    if (systraceBlock) trace.systrace = systraceBlock;
+  }
 
   await writeFile(options.out, JSON.stringify(trace, null, 2));
   // stderr, not stdout — this is the summary `porthole capture` prints
@@ -162,6 +378,11 @@ export async function capture(options: CaptureOptions): Promise<number> {
   if (options.failOn === "error" && hasError) return 1;
   if (options.failOn === "regression" && regressed) return 1;
   return exitCode;
+}
+
+/** Where `--systrace` writes the .pftrace, beside `out` — `porthole-trace.json` becomes `porthole-trace.pftrace`; anything without a `.json` suffix just gets `.pftrace` appended. */
+function systracePathFor(out: string): string {
+  return out.endsWith(".json") ? `${out.slice(0, -".json".length)}.pftrace` : `${out}.pftrace`;
 }
 
 /** Runs the child with its output passed straight through. */
@@ -222,6 +443,7 @@ export function parseCapture(argv: string[]): CaptureOptions {
     command: [],
     applicationId: process.env.PORTHOLE_APPLICATION_ID || undefined,
     legacyTcpPort: Boolean(process.env.PORTHOLE_LEGACY_TCP_PORT),
+    systrace: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -296,7 +518,25 @@ export function parseCapture(argv: string[]): CaptureOptions {
       options.applicationId = value;
     } else if (arg === "--legacy-tcp-port") options.legacyTcpPort = true;
     else if (arg === "--no-forward") options.forward = false;
-    else if (arg === "--help" || arg === "-h") {
+    else if (arg === "--systrace") options.systrace = true;
+    else if (arg === "--systrace-seconds") {
+      const value = parseSeconds(argv[++i], "--systrace-seconds");
+      if (typeof value !== "number") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.systraceSeconds = value;
+    } else if (arg === "--systrace-categories") {
+      const value = requiredValue(argv[++i], "--systrace-categories");
+      if (typeof value !== "string") {
+        process.stderr.write(`${value.message}\n`);
+        process.exit(2);
+      }
+      options.systraceCategories = value
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean);
+    } else if (arg === "--help" || arg === "-h") {
       process.stdout.write(CAPTURE_USAGE);
       process.exit(0);
     } else {
@@ -304,5 +544,25 @@ export function parseCapture(argv: string[]): CaptureOptions {
       process.exit(2);
     }
   }
+
+  // QA (F12), per GRA-93's own discipline: an option that silently does
+  // nothing is exactly the shape that ticket exists to close off elsewhere
+  // in this same loop (a mistyped --fail-on, a swallowed --driver value).
+  // `--systrace-seconds`/`--systrace-categories` without `--systrace` used
+  // to parse cleanly and then have no effect at all — no warning, nothing —
+  // which reads as "it worked" to whoever typed it. Checked once here,
+  // after the loop, rather than inline at each flag: a value can arrive in
+  // either order (`--systrace-seconds 30 --systrace` is exactly as valid as
+  // the reverse), so this cannot be decided while the option that licenses
+  // it might still be a few tokens away.
+  if (!options.systrace && options.systraceSeconds !== undefined) {
+    process.stderr.write(`--systrace-seconds requires --systrace\n${CAPTURE_USAGE}`);
+    process.exit(2);
+  }
+  if (!options.systrace && options.systraceCategories !== undefined) {
+    process.stderr.write(`--systrace-categories requires --systrace\n${CAPTURE_USAGE}`);
+    process.exit(2);
+  }
+
   return options;
 }

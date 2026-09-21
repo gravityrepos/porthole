@@ -4,7 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { findAdb, parseProperties, resolveProjectRoot, resolveSdkDir, runAdbAsync } from "./adb.js";
+import {
+  findAdb,
+  launchAppAsync,
+  parseAmStart,
+  parseProperties,
+  parseResolvedActivity,
+  resolveProjectRoot,
+  resolveSdkDir,
+  restartAppAsync,
+  runAdbAsync,
+} from "./adb.js";
+import { buildFakeAdb, fakeAdbArgsKey, type FakeAdb } from "./testing/fakeAdb.js";
 
 // Wraps the real readFileSync in a spy rather than replacing it: every
 // existing GRA-87 test still gets real file contents back, but GRA-119's
@@ -822,4 +833,258 @@ describe("runAdbAsync — an async, awaited spawn standing in for spawnSync (GRA
     const gaps = ticks.slice(1).map((t, i) => t - ticks[i]);
     expect(Math.max(...gaps)).toBeLessThan(500);
   }, 15_000);
+});
+
+describe("parseResolvedActivity", () => {
+  it("reads the resolved component off the last line, past resolve-activity's own preamble", () => {
+    const output = [
+      "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true",
+      "com.example.shop/.MainActivity",
+    ].join("\n");
+    expect(parseResolvedActivity(output)).toBe("com.example.shop/.MainActivity");
+  });
+
+  it("is null for 'No activity found' — nothing shaped like a component to hand am start", () => {
+    expect(parseResolvedActivity("No activity found\n")).toBeNull();
+  });
+
+  it("is null for blank or whitespace-only output", () => {
+    expect(parseResolvedActivity("   \n\n  \n")).toBeNull();
+  });
+
+  it("the mutation-obvious case: takes the LAST line, not the first, when both look component-shaped", () => {
+    // A mutant reading lines[0] instead of lines[lines.length - 1] passes
+    // every test above (a single-line or preamble-then-answer input cannot
+    // tell the two apart) but fails this one, where the first line is
+    // itself component-shaped and wrong.
+    const output = ["com.example.shop/.DecoyActivity", "com.example.shop/.MainActivity"].join("\n");
+    expect(parseResolvedActivity(output)).toBe("com.example.shop/.MainActivity");
+  });
+
+  it("rejects a line with embedded whitespace either side of the slash, not just any line containing one", () => {
+    expect(parseResolvedActivity("no activity found for /this/path\n")).toBeNull();
+  });
+});
+
+describe("parseAmStart", () => {
+  it("reads Status/LaunchState/TotalTime off a real am start -W transcript", () => {
+    const output = [
+      "Starting: Intent { cmp=com.example.shop/.MainActivity }",
+      "Status: ok",
+      "LaunchState: COLD",
+      "Activity: com.example.shop/.MainActivity",
+      "TotalTime: 342",
+      "WaitTime: 358",
+      "Complete",
+    ].join("\n");
+    expect(parseAmStart(output)).toEqual({ ok: true, launchState: "COLD", totalTimeMs: 342 });
+  });
+
+  it("ok is false, but launchState/totalTimeMs are still read, when Status is not ok", () => {
+    // The mutation-obvious case for `status === "ok"`: a mutant that
+    // dropped the equality (any truthy Status counts) passes a plain
+    // "Status: ok" fixture too, but fails this one.
+    const output = ["Status: error", "LaunchState: WARM", "TotalTime: 12"].join("\n");
+    expect(parseAmStart(output)).toEqual({ ok: false, launchState: "WARM", totalTimeMs: 12 });
+  });
+
+  it("nulls every field it cannot find, rather than throwing, on unrecognised output", () => {
+    expect(parseAmStart("garbage\nno such fields here\n")).toEqual({ ok: false, launchState: null, totalTimeMs: null });
+  });
+});
+
+/**
+ * GRA-233: `restartAppAsync`/`launchAppAsync` against a real (faked) adb
+ * process — the same technique `devices.test.ts` uses for `checkInstalledApp`
+ * — rather than only unit-testing the parsers above. These are the
+ * behavioural ACs: a launcher that prints nothing recognisable no longer
+ * fails a launch that actually worked, `am start -W`'s own fields are read
+ * and reported, and a launch that never actually landed is still reported
+ * as a failure — quoting whatever the launcher said, however successful
+ * that looked.
+ */
+describe("GRA-233: restartAppAsync/launchAppAsync judge success by the process coming up, not by what the launcher printed", () => {
+  let cleanups: FakeAdb[] = [];
+  afterEach(() => {
+    for (const adb of cleanups) adb.cleanup();
+    cleanups = [];
+  });
+  function fakeAdb(responses: Parameters<typeof buildFakeAdb>[0]): FakeAdb {
+    const built = buildFakeAdb(responses);
+    cleanups.push(built);
+    return built;
+  }
+
+  const PKG = "com.example.shop";
+  const SERIAL = "A1";
+  const resolveActivityArgs = [
+    "-s",
+    SERIAL,
+    "shell",
+    "cmd",
+    "package",
+    "resolve-activity",
+    "--brief",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    PKG,
+  ];
+  const monkeyArgs = ["-s", SERIAL, "shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1"];
+  const pidofArgs = ["-s", SERIAL, "shell", "pidof", PKG];
+  const forceStopArgs = ["-s", SERIAL, "shell", "am", "force-stop", PKG];
+  const amStartArgs = ["-s", SERIAL, "shell", "am", "start", "-W", "-n", `${PKG}/.MainActivity`];
+
+  it("noisy monkey output with no 'Events injected' line, plus the process actually up afterwards, is success — the API 36 bug this ticket fixes", async () => {
+    const adb = fakeAdb({
+      // resolve-activity runs, but names nothing — the fallback path.
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: {
+        // A real API 36 transcript: touch-event debug noise, never the
+        // "Events injected" line the old check depended on.
+        stdout:
+          ":Sending Touch (ACTION_DOWN): 0:(540.0,1176.0)\n:Sending Touch (ACTION_UP): 0:(540.0,1176.0)\n",
+      },
+      // Sequenced: not up on the first poll, up on the second — proves this
+      // genuinely polls rather than checking once and giving up.
+      [fakeAdbArgsKey(pidofArgs)]: [{ exitCode: 1 }, { stdout: "9321\n" }],
+    });
+
+    const result = await launchAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollIntervalMs: 5,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(adb.calls().filter((c) => c.includes("pidof")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("GRA-233 QA F15: a digit in adb's own stderr chatter (the daemon-starting notice) is never read as a pid — only stdout counts", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: { stdout: "Events injected: 1\n" },
+      // pidof genuinely found nothing (empty stdout), but the process still
+      // exits 0 — and adb's own one-time daemon-starting notice, which
+      // contains a digit, landed on stderr. A bare /\d/ over the merged
+      // output would misread "tcp:5037" as a pid.
+      [fakeAdbArgsKey(pidofArgs)]: {
+        stdout: "",
+        stderr: "* daemon not running; starting now at tcp:5037\n* daemon started successfully\n",
+        exitCode: 0,
+      },
+    });
+
+    const result = await launchAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollTimeoutMs: 50,
+      pidPollIntervalMs: 10,
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("resolves the launcher activity and reads Status/LaunchState/TotalTime from am start -W, never touching monkey at all", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "priority=0\ncom.example.shop/.MainActivity\n" },
+      [fakeAdbArgsKey(amStartArgs)]: {
+        stdout:
+          "Starting: Intent { cmp=com.example.shop/.MainActivity }\nStatus: ok\nLaunchState: COLD\n" +
+          "Activity: com.example.shop/.MainActivity\nTotalTime: 342\nComplete\n",
+      },
+      [fakeAdbArgsKey(pidofArgs)]: { stdout: "9321\n" },
+    });
+
+    const result = await launchAppAsync(PKG, { serial: SERIAL, binary: adb.binaryPath, env: adb.env });
+
+    expect(result).toMatchObject({ ok: true, launchState: "COLD", totalTimeMs: 342 });
+    expect(adb.calls().some((c) => c.includes("monkey"))).toBe(false);
+  });
+
+  it("process never appears → failure, quoting the launcher's own output even though it looked like success", async () => {
+    const adb = fakeAdb({
+      // A genuine adb failure resolving the activity, not just an empty
+      // answer — the other branch that sends this to the monkey fallback.
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stderr: "no such shell command\n", exitCode: 1 },
+      [fakeAdbArgsKey(monkeyArgs)]: { stdout: "Events injected: 1\n" },
+      // Never comes up, however many times this is asked.
+      [fakeAdbArgsKey(pidofArgs)]: { exitCode: 1 },
+    });
+
+    const result = await launchAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollTimeoutMs: 50,
+      pidPollIntervalMs: 10,
+    });
+
+    expect(result.ok).toBe(false);
+    // The launcher's own output is quoted verbatim — even monkey's own
+    // "looked successful" line — rather than a generic "failed" sentence
+    // that throws away what actually happened.
+    expect(result.output).toContain("Events injected: 1");
+  });
+
+  it("restartAppAsync force-stops strictly before it launches, and shares launchAppAsync's exact success judgement", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(forceStopArgs)]: {},
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: { stdout: "some noise, no confirmation line at all\n" },
+      // GRA-233 QA F14: sequenced — the pid-before-force-stop read, then a
+      // genuinely DIFFERENT pid once the relaunch has landed. A single
+      // fixed pid here would read as the old process surviving force-stop,
+      // not as a successful restart.
+      [fakeAdbArgsKey(pidofArgs)]: [{ stdout: "9321\n" }, { stdout: "9455\n" }],
+    });
+
+    const result = await restartAppAsync(PKG, { serial: SERIAL, binary: adb.binaryPath, env: adb.env });
+
+    expect(result.ok).toBe(true);
+    const tags = adb.calls().map((c) => c.join(" "));
+    const stopIndex = tags.findIndex((c) => c.includes("force-stop"));
+    const monkeyIndex = tags.findIndex((c) => c.includes("monkey"));
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(monkeyIndex).toBeGreaterThan(stopIndex);
+  });
+
+  it("GRA-233 QA F14: a force-stop that silently no-ops, followed by a launch that never actually lands, fails naming the surviving pid — not ok:true off the old process still answering pidof", async () => {
+    const adb = fakeAdb({
+      // Force-stop itself reports success (exit 0, no output) even though
+      // nothing was actually torn down — the exact silent-no-op this
+      // finding is about.
+      [fakeAdbArgsKey(forceStopArgs)]: {},
+      [fakeAdbArgsKey(resolveActivityArgs)]: { stdout: "No activity found\n" },
+      [fakeAdbArgsKey(monkeyArgs)]: { exitCode: 1, stderr: "No activities found to run, monkey aborted.\n" },
+      // The SAME pid, every single call — the old process never left.
+      [fakeAdbArgsKey(pidofArgs)]: { stdout: "9321\n" },
+    });
+
+    const result = await restartAppAsync(PKG, {
+      serial: SERIAL,
+      binary: adb.binaryPath,
+      env: adb.env,
+      pidPollTimeoutMs: 50,
+      pidPollIntervalMs: 10,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("force-stop did not end pid 9321");
+    // Not the launcher's own output this time — the pid-survival reason is
+    // the more specific and more actionable of the two.
+    expect(result.output).not.toContain("No activities found to run");
+  });
+
+  it("a force-stop that itself fails short-circuits before ever trying resolve-activity or monkey", async () => {
+    const adb = fakeAdb({
+      [fakeAdbArgsKey(forceStopArgs)]: { exitCode: 1, stderr: "no such package\n" },
+    });
+
+    const result = await restartAppAsync(PKG, { serial: SERIAL, binary: adb.binaryPath, env: adb.env });
+
+    expect(result.ok).toBe(false);
+    expect(adb.calls().some((c) => c.includes("monkey") || c.includes("resolve-activity"))).toBe(false);
+  });
 });

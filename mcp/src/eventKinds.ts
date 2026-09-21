@@ -43,6 +43,7 @@ export const EVENT_KINDS = [
   "memory",
   "strict_violation",
   "startup",
+  "leak",
 ] as const;
 
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -121,6 +122,17 @@ const KIND_GROUPS: readonly KindGroup[] = [
       "cross-referencing any `db-on-main-thread`/`main-thread-stall` finding that fell inside the " +
       "startup window, and a `startup-not-fully-drawn` note when `Activity.reportFullyDrawn()` " +
       "(caught automatically in a Compose/ComponentActivity app) was never observed",
+  },
+  {
+    // GRA-64: one per leak LeakCanary classified, application or library —
+    // see LeakCanaryPorthole.kt for why never one per heap analysis.
+    kinds: ["leak"],
+    narrated:
+      "raw here; `findings` promotes an application leak (an app-code reference holding a dead " +
+      "Activity/Fragment/View) to `warning` with the retained size and the head of the reference " +
+      "path, and leaves a library leak LeakCanary already classifies as known at `note` — only " +
+      "ever emitted once a present LeakCanary is actually hooked, see the `setup` tool's " +
+      "`leakcanary` row",
   },
 ];
 

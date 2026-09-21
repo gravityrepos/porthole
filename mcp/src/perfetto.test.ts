@@ -1,15 +1,17 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  checkTracePath,
   findTraceProcessor,
   hoistModules,
   interpret,
   MARKER_PREFIX,
   markerText,
+  nearestTraceCandidate,
   newNonce,
   matchBatch,
   QUESTIONS,
@@ -659,6 +661,192 @@ describe("findTraceProcessor", () => {
 
   it("survives there being no cache at all", () => {
     expect(findTraceProcessor()).toBeNull();
+  });
+});
+
+/**
+ * GRA-234: `ask_system_trace` on a path that does not exist used to reach
+ * trace_processor_shell anyway, where every one of QUESTIONS failed to load
+ * it independently and came back "unanswered" — "8 question(s) failed"
+ * instead of the one sentence a caller actually needed. `checkTracePath` is
+ * the stat-before-load check `index.ts` now runs first; `nearestTraceCandidate`
+ * is what it uses to suggest a fix rather than just naming the miss.
+ */
+describe("checkTracePath / nearestTraceCandidate (GRA-234)", () => {
+  let dir: string;
+  const savedProjectRoot = process.env.PORTHOLE_PROJECT_ROOT;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "porthole-traces-"));
+    // GRA-234 QA F17: nearestTraceCandidate now falls back to
+    // `<projectRoot>/.porthole/traces` when the requested path's own
+    // directory has nothing to offer. Pinning PORTHOLE_PROJECT_ROOT to this
+    // test's own throwaway `dir` (whose own `.porthole/traces` subdirectory
+    // is never created below, so the fallback search finds nothing there
+    // either) keeps every "no candidate"/"this exact candidate" assertion
+    // in this file deterministic — without it, the fallback would read
+    // *this developer's own* `.porthole/traces` (this repo's own real
+    // capture output, gitignored but often present in a working checkout),
+    // silently flipping any of them.
+    process.env.PORTHOLE_PROJECT_ROOT = dir;
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env.PORTHOLE_PROJECT_ROOT;
+    else process.env.PORTHOLE_PROJECT_ROOT = savedProjectRoot;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("ok:true for an existing, non-empty file", () => {
+    const file = join(dir, "porthole-ring-2026-09-10T00-00-00.pftrace");
+    writeFileSync(file, "not really a trace, but present");
+    expect(checkTracePath(file)).toEqual({ ok: true });
+  });
+
+  it("ok:true for an existing but EMPTY file — still goes through the questions, not pre-empted here", () => {
+    const file = join(dir, "porthole-empty.pftrace");
+    writeFileSync(file, "");
+    expect(checkTracePath(file)).toEqual({ ok: true });
+  });
+
+  it("names the missing path in a plain sentence, with no candidate to suggest in an empty directory", () => {
+    const missing = join(dir, "porthole-2026-09-19T12-00-00.pftrace");
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(missing);
+    expect(result.message).not.toContain("Did you mean");
+  });
+
+  it("suggests the file sharing the longest basename prefix, not just any .pftrace in the directory", () => {
+    // Two unrelated naming families in the same directory — a mutant that
+    // picked the first (or newest) candidate rather than the best-matching
+    // prefix would pick the ring file here instead.
+    const decoy = join(dir, "porthole-ring-auto-2026-09-01T00-00-00.pftrace");
+    writeFileSync(decoy, "");
+    const wanted = join(dir, "porthole-2026-09-19T12-00-00.pftrace");
+    const sibling = join(dir, "porthole-2026-09-19T11-59-00.pftrace");
+    writeFileSync(sibling, "");
+
+    const result = checkTracePath(wanted);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(sibling);
+    expect(result.message).not.toContain(decoy);
+  });
+
+  it("falls back to the newest .pftrace file when nothing shares any basename prefix at all", async () => {
+    // Named so alphabetical (and typical readdir) order is the OPPOSITE of
+    // mtime order — "zzz" is older but sorts last, "aaa" is newer but sorts
+    // first. A mutant that picked by iteration/sort order instead of a real
+    // mtime comparison (or one that let a zero-length shared prefix count
+    // as a "best" match at all) would pick "zzz", not "aaa", and fail this;
+    // it passed a same-order first draft of this fixture undetected.
+    const older = join(dir, "zzz-capture.pftrace");
+    writeFileSync(older, "");
+    // Ensure a real mtime gap — same file-timestamp granularity concern as
+    // elsewhere in this codebase's mtime-ordering tests.
+    await new Promise((r) => setTimeout(r, 20));
+    const newer = join(dir, "aaa-capture.pftrace");
+    writeFileSync(newer, "");
+
+    const missing = join(dir, "totally-different-name.pftrace");
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(newer);
+    expect(result.message).not.toContain(older);
+  });
+
+  it("ignores a non-.pftrace file in the same directory as a candidate", () => {
+    writeFileSync(join(dir, "notes.txt"), "");
+    const missing = join(dir, "porthole-2026-09-19T12-00-00.pftrace");
+    expect(nearestTraceCandidate(missing)).toBeNull();
+  });
+
+  it("is not a file (a directory) — reported distinctly from 'no such file'", () => {
+    const asADirectory = join(dir, "oops-a-directory.pftrace");
+    mkdirSync(asADirectory);
+    const result = checkTracePath(asADirectory);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("is not a file");
+  });
+
+  it("names a path under a directory that does not exist at all the same way as a plain missing file", () => {
+    const result = checkTracePath(join(dir, "no-such-subdir", "trace.pftrace"));
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("No such trace file");
+  });
+
+  it.skipIf(process.platform === "win32")("reports an existing-but-unreadable file distinctly, not as 'no such file'", () => {
+    const file = join(dir, "unreadable.pftrace");
+    writeFileSync(file, "some bytes");
+    try {
+      chmodSync(file, 0o000);
+    } catch {
+      return; // No permission to chmod on this machine — nothing to assert.
+    }
+    try {
+      const result = checkTracePath(file);
+      if (result.ok) return; // Running as root: chmod 0 does not block root's own read — nothing to assert.
+      expect(result.message).toContain("could not be read");
+    } finally {
+      chmodSync(file, 0o644);
+    }
+  });
+
+  it("GRA-234 QA F17: falls back to <projectRoot>/.porthole/traces when the requested path's own directory has nothing to offer", () => {
+    // The requested path's own directory (a throwaway temp dir, separate
+    // from `dir`/PORTHOLE_PROJECT_ROOT) is empty — nothing for the direct
+    // search to find at all.
+    const requestedDir = mkdtempSync(join(tmpdir(), "porthole-elsewhere-"));
+    try {
+      const tracesDir = join(dir, ".porthole", "traces");
+      mkdirSync(tracesDir, { recursive: true });
+      const sibling = join(tracesDir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+      writeFileSync(sibling, "");
+      // A decoy that should lose the prefix match, same as the direct-search test.
+      writeFileSync(join(tracesDir, "porthole-ring-auto-2026-09-01T00-00-00.pftrace"), "");
+
+      const missing = join(requestedDir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+      const result = checkTracePath(missing);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(`Did you mean ${sibling}`);
+    } finally {
+      rmSync(requestedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("GRA-234 QA F17: the direct search still wins when the requested directory itself has a candidate — no fallback needed", () => {
+    const tracesDir = join(dir, ".porthole", "traces");
+    mkdirSync(tracesDir, { recursive: true });
+    writeFileSync(join(tracesDir, "porthole-ring-2026-09-19T00-00-00.pftrace"), "");
+
+    const localSibling = join(dir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+    writeFileSync(localSibling, "");
+    const missing = join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`Did you mean ${localSibling}`);
+  });
+
+  it("GRA-234 QA F18: the basename-prefix match is case-insensitive, same as the .pftrace filter beside it", async () => {
+    // A mutant that compares case-sensitively scores this candidate 0 (the
+    // very first character disagrees) — same as the totally-unrelated
+    // decoy below, so both would fall through to the mtime tiebreak
+    // together. Writing the decoy AFTER (so it is the newer file) means a
+    // case-sensitive mutant picks the decoy, not this candidate, making the
+    // two outcomes actually distinguishable rather than both landing on
+    // the sole file present.
+    const upperCaseSibling = join(dir, "PORTHOLE-ring-2026-09-19T11-59-00.PFTRACE");
+    writeFileSync(upperCaseSibling, "");
+    await new Promise((r) => setTimeout(r, 20));
+    const decoy = join(dir, "zzz-totally-unrelated.pftrace");
+    writeFileSync(decoy, "");
+
+    const missing = join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+    const result = checkTracePath(missing);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`Did you mean ${upperCaseSibling}`);
+    expect(result.message).not.toContain(decoy);
   });
 });
 

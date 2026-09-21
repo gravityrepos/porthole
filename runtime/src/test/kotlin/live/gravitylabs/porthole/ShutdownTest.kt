@@ -43,7 +43,11 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35], manifest = Config.NONE)
 class ShutdownTest {
 
-    private val app: Application get() = RuntimeEnvironment.getApplication()
+    // GRA-240: Porthole.install() now refuses to start unless the app is
+    // debuggable, which Robolectric's synthetic ApplicationInfo (this class's
+    // manifest = Config.NONE) does not set on its own.
+    private val app: Application
+        get() = RuntimeEnvironment.getApplication().also { it.makeDebuggableForTest() }
 
     // -- no porthole-* thread survives shutdown ------------------------------
 

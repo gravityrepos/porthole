@@ -14,6 +14,7 @@ import {
   sourceIndexStats,
   whereForFrame,
   whereForName,
+  type Where,
 } from "./sources.js";
 
 /**
@@ -102,6 +103,20 @@ describe("parseFrame", () => {
       packageName: null,
     });
   });
+
+  it("QA F20: a package segment may carry uppercase letters past its first character -- com.exampleApp.shop, not truncated to com", () => {
+    // Before F20, packageFromQualifiedFrame required every character of a
+    // package segment to be lowercase, so `exampleApp` failed the test and
+    // the split stopped one segment early -- `packageName` came back "com"
+    // instead of "com.exampleApp.shop", silently wrong rather than null.
+    expect(
+      parseFrame("com.exampleApp.shop.CartViewModel.blockTheMainThread(CartViewModel.kt:1)"),
+    ).toEqual({
+      file: "CartViewModel.kt",
+      line: 1,
+      packageName: "com.exampleApp.shop",
+    });
+  });
 });
 
 describe("whereForFrame against the two-module fixture", () => {
@@ -115,6 +130,7 @@ describe("whereForFrame against the two-module fixture", () => {
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
       line: 11,
+      kind: "frame",
     });
   });
 
@@ -124,6 +140,7 @@ describe("whereForFrame against the two-module fixture", () => {
       resolved: true,
       path: "core/network/src/main/kotlin/com/example/network/ApiClient.kt",
       line: 4,
+      kind: "frame",
     });
   });
 
@@ -138,11 +155,16 @@ describe("whereForFrame against the two-module fixture", () => {
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
       line: 11,
+      kind: "frame",
     });
   });
 
   it("says 'not found' for a file genuinely not under the root", () => {
-    expect(whereForFrame("x.Ghost.method(Ghost.kt:1)")).toEqual({
+    // Bare, unqualified frame -- deliberately no package prefix, so this
+    // proves the plain basename-miss path rather than GRA-205's
+    // package-aware "not in project" (see the "not in project" describe
+    // block below for that one).
+    expect(whereForFrame("Ghost.method(Ghost.kt:1)")).toEqual({
       resolved: false,
       reason: "not found",
     });
@@ -162,15 +184,19 @@ describe("whereForFrame against the two-module fixture", () => {
 });
 
 describe("whereForFrame: ambiguous when a name exists twice under src/", () => {
-  it("resolved: false, reason: ambiguous -- two CartViewModel.kt, neither under build/", () => {
+  it("resolved: false, reason: ambiguous -- two CartViewModel.kt, neither under build/, both candidates listed (GRA-205)", () => {
     const root = temporaryRoot();
     writeSource(root, "app/src/main/kotlin/CartViewModel.kt", "class CartViewModel");
     writeSource(root, "legacy/src/main/kotlin/CartViewModel.kt", "class CartViewModel");
     useProjectRoot(root);
 
+    // Mutation quoted (final report): replacing `candidates: [...matches]`
+    // with `candidates: []` in resolveFile's ambiguous branch leaves this
+    // assertion failing on an empty array instead of both paths.
     expect(whereForFrame("x.CartViewModel.blockTheMainThread(CartViewModel.kt:1)")).toEqual({
       resolved: false,
       reason: "ambiguous",
+      candidates: ["app/src/main/kotlin/CartViewModel.kt", "legacy/src/main/kotlin/CartViewModel.kt"],
     });
   });
 });
@@ -186,6 +212,11 @@ describe("whereForFrame: ambiguous when a name exists twice under src/", () => {
 describe("package disambiguation: a fully qualified frame narrows an otherwise-ambiguous file", () => {
   beforeEach(() => useProjectRoot(FIXTURE_ROOT));
 
+  const REPOSITORY_CANDIDATES = [
+    "app/src/main/kotlin/com/example/shop/data/Repository.kt",
+    "core/network/src/main/kotlin/com/example/network/data/Repository.kt",
+  ];
+
   it("resolves the app module's Repository.kt from its own package", () => {
     const where = whereForFrame(
       "com.example.shop.data.Repository.fetch(Repository.kt:9)",
@@ -194,6 +225,7 @@ describe("package disambiguation: a fully qualified frame narrows an otherwise-a
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/data/Repository.kt",
       line: 9,
+      kind: "frame",
     });
   });
 
@@ -205,17 +237,18 @@ describe("package disambiguation: a fully qualified frame narrows an otherwise-a
       resolved: true,
       path: "core/network/src/main/kotlin/com/example/network/data/Repository.kt",
       line: 6,
+      kind: "frame",
     });
   });
 
   it("falls back to plain ambiguous when the frame's package matches neither file -- never picks one of several", () => {
     const where = whereForFrame("com.example.other.Repository.fetch(Repository.kt:1)");
-    expect(where).toEqual({ resolved: false, reason: "ambiguous" });
+    expect(where).toEqual({ resolved: false, reason: "ambiguous", candidates: REPOSITORY_CANDIDATES });
   });
 
   it("stays ambiguous with no package at all in the frame -- the pre-follow-up baseline is unchanged", () => {
     const where = whereForFrame("x.Repository.fetch(Repository.kt:1)");
-    expect(where).toEqual({ resolved: false, reason: "ambiguous" });
+    expect(where).toEqual({ resolved: false, reason: "ambiguous", candidates: REPOSITORY_CANDIDATES });
   });
 
   it("whereForName resolves a fully qualified class name the same way", () => {
@@ -223,16 +256,22 @@ describe("package disambiguation: a fully qualified frame narrows an otherwise-a
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/data/Repository.kt",
       line: 8,
+      kind: "declaration",
     });
     expect(whereForName("com.example.network.data.Repository")).toEqual({
       resolved: true,
       path: "core/network/src/main/kotlin/com/example/network/data/Repository.kt",
       line: 5,
+      kind: "declaration",
     });
   });
 
   it("whereForName stays ambiguous for the bare class name -- unqualified evidence is unaffected", () => {
-    expect(whereForName("Repository")).toEqual({ resolved: false, reason: "ambiguous" });
+    expect(whereForName("Repository")).toEqual({
+      resolved: false,
+      reason: "ambiguous",
+      candidates: REPOSITORY_CANDIDATES,
+    });
   });
 
   it("does not mistake a composable label for a qualified class name -- Cart.PromoField still resolves as a label", () => {
@@ -244,6 +283,7 @@ describe("package disambiguation: a fully qualified frame narrows an otherwise-a
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
       line: 14,
+      kind: "declaration",
     });
   });
 });
@@ -279,6 +319,7 @@ describe("whereForName: the composable/state-owner label index", () => {
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
       line: 14,
+      kind: "declaration",
     });
   });
 
@@ -287,6 +328,7 @@ describe("whereForName: the composable/state-owner label index", () => {
       resolved: true,
       path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
       line: 8,
+      kind: "declaration",
     });
   });
 
@@ -325,7 +367,11 @@ describe("whereForName: ambiguous when a label is written twice", () => {
     );
     useProjectRoot(root);
 
-    expect(whereForName("Cart.PromoField")).toEqual({ resolved: false, reason: "ambiguous" });
+    expect(whereForName("Cart.PromoField")).toEqual({
+      resolved: false,
+      reason: "ambiguous",
+      candidates: ["app/src/main/kotlin/OtherScreens.kt", "app/src/main/kotlin/Screens.kt"],
+    });
   });
 });
 
@@ -419,6 +465,7 @@ describe("the walk skips node_modules/, .gradle/ and .git/, not only build/", ()
       resolved: true,
       path: "app/src/main/kotlin/RealOnly.kt",
       line: 1,
+      kind: "frame",
     });
   });
 
@@ -432,6 +479,7 @@ describe("the walk skips node_modules/, .gradle/ and .git/, not only build/", ()
       resolved: true,
       path: "app/src/main/kotlin/RealOnly.kt",
       line: 1,
+      kind: "frame",
     });
   });
 
@@ -445,6 +493,7 @@ describe("the walk skips node_modules/, .gradle/ and .git/, not only build/", ()
       resolved: true,
       path: "app/src/main/kotlin/RealOnly.kt",
       line: 1,
+      kind: "frame",
     });
   });
 });
@@ -464,7 +513,11 @@ describe("a symlink that escapes the project root", () => {
       mkdirSync(path.join(root, "app/src/main/kotlin"), { recursive: true });
       useProjectRoot(root);
 
-      expect(whereForFrame("x.Outside.method(Outside.kt:1)")).toEqual({
+      // Bare, unqualified frame -- no package prefix, so this stays a pure
+      // basename-miss proof (the escaped symlink is never walked, so the
+      // file is never found) rather than exercising GRA-205's
+      // package-aware "not in project", which is proved separately.
+      expect(whereForFrame("Outside.method(Outside.kt:1)")).toEqual({
         resolved: false,
         reason: "not found",
       });
@@ -499,7 +552,158 @@ describe("a symlink cycle inside the project root", () => {
         resolved: true,
         path: "app/src/main/kotlin/UniqueClass.kt",
         line: 1,
+        kind: "frame",
       });
     },
   );
+});
+
+/**
+ * GRA-205: "a resolved `where` carries a line and refuses ambiguity, so it
+ * is a breakpoint address." Two things this addendum to GRA-201 adds:
+ *
+ *  - every `resolved: true` carries a real, numeric `line` and says whether
+ *    it came from the evidence itself (`kind: "frame"`) or from the
+ *    declaration `whereForName` found for a name that never had a line to
+ *    begin with (`kind: "declaration"`) -- proved once per producer below,
+ *    against the same two-module fixture the rest of this file uses;
+ *  - a lookup that matched nothing distinguishes "genuinely not in this
+ *    project" (a library frame -- the evidence named a package, and nothing
+ *    under the root is authored in it) from a plain "not found" -- proved
+ *    against a fabricated `okhttp3.internal.connection.RealCall` frame and
+ *    class name, neither of which the fixture (or any real project) ever
+ *    contains.
+ */
+describe("GRA-205: a resolved where is a breakpoint address", () => {
+  beforeEach(() => useProjectRoot(FIXTURE_ROOT));
+
+  /**
+   * whereForFrame and whereForName are the only two producers of a `Where`
+   * in this module -- every finding in trace.ts/index.ts attaches one or
+   * the other, never constructs one itself (see their own call sites). One
+   * resolvable case per producer is enough to prove the invariant holds at
+   * its source, rather than trusting it by resemblance at every call site.
+   *
+   * Mutation quoted (final report): dropping `kind: "frame"` from
+   * whereForFrame's `resolved: true` return, or `kind: "declaration"` from
+   * either of whereForName's, still type-checks against the pre-GRA-205
+   * `Where` shape but fails the `kind` assertion here; dropping `line:` (or
+   * returning `line: 0`) fails the `typeof line === "number" && line > 0`
+   * assertion instead.
+   */
+  const producers: Array<[string, () => Where | undefined]> = [
+    [
+      "whereForFrame",
+      () =>
+        whereForFrame(
+          "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+        ),
+    ],
+    ["whereForName", () => whereForName("Fixture.PromoField")],
+  ];
+
+  it.each(producers)("%s: resolved: true always carries a numeric line and its kind", (_label, produce) => {
+    const where = produce();
+    if (!where?.resolved) throw new Error("expected a resolved Where to test the invariant against");
+    expect(typeof where.line).toBe("number");
+    expect(where.line).toBeGreaterThan(0);
+    expect(["frame", "declaration"]).toContain(where.kind);
+  });
+
+  it("whereForFrame: a library frame -- source not under the root at all -- says 'not in project', not 'not found'", () => {
+    // okhttp3 is never vendored into this fixture (or any project this
+    // resolves against); its own package owns no directory anywhere under
+    // the root, which is exactly the fact "not in project" reports.
+    // Mutation quoted (final report): deleting the
+    // `if (packageName && packageLooksExternal(...))` branch from
+    // resolveFile turns this into "not found" instead.
+    expect(
+      whereForFrame("okhttp3.internal.connection.RealCall.execute(RealCall.kt:255)"),
+    ).toEqual({ resolved: false, reason: "not in project" });
+  });
+
+  it("whereForName: a fully qualified library class says 'not in project' the same way", () => {
+    expect(whereForName("okhttp3.internal.connection.RealCall")).toEqual({
+      resolved: false,
+      reason: "not in project",
+    });
+  });
+
+  it("unqualified evidence never triggers the heuristic -- both stay plain 'not found'", () => {
+    // No package to check a directory for, so this is exactly the
+    // pre-GRA-205 behaviour.
+    expect(whereForFrame("Ghost.method(Ghost.kt:1)")).toEqual({ resolved: false, reason: "not found" });
+    expect(whereForName("Checkout.NoSuchField")).toEqual({ resolved: false, reason: "not found" });
+  });
+});
+
+/**
+ * QA F20 (2026-09-2x round): package narrowing end to end with a mixed-case
+ * package segment (`com.exampleApp.shop`, not `com.example.shop`) -- the
+ * regression the direct `parseFrame`/`packageFromQualifiedFrame` test above
+ * cannot fully prove on its own, since narrowing also depends on
+ * `splitQualifiedClassName` (whereForName's own qualified-name path) having
+ * the identical fix.
+ */
+describe("QA F20: mixed-case package segments narrow correctly end to end", () => {
+  it("whereForFrame narrows to the right file when the frame's package has an uppercase-carrying segment", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/com/exampleApp/shop/Repository.kt", "package com.exampleApp.shop\nclass Repository\n");
+    writeSource(root, "legacy/src/main/kotlin/com/example/other/Repository.kt", "package com.example.other\nclass Repository\n");
+    useProjectRoot(root);
+
+    const where = whereForFrame("com.exampleApp.shop.Repository.fetch(Repository.kt:2)");
+    expect(where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/exampleApp/shop/Repository.kt",
+      line: 2,
+      kind: "frame",
+    });
+  });
+
+  it("whereForName narrows a fully qualified name through the same mixed-case package", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/com/exampleApp/shop/Repository.kt", "package com.exampleApp.shop\nclass Repository\n");
+    writeSource(root, "legacy/src/main/kotlin/com/example/other/Repository.kt", "package com.example.other\nclass Repository\n");
+    useProjectRoot(root);
+
+    expect(whereForName("com.exampleApp.shop.Repository")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/exampleApp/shop/Repository.kt",
+      line: 2,
+      kind: "declaration",
+    });
+  });
+});
+
+/**
+ * QA F19: a name declared twice in the *same* file (a class and a function
+ * sharing an identifier -- legal Kotlin, different namespaces) must not
+ * make that one file count twice in `candidates` when the name is also
+ * ambiguous across files.
+ */
+describe("QA F19: ambiguous candidates are de-duped by path", () => {
+  it("whereForName never lists the same path twice, even when that file declares the name twice over", () => {
+    const root = temporaryRoot();
+    // Both a `class Dup` and a `fun Dup(...)` in the same file -- two
+    // Declaration entries, one path.
+    writeSource(
+      root,
+      "app/src/main/kotlin/Dup.kt",
+      "class Dup\nfun Dup(): Dup = Dup()\n",
+    );
+    writeSource(root, "legacy/src/main/kotlin/OtherDup.kt", "class Dup\n");
+    useProjectRoot(root);
+
+    const where = whereForName("Dup");
+    expect(where).toMatchObject({ resolved: false, reason: "ambiguous" });
+    if (where && !where.resolved && where.reason === "ambiguous") {
+      expect(where.candidates).toEqual([
+        "app/src/main/kotlin/Dup.kt",
+        "legacy/src/main/kotlin/OtherDup.kt",
+      ]);
+      // The load-bearing assertion: no path repeats.
+      expect(new Set(where.candidates).size).toBe(where.candidates.length);
+    }
+  });
 });

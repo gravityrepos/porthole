@@ -41,6 +41,7 @@ class PortholePlugin : Plugin<Project> {
             enabled.convention(true)
             strictMode.convention(false)
             legacyTcpPort.convention(false)
+            composableNames.convention(false)
         }
 
         var configured = false

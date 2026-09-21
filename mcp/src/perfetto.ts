@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants as fsConstants, existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
+import { resolveProjectRoot } from "./adb.js";
 import type { Finding } from "./trace.js";
 
 /**
@@ -1403,6 +1404,134 @@ export async function runBatch(
   }
 
   return { rows, unanswered, wallTimeMs };
+}
+
+/**
+ * GRA-234: whether `tracePath` is actually there and readable, checked with
+ * a plain `stat` before anything spends a trace_processor invocation trying
+ * to load it. A path that does not exist — a typo, a trace that was since
+ * deleted, a path copied from the wrong session — used to reach `askTrace`
+ * anyway, where trace_processor_shell fails to load it once per question and
+ * every one of [QUESTIONS] came back "unanswered" with its own copy of the
+ * same underlying reason: "ask_system_trace on a path that does not exist
+ * reports '8 questions failed' instead of 'no such file'". This is the check
+ * that lets a caller say the one true thing instead.
+ *
+ * An existing, empty file is deliberately not this function's concern — it
+ * still goes through the questions, and "there is nothing in it" is
+ * trace_processor's own honest answer to give, not something to pre-empt
+ * here.
+ */
+export interface TracePathCheck {
+  ok: boolean;
+  /** Set only when `ok` is false — one plain sentence naming the path, plus the nearest candidate under the same directory when one exists. */
+  message?: string;
+}
+
+export function checkTracePath(tracePath: string): TracePathCheck {
+  let stat;
+  try {
+    stat = statSync(tracePath);
+  } catch {
+    return { ok: false, message: `No such trace file: ${tracePath}.${candidateSuffix(tracePath)}` };
+  }
+  if (!stat.isFile()) {
+    return {
+      ok: false,
+      message: `${tracePath} is not a file (it is a directory).${candidateSuffix(tracePath)}`,
+    };
+  }
+  try {
+    accessSync(tracePath, fsConstants.R_OK);
+  } catch {
+    return { ok: false, message: `${tracePath} exists but could not be read (a permissions problem).` };
+  }
+  return { ok: true };
+}
+
+function candidateSuffix(tracePath: string): string {
+  const candidate = nearestTraceCandidate(tracePath);
+  return candidate ? ` Did you mean ${candidate}?` : "";
+}
+
+/**
+ * The closest `.pftrace` to `target` (a basename, not a path) sitting
+ * directly in `dir`. Prefers a file whose basename shares the longest
+ * leading run of characters with the one asked for, which is enough to
+ * catch a stale or mistyped timestamp in either `capture_system_trace`'s or
+ * `system_trace_snapshot`'s own naming family (`porthole-<stamp>.pftrace`,
+ * `porthole-ring-<stamp>.pftrace`, `porthole-ring-auto-<stamp>.pftrace`)
+ * without matching two files from different, unrelated captures just
+ * because both end in `.pftrace`. GRA-234 QA F18: the comparison is
+ * case-insensitive, same as the `.pftrace` filter just below it — a
+ * mismatched case on either side used to leave a same-prefix candidate
+ * unscored and fall all the way through to the mtime tiebreak instead. With
+ * nothing sharing any prefix at all, falls back to the newest `.pftrace`
+ * file in the directory — still a more useful answer than naming nothing.
+ * Null when `dir` cannot even be listed, or holds no `.pftrace` file to
+ * suggest.
+ */
+function nearestInDir(dir: string, target: string): string | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const candidates = entries.filter((name) => name.toLowerCase().endsWith(".pftrace"));
+  if (candidates.length === 0) return null;
+
+  const targetLower = target.toLowerCase();
+  let best: { name: string; score: number } | null = null;
+  for (const name of candidates) {
+    const score = commonPrefixLength(targetLower, name.toLowerCase());
+    if (score > 0 && (!best || score > best.score)) best = { name, score };
+  }
+  if (best) return join(dir, best.name);
+
+  // Nothing shares even one leading character — the newest file is still a
+  // more useful guess than none, since it is the one most likely to be what
+  // a caller quoting a slightly-stale path actually meant.
+  const withMtime = candidates.map((name) => {
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(join(dir, name)).mtimeMs;
+    } catch {
+      // Removed between readdirSync and here — sorts last, not fatal.
+    }
+    return { name, mtimeMs };
+  });
+  withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return join(dir, withMtime[0].name);
+}
+
+/**
+ * The closest thing to `tracePath` worth suggesting — [nearestInDir] over
+ * `tracePath`'s own directory first, and (GRA-234 QA F17) `.porthole/traces`
+ * under the project root when that directory has nothing to offer. The
+ * ticket's own words are "under `.porthole/traces/`", not "wherever the
+ * caller's path happened to point": a bare filename with no directory of
+ * its own, or an `outputDir` that is not actually where captures land,
+ * would otherwise search the wrong place (or `process.cwd()` itself) and
+ * miss two real candidates sitting in the project's default trace
+ * directory. Skips the second search entirely when the two directories are
+ * already the same, rather than scanning it twice for the same nothing.
+ */
+export function nearestTraceCandidate(tracePath: string): string | null {
+  const target = basename(tracePath);
+  const requestedDir = dirname(resolve(tracePath));
+  const direct = nearestInDir(requestedDir, target);
+  if (direct) return direct;
+
+  const fallbackDir = resolve(join(resolveProjectRoot().directory, ".porthole", "traces"));
+  if (fallbackDir === requestedDir) return null;
+  return nearestInDir(fallbackDir, target);
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
 }
 
 /**

@@ -80,7 +80,9 @@ describe("planning a ring session", () => {
 
 describe("the ring's TraceConfig text", () => {
   it("carries unique_session_name, RING_BUFFER, every category and exactly one atrace_apps", () => {
-    const text = ringConfigText(planRing({ app: "com.example.shop", categories: ["sched", "gfx"] }));
+    const text = ringConfigText(
+      planRing({ app: "com.example.shop", categories: ["sched", "gfx"] }),
+    );
     expect(text).toContain(`unique_session_name: "${RING_SESSION_NAME}"`);
     expect(text).toContain("fill_policy: RING_BUFFER");
     expect(text).toContain('atrace_categories: "sched"');
@@ -398,7 +400,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("writes a config with the attached app and default categories, and starts a background session — not a detach/attach pair", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const start = await rig.client.callTool("system_trace_start", {});
+      const start = await rig.client.callTool("system_trace_start", { detail: "normal" });
       expect(start.isError).toBeFalsy();
       const config = fakeAdb.lastPushedConfig();
       expect(config).toContain(`unique_session_name: "${RING_SESSION_NAME}"`);
@@ -421,8 +423,8 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("refuses a second start while one is already running", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
-      const second = await rig.client.callTool("system_trace_start", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
+      const second = await rig.client.callTool("system_trace_start", { detail: "normal" });
       expect(second.isError).toBe(true);
       expect(second.text).toMatch(/already running/i);
     } finally {
@@ -437,12 +439,12 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
     // after an MCP server restart — and must still refuse.
     const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const started = await rig1.client.callTool("system_trace_start", {});
+      const started = await rig1.client.callTool("system_trace_start", { detail: "normal" });
       expect(started.isError).toBeFalsy();
 
       const rig2 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
       try {
-        const secondStart = await rig2.client.callTool("system_trace_start", {});
+        const secondStart = await rig2.client.callTool("system_trace_start", { detail: "normal" });
         expect(secondStart.isError).toBe(true);
         expect(secondStart.text).toMatch(/already running/i);
         expect(secondStart.text).toMatch(/no memory of/i);
@@ -468,7 +470,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
     // exercised directly rather than through that gate.
     const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const started = await rig1.client.callTool("system_trace_start", {});
+      const started = await rig1.client.callTool("system_trace_start", { detail: "normal" });
       expect(started.isError).toBeFalsy();
 
       const freshController = new RingController();
@@ -488,7 +490,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("QA F19: system_trace_snapshot works from a fresh rig that never called system_trace_start, against a ring another rig started", async () => {
     const rig1 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const started = await rig1.client.callTool("system_trace_start", {});
+      const started = await rig1.client.callTool("system_trace_start", { detail: "normal" });
       expect(started.isError).toBeFalsy();
 
       // system_trace_snapshot is not gated on ownsDeviceConnection — unlike
@@ -499,9 +501,17 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
       const rig2 = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
       try {
         const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-f19-out-"));
-        const snap = await rig2.client.callTool("system_trace_snapshot", { outputDir });
+        const snap = await rig2.client.callTool("system_trace_snapshot", {
+          detail: "normal",
+          outputDir,
+        });
         expect(snap.isError).toBeFalsy();
-        const payload = snap.json as { path: string; startedAt: unknown; bufferKb: unknown; note: string };
+        const payload = snap.json as {
+          path: string;
+          startedAt: unknown;
+          bufferKb: unknown;
+          note: string;
+        };
         expect(readFileSync(payload.path, "utf8")).toContain("porthole: fake-ring-label");
         expect(payload.startedAt).toBeNull();
         expect(payload.bufferKb).toBeNull();
@@ -521,7 +531,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
     });
     try {
       expect(fakeAdb.processMarkerExists()).toBe(false);
-      const start = await rig.client.callTool("system_trace_start", {});
+      const start = await rig.client.callTool("system_trace_start", { detail: "normal" });
       // The launch command itself reported failure (the acknowledgement
       // never arrived) — QA's repro is that the session was nonetheless
       // left running on the device when this was reported as a plain
@@ -547,7 +557,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
       // not that the device is actually clean.
       const rigRetry = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
       try {
-        const retry = await rigRetry.client.callTool("system_trace_start", {});
+        const retry = await rigRetry.client.callTool("system_trace_start", { detail: "normal" });
         expect(retry.isError).toBeFalsy();
       } finally {
         await rigRetry.close();
@@ -563,7 +573,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
       adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_START_FAIL: "1" },
     });
     try {
-      const start = await rig.client.callTool("system_trace_start", {});
+      const start = await rig.client.callTool("system_trace_start", { detail: "normal" });
       expect(start.isError).toBe(true);
       // Nothing forked (no process marker was ever created), so there is
       // nothing for the ps-scan to find and nothing to kill — but the
@@ -583,8 +593,8 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
     try {
       const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
       try {
-        await rig.client.callTool("system_trace_start", {});
-        const snap = await rig.client.callTool("system_trace_snapshot", {});
+        await rig.client.callTool("system_trace_start", { detail: "normal" });
+        const snap = await rig.client.callTool("system_trace_snapshot", { detail: "normal" });
         expect(snap.isError).toBeFalsy();
         const snapshotPath = (snap.json as { path: string }).path;
         expect(snapshotPath.startsWith(path.join(projectRoot, ".porthole", "traces"))).toBe(true);
@@ -601,9 +611,12 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("snapshot clones the running session — not attach+stop — and pulls the result without stopping anything", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
       const outputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-out-"));
-      const snap = await rig.client.callTool("system_trace_snapshot", { outputDir });
+      const snap = await rig.client.callTool("system_trace_snapshot", {
+        detail: "normal",
+        outputDir,
+      });
       expect(snap.isError).toBeFalsy();
       const payload = snap.json as { path: string; bytes: number; portholeLabels: number };
       expect(readFileSync(payload.path, "utf8")).toContain("porthole: fake-ring-label");
@@ -635,7 +648,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("refuses a snapshot when nothing is running", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const snap = await rig.client.callTool("system_trace_snapshot", {});
+      const snap = await rig.client.callTool("system_trace_snapshot", { detail: "normal" });
       expect(snap.isError).toBe(true);
       expect(snap.text).toMatch(/not running/i);
     } finally {
@@ -646,8 +659,8 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("stop reads the device's own pid marker, kills it, and cleans up — even with no in-memory state to trust", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
-      const stop = await rig.client.callTool("system_trace_stop", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
+      const stop = await rig.client.callTool("system_trace_stop", { detail: "normal" });
       expect(stop.isError).toBeFalsy();
       const payload = stop.json as { wasRunning: boolean };
       expect(payload.wasRunning).toBe(true);
@@ -669,7 +682,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
       adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_NO_PID_MARKER: "1" },
     });
     try {
-      const stop = await rig.client.callTool("system_trace_stop", {});
+      const stop = await rig.client.callTool("system_trace_stop", { detail: "normal" });
       expect(stop.isError).toBeFalsy();
       const payload = stop.json as { wasRunning: boolean };
       expect(payload.wasRunning).toBe(false);
@@ -682,7 +695,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("QA R2: stop finds and kills a genuinely running session by scanning the device when the pid marker is missing", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const started = await rig.client.callTool("system_trace_start", {});
+      const started = await rig.client.callTool("system_trace_start", { detail: "normal" });
       expect(started.isError).toBeFalsy();
       expect(fakeAdb.processMarkerExists()).toBe(true);
 
@@ -696,7 +709,7 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
         adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_NO_PID_MARKER: "1" },
       });
       try {
-        const stop = await rigNoMarker.client.callTool("system_trace_stop", {});
+        const stop = await rigNoMarker.client.callTool("system_trace_stop", { detail: "normal" });
         expect(stop.isError).toBeFalsy();
         const payload = stop.json as { wasRunning: boolean };
         expect(payload.wasRunning).toBe(true);
@@ -723,13 +736,16 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
     // and correctly refuse, which is not what this test is about.
     const diedFakeAdb = setupFakeRingAdb({ PORTHOLE_TEST_RING_CLONE_FAIL: "died" });
     try {
-      const rigDied = await buildRig({ adbBinary: diedFakeAdb.binaryPath, adbEnv: diedFakeAdb.env });
+      const rigDied = await buildRig({
+        adbBinary: diedFakeAdb.binaryPath,
+        adbEnv: diedFakeAdb.env,
+      });
       try {
-        await rigDied.client.callTool("system_trace_start", {});
-        const snap = await rigDied.client.callTool("system_trace_snapshot", {});
+        await rigDied.client.callTool("system_trace_start", { detail: "normal" });
+        const snap = await rigDied.client.callTool("system_trace_snapshot", { detail: "normal" });
         expect(snap.isError).toBe(true);
         expect(snap.text).toMatch(/no longer running/i);
-        const status = await rigDied.client.callTool("porthole_status", {});
+        const status = await rigDied.client.callTool("porthole_status", { detail: "normal" });
         const ring = (status.json as { ring: { running: boolean } }).ring;
         expect(ring.running).toBe(false);
       } finally {
@@ -743,13 +759,13 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("porthole_status's ring field: not running, then running with the app/categories/buffer it started with", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      const before = await rig.client.callTool("porthole_status", {});
+      const before = await rig.client.callTool("porthole_status", { detail: "normal" });
       const ringBefore = (before.json as { ring: Record<string, unknown> }).ring;
       expect(ringBefore.running).toBe(false);
       expect(ringBefore.overhead).toEqual(MEASURED_OVERHEAD);
 
-      await rig.client.callTool("system_trace_start", { bufferKb: 16384 });
-      const after = await rig.client.callTool("porthole_status", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal", bufferKb: 16384 });
+      const after = await rig.client.callTool("porthole_status", { detail: "normal" });
       const ringAfter = (after.json as { ring: Record<string, unknown> }).ring;
       expect(ringAfter.running).toBe(true);
       expect(ringAfter.bufferKb).toBe(16384);
@@ -757,11 +773,16 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
       expect(ringAfter.snapshots).toBe(0);
 
       const snapshotOutputDir = mkdtempSync(path.join(tmpdir(), "porthole-ring-status-out-"));
-      const snap = await rig.client.callTool("system_trace_snapshot", { outputDir: snapshotOutputDir });
-      const afterSnapshot = await rig.client.callTool("porthole_status", {});
-      const ringAfterSnapshot = (afterSnapshot.json as {
-        ring: { snapshots: number; lastSnapshotAt: string | null; lastSnapshot: unknown };
-      }).ring;
+      const snap = await rig.client.callTool("system_trace_snapshot", {
+        detail: "normal",
+        outputDir: snapshotOutputDir,
+      });
+      const afterSnapshot = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const ringAfterSnapshot = (
+        afterSnapshot.json as {
+          ring: { snapshots: number; lastSnapshotAt: string | null; lastSnapshot: unknown };
+        }
+      ).ring;
       expect(ringAfterSnapshot.snapshots).toBe(1);
       expect(ringAfterSnapshot.lastSnapshotAt).not.toBeNull();
       // QA (R4): porthole_status.ring.lastSnapshot carries the same result
@@ -781,9 +802,9 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
   it("system_trace_stop's payload leaves the ring field showing not running", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
-      await rig.client.callTool("system_trace_stop", {});
-      const status = await rig.client.callTool("porthole_status", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
+      await rig.client.callTool("system_trace_stop", { detail: "normal" });
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const ring = (status.json as { ring: { running: boolean } }).ring;
       expect(ring.running).toBe(false);
     } finally {
@@ -806,17 +827,24 @@ adbDriven("system_trace_start / system_trace_snapshot / system_trace_stop", () =
  * `statSync` ahead of it — actually resolves and updates `pendingAutoSnapshot`.
  */
 async function waitForAutoSnapshot(
-  rig: { client: { callTool(name: string, args?: Record<string, unknown>): Promise<{ json: unknown }> } },
+  rig: {
+    client: { callTool(name: string, args?: Record<string, unknown>): Promise<{ json: unknown }> };
+  },
   timeoutMs = 3_000,
 ): Promise<{ path: string; bytes: number; auto: boolean }> {
   const start = Date.now();
   for (;;) {
-    const status = await rig.client.callTool("porthole_status", {});
-    const lastSnapshot = (status.json as { ring: { lastSnapshot: { path: string; bytes: number; auto: boolean } | null } })
-      .ring.lastSnapshot;
+    const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+    const lastSnapshot = (
+      status.json as {
+        ring: { lastSnapshot: { path: string; bytes: number; auto: boolean } | null };
+      }
+    ).ring.lastSnapshot;
     if (lastSnapshot) return lastSnapshot;
     if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitForAutoSnapshot timed out after ${timeoutMs}ms waiting for ring.lastSnapshot`);
+      throw new Error(
+        `waitForAutoSnapshot timed out after ${timeoutMs}ms waiting for ring.lastSnapshot`,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -853,42 +881,62 @@ adbDriven("findings auto-snapshots the ring on an error-severity finding", () =>
         {
           event: "blocked",
           t: now,
-          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+          data: {
+            durationMs: 9000,
+            stack: "CartViewModel.blockTheMainThread",
+            top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)",
+          },
         },
       ]);
 
-      const withoutRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
-      const errorWithoutRing = (withoutRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
-        (f) => f.severity === "error",
-      );
+      const withoutRing = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: now + 1000,
+      });
+      const errorWithoutRing = (
+        withoutRing.json as { findings: Array<Record<string, unknown>> }
+      ).findings.find((f) => f.severity === "error");
       expect(errorWithoutRing).toBeDefined();
       expect(errorWithoutRing?.ringSnapshot).toBeUndefined();
 
-      await rig.client.callTool("system_trace_start", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
 
       // The first call to see the error with the ring running kicks the
       // snapshot off but does not wait for it (QA R4) — the finding says so
       // rather than going quiet about it.
-      const firstWithRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
-      const firstError = (firstWithRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
-        (f) => f.severity === "error",
-      );
+      const firstWithRing = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: now + 1000,
+      });
+      const firstError = (
+        firstWithRing.json as { findings: Array<Record<string, unknown>> }
+      ).findings.find((f) => f.severity === "error");
       expect(firstError).toBeDefined();
       expect(firstError?.ringSnapshot).toEqual({ inProgress: true });
 
       const lastSnapshot = await waitForAutoSnapshot(rig);
 
-      const secondWithRing = await rig.client.callTool("findings", { from: 0, to: now + 1000 });
-      const secondError = (secondWithRing.json as { findings: Array<Record<string, unknown>> }).findings.find(
-        (f) => f.severity === "error",
-      );
+      const secondWithRing = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: now + 1000,
+      });
+      const secondError = (
+        secondWithRing.json as { findings: Array<Record<string, unknown>> }
+      ).findings.find((f) => f.severity === "error");
       expect(secondError?.ringSnapshot).toBeTruthy();
       const ringSnapshot = secondError?.ringSnapshot as { path: string; bytes: number };
       expect(readFileSync(ringSnapshot.path, "utf8")).toContain("porthole: fake-ring-label");
 
       // QA R4: porthole_status.ring.lastSnapshot independently carries the
       // same finished result, `auto: true` since findings triggered it.
-      expect(lastSnapshot).toEqual({ path: ringSnapshot.path, bytes: ringSnapshot.bytes, auto: true });
+      expect(lastSnapshot).toEqual({
+        path: ringSnapshot.path,
+        bytes: ringSnapshot.bytes,
+        auto: true,
+      });
     } finally {
       await rig.close();
     }
@@ -900,26 +948,34 @@ adbDriven("findings auto-snapshots the ring on an error-severity finding", () =>
       adbEnv: { ...fakeAdb.env, PORTHOLE_TEST_RING_CLONE_DELAY_MS: "1500" },
     });
     try {
-      await rig.client.callTool("system_trace_start", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
       await rig.pushEvents([
         {
           event: "blocked",
           t: 10_000,
-          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+          data: {
+            durationMs: 9000,
+            stack: "CartViewModel.blockTheMainThread",
+            top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)",
+          },
         },
       ]);
 
       const startedAt = Date.now();
-      const result = await rig.client.callTool("findings", { from: 0, to: 11_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 11_000,
+      });
       const elapsedMs = Date.now() - startedAt;
       // The fake adb's own clone step alone takes 1.5s when it runs to
       // completion — findings returning in well under that is what proves
       // this call never awaited it, the same reasoning GRA-89 already
       // established for capture_system_trace's adb calls.
       expect(elapsedMs).toBeLessThan(1_000);
-      const errorFinding = (result.json as { findings: Array<Record<string, unknown>> }).findings.find(
-        (f) => f.severity === "error",
-      );
+      const errorFinding = (
+        result.json as { findings: Array<Record<string, unknown>> }
+      ).findings.find((f) => f.severity === "error");
       expect(errorFinding?.ringSnapshot).toEqual({ inProgress: true });
 
       // Let the delayed clone (and the pull after it) actually finish
@@ -934,21 +990,30 @@ adbDriven("findings auto-snapshots the ring on an error-severity finding", () =>
   it("does not auto-snapshot twice within the cooldown window for the same ongoing error", async () => {
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.client.callTool("system_trace_start", {});
+      await rig.client.callTool("system_trace_start", { detail: "normal" });
       await rig.pushEvents([
         {
           event: "blocked",
           t: 10_000,
-          data: { durationMs: 9000, stack: "CartViewModel.blockTheMainThread", top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)" },
+          data: {
+            durationMs: 9000,
+            stack: "CartViewModel.blockTheMainThread",
+            top: "CartViewModel.blockTheMainThread(CartViewModel.kt:148)",
+          },
         },
       ]);
 
-      await rig.client.callTool("findings", { from: 0, to: 11_000 });
+      await rig.client.callTool("findings", { detail: "normal", from: 0, to: 11_000 });
       await waitForAutoSnapshot(rig);
       const cloneCallsAfterFirst = fakeAdb.order().filter((tag) => tag === "clone").length;
       expect(cloneCallsAfterFirst).toBe(1);
 
-      await rig.client.callTool("findings", { from: 0, to: 11_000, since: "all" });
+      await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 11_000,
+        since: "all",
+      });
       const cloneCallsAfterSecond = fakeAdb.order().filter((tag) => tag === "clone").length;
       // Still 1: the second call happened well inside AUTO_SNAPSHOT_COOLDOWN_MS
       // of the first, and the same still-ongoing error should not re-pull a

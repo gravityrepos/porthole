@@ -120,6 +120,35 @@ internal object Setup {
         )
     }
 
+    // -- whole-tree recomposition counting (GRA-235) -------------------------
+    //
+    // Not a classpath question in the INTEGRATIONS sense: androidx.compose.runtime
+    // is always on the classpath here (this module depends on it directly), what
+    // varies is the *version* the app resolves — CompositionObserver needs
+    // Compose >= 1.6. Recorded unconditionally by Porthole.install(), same
+    // reasoning as strict mode: the entry exists even when whole-tree
+    // counting never had a chance to attach, so its absence never has to be
+    // read as "porthole forgot to check."
+
+    @Volatile private var composeTreeAvailable: Boolean? = null
+    @Volatile private var composeTreeNote: String? = null
+
+    /** Called once by `Porthole.install()`, whether or not `CompositionObserver` attached. */
+    fun recordComposeTree(available: Boolean, note: String?) {
+        composeTreeAvailable = available
+        composeTreeNote = note
+    }
+
+    private fun composeTreeEntry(): SetupEntry? {
+        val available = composeTreeAvailable ?: return null
+        return SetupEntry(
+            name = "compose_tree",
+            onClasspath = true,
+            instrumented = available,
+            hint = composeTreeNote,
+        )
+    }
+
     // -- the OkHttp listener getting silently replaced (GRA-66 F10) ---------
     //
     // Not a classpath question either: OkHttp is on the classpath and
@@ -169,10 +198,52 @@ internal object Setup {
         )
     }
 
+    // -- LeakCanary (GRA-64) -------------------------------------------------
+    //
+    // Not through INTEGRATIONS: every entry that list produces always says
+    // something, present or not ("add installPorthole() to your ..."). The
+    // EM was explicit that LeakCanary is different — a debug-only, opt-in
+    // library nobody should be told to add — so "absent" here means no
+    // entry at all, the same shape strictmode/listenerReplaced already use
+    // for a state that is not a plain classpath question either.
+    //
+    // Recorded by LeakCanaryPorthole.install(), which is only ever called
+    // once Porthole.install() has itself confirmed `leakcanary.LeakCanary`
+    // is on the classpath — so `present` is always true in practice, kept
+    // as a parameter (rather than assumed) only so a test can drive this
+    // entry point directly without a real LeakCanary on the test classpath.
+
+    @Volatile private var leakCanaryPresent: Boolean? = null
+    @Volatile private var leakCanaryHooked: Boolean = false
+    @Volatile private var leakCanaryHint: String? = null
+
+    /**
+     * Called once by [live.gravitylabs.porthole.integration.LeakCanaryPorthole.install],
+     * whether the hook succeeded or LeakCanary's own API did not match what
+     * this module compiled against.
+     */
+    fun recordLeakCanary(present: Boolean, hooked: Boolean, hint: String?) {
+        leakCanaryPresent = present
+        leakCanaryHooked = hooked
+        leakCanaryHint = hint
+    }
+
+    private fun leakCanaryEntry(): SetupEntry? {
+        val present = leakCanaryPresent ?: return null
+        return SetupEntry(
+            name = "leakcanary",
+            onClasspath = present,
+            instrumented = leakCanaryHooked,
+            hint = leakCanaryHint,
+        )
+    }
+
     fun report(): List<SetupEntry> = buildList {
         socketEntry()?.let(::add)
         strictModeEntry()?.let(::add)
+        composeTreeEntry()?.let(::add)
         listenerReplacedEntry()?.let(::add)
+        leakCanaryEntry()?.let(::add)
         addAll(integrationEntries())
     }
 

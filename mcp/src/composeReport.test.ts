@@ -156,21 +156,22 @@ describe("currentSourceFingerprint", () => {
    * runs — verified by comparing this function's output, run against this
    * repo's own real `sample/` module, against the fingerprint a real Gradle
    * build actually wrote into `sample/build/porthole/compose-report.json`
-   * (re-captured for GRA-69's QA pass, `git rev-parse HEAD` `943f68a` plus
-   * this pass's own `HighlightBadge` addition — AC3's isolated fixture for
-   * the live emulator loop, see `Screens.kt`'s own KDoc on it — and the
-   * `stability`/`Property` shape change; see `composeReportFixtures/
-   * PROVENANCE.md` on the Gradle-plugin side for the matching half of this
-   * proof). If this ever goes red on an unrelated PR, the two
-   * implementations have drifted — a real bug, not a fixture that needs a
-   * bump — unless `sample/`'s own `.kt` sources genuinely changed, which is
-   * exactly the case this pin exists to force a human to notice and
-   * re-verify against a fresh `./gradlew :sample:portholeComposeReport` run.
+   * (re-captured for GRA-72's IconButton/tiny-target accessibility fixtures
+   * and GRA-64's `LeakFixture.kt` plus "Leak activity" button in `Screens.kt`, re-verified against a fresh
+   * `./gradlew :sample:portholeComposeReport -Pporthole.variant=roomDebug`
+   * run — see `composeReportFixtures/PROVENANCE.md` on the Gradle-plugin
+   * side for the matching half of this proof, which is unaffected: that
+   * fixture is a frozen, hand-captured `*.txt` pair, not a hash of the live
+   * tree). If this ever goes red on an unrelated PR, the two implementations
+   * have drifted — a real bug, not a fixture that needs a bump — unless
+   * `sample/`'s own `.kt` sources genuinely changed, which is exactly the
+   * case this pin exists to force a human to notice and re-verify against a
+   * fresh `./gradlew :sample:portholeComposeReport` run.
    */
   it("matches the real Gradle-computed fingerprint for this repo's own sample module", () => {
     const sampleRoot = path.join(WORKTREE_ROOT, "sample");
     expect(currentSourceFingerprint(sampleRoot)).toBe(
-      "86a55d9abadb21be06ac2465b49ffbefd3b6ad9f35fa58880280f426ebb2e374",
+      "2744318fda3ce66b0173ffb47a0661b142a342d8a52c4adee499bcfba664b903",
     );
   });
 });

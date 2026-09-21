@@ -4,7 +4,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseDuration, parseFailOn, parseMillis, parsePort, readTrace, requiredValue, TraceReadError } from "./args.js";
+import {
+  parseDuration,
+  parseFailOn,
+  parseMillis,
+  parsePort,
+  parseSeconds,
+  readTrace,
+  requiredValue,
+  TraceReadError,
+} from "./args.js";
 import { TRACE_VERSION, type Trace } from "./trace.js";
 
 /**
@@ -328,6 +337,59 @@ describe("parseMillis", () => {
   it("rejects scientific notation and hex, which Number() would otherwise accept", () => {
     expect(parseMillis("1e4", "--from")).toEqual({ message: '--from "1e4" is not a number' });
     expect(parseMillis("0x10", "--from")).toEqual({ message: '--from "0x10" is not a number' });
+  });
+});
+
+/** GRA-103: `porthole capture --systrace-seconds`. */
+describe("parseSeconds", () => {
+  it("names the option when the value is missing", () => {
+    expect(parseSeconds(undefined, "--systrace-seconds")).toEqual({
+      message: "--systrace-seconds needs a whole number of seconds",
+    });
+  });
+
+  it("names the option when the value is empty", () => {
+    expect(parseSeconds("", "--systrace-seconds")).toEqual({
+      message: "--systrace-seconds needs a whole number of seconds",
+    });
+  });
+
+  it("rejects a non-numeric value", () => {
+    expect(parseSeconds("soon", "--systrace-seconds")).toEqual({
+      message: '--systrace-seconds "soon" is not a whole number of seconds',
+    });
+  });
+
+  it("rejects a fractional value", () => {
+    expect(parseSeconds("30.5", "--systrace-seconds")).toEqual({
+      message: '--systrace-seconds "30.5" is not a whole number of seconds',
+    });
+  });
+
+  it("rejects zero and negative values", () => {
+    expect(parseSeconds("0", "--systrace-seconds")).toEqual({
+      message: "--systrace-seconds 0 must be positive",
+    });
+    expect(parseSeconds("-5", "--systrace-seconds")).toEqual({
+      message: '--systrace-seconds "-5" is not a whole number of seconds',
+    });
+  });
+
+  it("accepts an ordinary value", () => {
+    expect(parseSeconds("45", "--systrace-seconds")).toBe(45);
+  });
+
+  // Unlike --port, this does not refuse a value over 120 — planCapture's own
+  // clamp (1-120s) answers that with a note in the plan, not a refusal at
+  // the CLI, the same way capture_system_trace's `seconds` parameter behaves.
+  it("accepts a value planCapture will later clamp, without refusing it here", () => {
+    expect(parseSeconds("9999", "--systrace-seconds")).toBe(9999);
+  });
+
+  it("rejects scientific notation, which Number() would otherwise accept", () => {
+    expect(parseSeconds("1e4", "--systrace-seconds")).toEqual({
+      message: '--systrace-seconds "1e4" is not a whole number of seconds',
+    });
   });
 });
 

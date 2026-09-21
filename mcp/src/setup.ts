@@ -71,6 +71,18 @@ const UNLOCKS: Record<string, Unlock> = {
   room: { lanes: ["db"], tools: ["inflight", "blocking"], data: "queries" },
   sqlite: { lanes: ["db"], tools: ["inflight", "blocking"], data: "queries" },
   navigation: { lanes: ["navigation"], tools: ["nav_state"], data: "the back stack" },
+  // GRA-64: the one `gaps` state this can ever actually reach is
+  // present-but-signature-mismatch — LeakCanary absent never produces a
+  // `setup` entry at all (see Setup.kt's own comment on why, and
+  // buildSetupReport's doc comment: only entries the runtime actually
+  // reported can become a gap), and present-and-hooked is `instrumented`,
+  // which the `gaps` filter already excludes. So this only ever surfaces
+  // when a present LeakCanary's own API did not match what Porthole
+  // compiled against — `entry.hint` already carries the exact mismatch
+  // ("floor: leakcanary-android 2.14" plus the error), and `findings`/
+  // `timeline` are what stay dark without a working hook: no `leak` events
+  // reach either one.
+  leakcanary: { lanes: ["leaks"], tools: ["timeline", "findings"], data: "leak reports" },
 };
 
 /** How a gap's integration name reads in prose. */
@@ -80,6 +92,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   room: "Room",
   sqlite: "SQLDelight",
   navigation: "Navigation",
+  leakcanary: "LeakCanary",
 };
 
 /**
@@ -99,6 +112,13 @@ export const SNIPPETS: Record<string, string> = {
   sqlite:
     'AndroidSqliteDriver(schema = Schema, context = context, name = "app.db", factory = portholeSqliteFactory())',
   navigation: "LaunchedEffect(navController) { Porthole.registerNavController(navController) }",
+  // Not a call to make — LeakCanary hooks itself automatically once it's on
+  // the classpath, the same zero-app-code shape ComponentActivity's own
+  // fullyDrawnReporter has. This is the dependency coordinate the runtime
+  // compiled against (LeakCanaryPorthole.FLOOR_VERSION), which is what
+  // `entry.hint`'s own "did not match what Porthole compiled against"
+  // wording is asking the app to line back up with.
+  leakcanary: 'debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")',
 };
 
 /** Lanes + tools an unlock affects — the ranking score (GRA-65 AC1). */

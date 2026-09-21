@@ -50,6 +50,7 @@ describe("GRA-201 against the real sample app (multi-flavor, one module)", () =>
       resolved: true,
       path: "sample/src/main/kotlin/com/example/shop/ui/CartViewModel.kt",
       line: 142,
+      kind: "frame",
     });
   });
 
@@ -58,10 +59,12 @@ describe("GRA-201 against the real sample app (multi-flavor, one module)", () =>
     expect(where).toEqual({
       resolved: true,
       path: "sample/src/main/kotlin/com/example/shop/ui/Screens.kt",
-      // GRA-69 added a few lines above this label (the RowHighlight fixture
-      // for portholeComposeReport's own join) — this line moving from 83 is
-      // exactly what the class doc comment above warns this test is for.
-      line: 88,
+      // GRA-72 added nine import lines and GRA-64 one more above this label
+      // (the accessibility fixtures and the LeakCanary fixture) — this line
+      // moving from 88 is exactly what the class doc comment above warns this
+      // test is for.
+      line: 98,
+      kind: "declaration",
     });
   });
 
@@ -70,7 +73,8 @@ describe("GRA-201 against the real sample app (multi-flavor, one module)", () =>
     expect(where).toEqual({
       resolved: true,
       path: "sample/src/main/kotlin/com/example/shop/ui/Screens.kt",
-      line: 60,
+      line: 70,
+      kind: "declaration",
     });
   });
 });

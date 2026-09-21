@@ -27,7 +27,15 @@ import path from "node:path";
  * Every response is configured through environment variables rather than a
  * fixed dispatcher, so a test only has to say what it wants, not extend a
  * shared if/else chain. `responses` maps a canonical, `-s SERIAL`-stripped
- * argv (joined by [fakeAdbArgsKey]) to a fixed `{stdout, stderr, exitCode}`.
+ * argv (joined by [fakeAdbArgsKey]) to a fixed `{stdout, stderr, exitCode}`,
+ * or (GRA-233) an array of them: a test proving a polling loop actually
+ * polls — `pidof` reporting nothing, then something, once a launch has had
+ * time to land — needs the *same* argv to answer differently across
+ * successive calls, which a single fixed response cannot do. Each call
+ * against a key configured as an array consumes the next entry, in order,
+ * and repeats the last one once the array is exhausted, so a test only has
+ * to spell out the responses that actually change and can leave "and it
+ * stays that way" implicit.
  */
 
 export interface FakeAdbResponse {
@@ -62,7 +70,30 @@ if (callLogPath) fs.appendFileSync(callLogPath, JSON.stringify(args) + "\\n");
 
 const key = (args[0] === "-s" ? args.slice(2) : args).join("\\u0001");
 const responses = JSON.parse(process.env.PORTHOLE_TEST_FAKE_ADB_RESPONSES || "{}");
-const response = responses[key];
+const entry = responses[key];
+
+// GRA-233: an array-valued entry is consumed one response per call, held on
+// the last one once exhausted — see buildFakeAdb's own comment on
+// PORTHOLE_TEST_FAKE_ADB_COUNTS for why this state lives in a file rather
+// than a variable (every call is a fresh process).
+let response = entry;
+if (Array.isArray(entry)) {
+  const countsPath = process.env.PORTHOLE_TEST_FAKE_ADB_COUNTS;
+  let counts = {};
+  if (countsPath) {
+    try {
+      counts = JSON.parse(fs.readFileSync(countsPath, "utf8"));
+    } catch (e) {
+      counts = {};
+    }
+  }
+  const index = counts[key] || 0;
+  response = entry[Math.min(index, entry.length - 1)];
+  if (countsPath) {
+    counts[key] = index + 1;
+    fs.writeFileSync(countsPath, JSON.stringify(counts));
+  }
+}
 
 if (!response) {
   process.stderr.write("fake-adb: no configured response for " + JSON.stringify(args) + "\\n");
@@ -74,11 +105,18 @@ process.exit(response.exitCode || 0);
 `;
 
 /**
+ * A key's value is either one fixed response, or (GRA-233) an array of
+ * them, consumed in call order and held on the last entry once exhausted —
+ * see [FakeAdb]'s own doc comment for why a polling loop needs this.
+ */
+export type FakeAdbResponseSpec = FakeAdbResponse | FakeAdbResponse[];
+
+/**
  * `responses` is a plain object keyed by [fakeAdbArgsKey] — build the key
  * with that function (e.g. `fakeAdbArgsKey(["devices", "-l"])`) rather than
  * typing its separator by hand.
  */
-export function buildFakeAdb(responses: Record<string, FakeAdbResponse>): FakeAdb {
+export function buildFakeAdb(responses: Record<string, FakeAdbResponseSpec>): FakeAdb {
   const root = mkdtempSync(path.join(tmpdir(), "porthole-fakeadb-"));
   const scriptPath = path.join(root, "fake-adb-script.cjs");
   writeFileSync(scriptPath, FAKE_ADB_SCRIPT_SOURCE);
@@ -97,6 +135,11 @@ export function buildFakeAdb(responses: Record<string, FakeAdbResponse>): FakeAd
 
   const callLogPath = path.join(root, "calls.log");
   writeFileSync(callLogPath, "");
+  // GRA-233: how far into each array-valued response this run has consumed
+  // — a separate file, not an in-memory counter, because every invocation
+  // is its own OS process (same reasoning as callLogPath itself).
+  const countsPath = path.join(root, "counts.json");
+  writeFileSync(countsPath, "{}");
 
   return {
     binaryPath,
@@ -104,6 +147,7 @@ export function buildFakeAdb(responses: Record<string, FakeAdbResponse>): FakeAd
       ...process.env,
       PORTHOLE_TEST_FAKE_ADB_RESPONSES: JSON.stringify(responses),
       PORTHOLE_TEST_FAKE_ADB_CALLS: callLogPath,
+      PORTHOLE_TEST_FAKE_ADB_COUNTS: countsPath,
     },
     calls() {
       return readFileSync(callLogPath, "utf8")

@@ -87,6 +87,56 @@ export interface Finding {
    * off — see `sources.ts`'s own doc comment for exactly when.
    */
   where?: Where;
+  /**
+   * GRA-103: which tool is making the claim — `"porthole"` for everything
+   * `findingsOf` derives from the device's own event stream (every finding in
+   * this file), `"trace"` for a finding `perfetto.ts`'s `interpret()` derived
+   * from a system trace instead. Optional, and absent on every finding built
+   * before this field existed (every one in this file) — `timeline.ts`'s
+   * `/api/findings` has stamped exactly this distinction onto its own
+   * findings since GRA-113 without it living on `Finding` itself; this is
+   * that same shape, promoted onto the type so `porthole capture --systrace`
+   * (capture.ts) can carry it all the way into the trace JSON on disk, where
+   * `porthole report` reads it back to render a trace-sourced finding
+   * differently from one the runtime itself observed.
+   */
+  source?: "porthole" | "trace";
+}
+
+/**
+ * GRA-103: what `porthole capture --systrace` recorded on-device, alongside
+ * the porthole-sourced trace `capture()` already writes.
+ *
+ * `portholeLabels` is deliberately here rather than only inferable from
+ * `notes`: the acceptance criterion is "portholeLabels: 0 produces a
+ * warning in the artifact", not merely a sentence buried in `notes`, so a
+ * consumer reading the trace JSON structurally (not by grepping prose) can
+ * still see the exact count.
+ */
+export interface SystraceCapture {
+  /** Where the .pftrace was written, alongside the trace JSON. Empty when `pulled` is false — there is no local file to point at. */
+  path: string;
+  bytes: number;
+  seconds: number;
+  categories: string[];
+  apps: string[];
+  portholeLabels: number;
+  /** Whether `trace_processor_shell` could be found to ask the eight questions of it. */
+  questionsAsked: boolean;
+  /**
+   * QA (F11): whether the on-device recording actually made it to `path` —
+   * false for a capture that never started (no package, or the on-device
+   * command itself failed) and, distinctly, for one that started and
+   * recorded but whose `adb pull` failed. Either way `path`/`bytes`/
+   * `portholeLabels`/`questionsAsked` stay at their zero values rather than
+   * lying about a file that is not actually there; `notes` says why, and for
+   * a failed pull specifically, names the on-device copy this call left in
+   * place rather than deleting (see `stopAndPullSystraceCapture`'s own doc
+   * comment in systrace.ts).
+   */
+  pulled: boolean;
+  /** Anything worth saying that is not itself a `Finding` — a missing trace_processor_shell, a plan note from `planCapture`, an unanswered question. */
+  notes: string[];
 }
 
 export interface Trace {
@@ -101,6 +151,8 @@ export interface Trace {
   metrics: Record<string, number>;
   findings: Finding[];
   events?: DeviceEvent[];
+  /** GRA-103: present only when `porthole capture --systrace` was used. */
+  systrace?: SystraceCapture;
 }
 
 /** Exported for `index.ts`'s `exits` section (GRA-58): the same loose coercion every event field here already gets, so a device's numeric fields don't need retyping at a second call site. */
@@ -392,6 +444,18 @@ export interface ProfileData {
   deviceRamMb: number;
   refreshHz: number;
   lowRamDevice: boolean;
+  /**
+   * GRA-72: px-per-dp, `DisplayMetrics.density` — `DeviceCollector.kt` has
+   * always sent this on the `profile` event; nothing on this side read it
+   * until `accessibility.ts` needed to turn a captured node's
+   * pixel `bounds` into a dp figure worth comparing against the 48dp/24dp
+   * touch-target thresholds. `0` (never a real density) means "not present
+   * on this profile" — an old on-disk `meta.json` from before this field
+   * existed, or a hand-built test fixture — and callers must treat that as
+   * unknown, never as "0dp everything," the same way `assumed: true` above
+   * already means "no profile at all."
+   */
+  density: number;
 }
 
 /**
@@ -411,7 +475,33 @@ export function profileFromEvent(event: DeviceEvent): ProfileData | null {
     deviceRamMb: num(event.data.deviceRamMb),
     refreshHz: num(event.data.refreshHz, 60),
     lowRamDevice: event.data.lowRamDevice === "true" || event.data.lowRamDevice === true,
+    density: num(event.data.density, 0),
   };
+}
+
+/**
+ * GRA-72: the system font scale at or before `windowTo` — `resolveProfile`'s
+ * own single-purpose sibling, kept separate rather than folded into
+ * `ProfileData` because font scale can change live (a user opens system
+ * settings mid-session) while the rest of the profile realistically never
+ * does, so this scans both the one-time `profile` event *and* every later
+ * `fontScale` change (`DeviceCollector.kt`'s `DeviceEventKinds.FONT_SCALE`),
+ * taking whichever is most recent at or before `windowTo` — never a value
+ * from later than what is being described, same rule `resolveProfile`
+ * follows. `fallback` (default 1, meaning "no scaling") is what a caller
+ * gets when neither kind of event has been seen yet.
+ */
+export function resolveFontScale(liveEvents: DeviceEvent[], windowTo: number, fallback = 1): number {
+  let latest: { t: number; value: number } | null = null;
+  for (const event of liveEvents) {
+    if (event.t > windowTo || event.event !== "device") continue;
+    const kind = str(event.data.kind);
+    if (kind !== "profile" && kind !== "fontScale") continue;
+    const value = num(event.data.fontScale, NaN);
+    if (!Number.isFinite(value)) continue;
+    if (!latest || event.t >= latest.t) latest = { t: event.t, value };
+  }
+  return latest ? latest.value : fallback;
 }
 
 /** What `buildTrace` needs to know about the device: the resolved refresh rate, and whether that number is something the device actually reported (`assumed: false`, `full` carries the rest) or a guess (`assumed: true`, `full` absent). */
@@ -581,6 +671,88 @@ function networkAt(
   };
 }
 
+/**
+ * GRA-64: the distinct heap-dump pause windows a session's `leak` events
+ * describe — every leak LeakCanary found in one analysis carries the same
+ * `heapDumpStartMs`/`heapDumpEndMs` pair (see `LeakCanaryPorthole.kt`'s own
+ * `onHeapAnalyzed`), so this dedupes rather than returning one window per
+ * leak. Exported for `stallAttribution.test.ts`-shaped unit coverage
+ * without a full `findingsOf` call. Empty when there are no `leak` events —
+ * an analysis with zero leaks reconstructs no window at all, which is a
+ * known, documented gap: nothing here can attribute a stall to a heap dump
+ * that found nothing worth reporting.
+ */
+export function heapDumpWindowsOf(events: DeviceEvent[]): Array<{ from: number; to: number }> {
+  const seen = new Map<string, { from: number; to: number }>();
+  for (const event of events) {
+    if (event.event !== "leak") continue;
+    const from = num(event.data.heapDumpStartMs);
+    const to = num(event.data.heapDumpEndMs);
+    seen.set(`${from}:${to}`, { from, to });
+  }
+  return [...seen.values()];
+}
+
+/** `DeviceCollector.kt`'s own thermal status ordering, mirrored (GRA-73). */
+const THERMAL_ORDER: Record<string, number> = {
+  none: 0,
+  light: 1,
+  moderate: 2,
+  severe: 3,
+  critical: 4,
+  emergency: 5,
+  shutdown: 6,
+};
+
+/**
+ * GRA-73: how long a SEVERE-or-worse thermal span has to last before it is
+ * "sustained" rather than a momentary blip a transition or two would
+ * produce on its own. No AC named an exact number; ten seconds is chosen to
+ * sit in the same order of magnitude as this file's other duration
+ * thresholds (`HTTP_SLOW_THRESHOLD_MS` above is 3s; a stall is 100ms) while
+ * being long enough that a single thermal reading flapping between LIGHT
+ * and SEVERE for a second or two does not read as "sustained."
+ */
+const THERMAL_SUSTAINED_MS = 10_000;
+
+/**
+ * GRA-73: the closed SEVERE-or-worse thermal spans a session's `thermal`
+ * sub-kind events describe — `from` the transition into SEVERE-or-worse,
+ * `to` the transition back out of it. A span still open at the end of the
+ * events given (the device was still throttling when the capture ended) is
+ * deliberately not returned: GRA-84's own lesson was that an invented
+ * ceiling is worse than an omitted one, and nothing here can honestly say
+ * when a still-open span would have ended.
+ */
+export function thermalSevereSpansOf(
+  events: DeviceEvent[],
+): Array<{ from: number; to: number; worst: string }> {
+  const thermal = events
+    .filter((e) => e.event === "device" && str(e.data.kind) === "thermal")
+    .sort((a, b) => a.t - b.t);
+
+  const spans: Array<{ from: number; to: number; worst: string }> = [];
+  let openFrom: number | null = null;
+  let worst = "";
+  for (const event of thermal) {
+    const status = str(event.data.status);
+    const rank = THERMAL_ORDER[status] ?? 0;
+    if (rank >= THERMAL_ORDER.severe) {
+      if (openFrom === null) {
+        openFrom = event.t;
+        worst = status;
+      } else if (rank > (THERMAL_ORDER[worst] ?? 0)) {
+        worst = status;
+      }
+    } else if (openFrom !== null) {
+      spans.push({ from: openFrom, to: event.t, worst });
+      openFrom = null;
+      worst = "";
+    }
+  }
+  return spans;
+}
+
 export function findingsOf(
   events: DeviceEvent[],
   marks: Trace["marks"],
@@ -617,36 +789,75 @@ export function findingsOf(
 
   const stalls = events.filter((e) => e.event === "blocked");
   if (stalls.length > 0) {
-    const worst = stalls.reduce((a, b) =>
-      num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
-    );
-    // GRA-201: the same top-frame text `detail` already carries, resolved to
-    // where it lives under the project root — `where` is a fact about that
-    // frame, so it is derived from `detail`'s own source rather than
-    // reparsing `detail` after the `|| undefined` above has thrown the
-    // empty-string case away.
-    const topFrame = str(worst.data.top).split("\n")[0] || undefined;
-    const where = whereForFrame(topFrame);
-    findings.push({
-      id: "main-thread-stall",
-      severity: "error",
-      confidence: "observed",
-      title: `main thread blocked for ${num(worst.data.durationMs)}ms`,
-      detail: topFrame,
-      count: stalls.length,
-      during: markAt(marks, worst.t),
-      evidence: {
-        at: worst.t,
-        stack: str(worst.data.stack).split("\n").slice(0, 6),
-      },
-      // `blocked` is *emitted* when the stall ends, but `MainThreadWatchdog`
-      // stamps it `at = startedAt` — the moment the unanswered ping was
-      // posted — and its own `report` treats the span as `at .. at +
-      // durationMs`. So `worst.t` is the start and the duration runs forward
-      // from it, the same shape as `frames-dropped`'s vsync stamp.
-      window: { from: worst.t, to: worst.t + num(worst.data.durationMs) },
-      ...(where ? { where } : {}),
-    });
+    // -----------------------------------------------------------------
+    // GRA-64 open question 2: LeakCanary pauses the whole VM for a heap
+    // dump, sometimes for seconds — long enough that the main-thread
+    // watchdog cannot tell that pause apart from a real hang once the
+    // process resumes. A stall whose own window falls inside a heap
+    // dump's reconstructed window (see `leak` events' `heapDumpStartMs`/
+    // `heapDumpEndMs`, carried by every leak LeakCanaryPorthole reported
+    // from that same dump) is LeakCanary's own diagnostic, not the app's
+    // defect, and is reported as that instead. Delimited so branches
+    // editing trace.ts in parallel do not collide with this section.
+    // -----------------------------------------------------------------
+    const heapDumpWindows = heapDumpWindowsOf(events);
+    // `blocked` is *emitted* when the stall ends, but `MainThreadWatchdog`
+    // stamps it `at = startedAt` — the moment the unanswered ping was posted
+    // — and its own `report` treats the span as `at .. at + durationMs`. So
+    // `t` is the start and the duration runs forward from it, the same shape
+    // as `frames-dropped`'s vsync stamp. Used for the heap-dump overlap test
+    // and for both findings' windows below, so the three cannot disagree.
+    const stallWindow = (s: DeviceEvent) => ({ from: s.t, to: s.t + num(s.data.durationMs) });
+    const isHeapDumpStall = (s: DeviceEvent) => {
+      const w = stallWindow(s);
+      return heapDumpWindows.some((dump) => w.from <= dump.to && w.to >= dump.from);
+    };
+    const appStalls = stalls.filter((s) => !isHeapDumpStall(s));
+    const heapDumpStalls = stalls.filter(isHeapDumpStall);
+
+    if (appStalls.length > 0) {
+      const worst = appStalls.reduce((a, b) =>
+        num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
+      );
+      // GRA-201: the same top-frame text `detail` already carries, resolved to
+      // where it lives under the project root — `where` is a fact about that
+      // frame, so it is derived from `detail`'s own source rather than
+      // reparsing `detail` after the `|| undefined` above has thrown the
+      // empty-string case away.
+      const topFrame = str(worst.data.top).split("\n")[0] || undefined;
+      const where = whereForFrame(topFrame);
+      findings.push({
+        id: "main-thread-stall",
+        severity: "error",
+        confidence: "observed",
+        title: `main thread blocked for ${num(worst.data.durationMs)}ms`,
+        detail: topFrame,
+        count: appStalls.length,
+        during: markAt(marks, worst.t),
+        evidence: {
+          at: worst.t,
+          stack: str(worst.data.stack).split("\n").slice(0, 6),
+        },
+        window: stallWindow(worst),
+        ...(where ? { where } : {}),
+      });
+    }
+
+    if (heapDumpStalls.length > 0) {
+      const worst = heapDumpStalls.reduce((a, b) =>
+        num(a.data.durationMs) >= num(b.data.durationMs) ? a : b,
+      );
+      findings.push({
+        id: "main-thread-stall-heap-dump",
+        severity: "note",
+        confidence: "observed",
+        title: `main thread paused ${num(worst.data.durationMs)}ms for a LeakCanary heap dump`,
+        detail: "heap dump by LeakCanary",
+        count: heapDumpStalls.length,
+        during: markAt(marks, worst.t),
+        window: stallWindow(worst),
+      });
+    }
   }
 
   // Completed only — see the same reasoning as `onMain` above: a status or an
@@ -824,6 +1035,79 @@ export function findingsOf(
       window: eventWindow(trims),
     });
   }
+
+  // -------------------------------------------------------------------
+  // GRA-64: LeakCanary — one finding per distinct leak signature, the
+  // worst (highest-retained) occurrence winning when the same leak
+  // showed up in more than one heap dump this session, the same
+  // per-call-site dedup `strict_violation` below already does. An
+  // application leak — an app-code reference holding a dead Activity,
+  // Fragment or View — promotes to `warning`; a library leak LeakCanary
+  // already classifies as a known, framework-side defect stays a `note`.
+  // Delimited so branches editing trace.ts in parallel do not collide
+  // with this section.
+  // -------------------------------------------------------------------
+  const leakBySignature = new Map<string, DeviceEvent>();
+  for (const leak of events.filter((e) => e.event === "leak")) {
+    const signature = str(leak.data.signature) || str(leak.data.leakingClass);
+    const prior = leakBySignature.get(signature);
+    if (!prior || num(leak.data.retainedHeapByteSize) >= num(prior.data.retainedHeapByteSize)) {
+      leakBySignature.set(signature, leak);
+    }
+  }
+  for (const leak of leakBySignature.values()) {
+    const kind = str(leak.data.kind);
+    const isApplicationLeak = kind === "application";
+    const leakingClass = str(leak.data.leakingClass) || "unidentified object";
+    const retainedKb = Math.round(num(leak.data.retainedHeapByteSize) / 1024);
+    const traceHead = str(leak.data.traceText).split("\n").slice(0, 6).join("\n") || undefined;
+    findings.push({
+      id: `leak-${kind || "unknown"}-${leakingClass}`,
+      severity: isApplicationLeak ? "warning" : "note",
+      confidence: "observed",
+      title: isApplicationLeak
+        ? `${leakingClass} leaked${retainedKb > 0 ? ` — ${retainedKb} kB retained` : ""}`
+        : `${leakingClass} — a leak LeakCanary already classifies as known (library)`,
+      detail: traceHead,
+      count: num(leak.data.leakCount, 1),
+      during: markAt(marks, leak.t),
+      evidence: {
+        signature: str(leak.data.signature),
+        leakingClass,
+        retainedHeapByteSize: num(leak.data.retainedHeapByteSize),
+        leakCount: num(leak.data.leakCount, 1),
+      },
+      window: { from: leak.t, to: leak.t },
+    });
+  }
+  // -- end GRA-64 -------------------------------------------------------
+
+  // -------------------------------------------------------------------
+  // GRA-73: thermal throttling correlated with frame drops. `confidence:
+  // "correlated"`, never "observed" — two things sharing a window is
+  // ordering, not proof the throttle caused the drops (the same
+  // distinction the recompose-hotspot section below already draws for
+  // recompositions and the state writes near them). Delimited so branches
+  // editing trace.ts in parallel do not collide with this section.
+  // -------------------------------------------------------------------
+  for (const span of thermalSevereSpansOf(events)) {
+    const durationMs = span.to - span.from;
+    if (durationMs < THERMAL_SUSTAINED_MS) continue;
+    const droppedInWindow = frames.filter((f) => f.t >= span.from && f.t <= span.to);
+    if (droppedInWindow.length === 0) continue;
+    const missed = droppedInWindow.reduce((sum, e) => sum + num(e.data.missedFrames, 1), 0);
+    findings.push({
+      id: "thermal-throttling",
+      severity: "warning",
+      confidence: "correlated",
+      title:
+        `${span.worst} thermal throttling sustained ${Math.round(durationMs / 1000)}s, ` +
+        `${missed} dropped ${missed === 1 ? "frame" : "frames"} in the same window`,
+      count: missed,
+      window: { from: span.from, to: span.to },
+    });
+  }
+  // -- end GRA-73 -------------------------------------------------------
 
   const retried = work.filter((w) => w.data.retrying === "true");
   if (retried.length > 0) {
@@ -1046,8 +1330,18 @@ export function findingsOf(
   // -------------------------------------------------------------------
   findings.push(...startupFindingsOf(events, findings));
 
+  return sortBySeverity(findings);
+}
+
+/**
+ * GRA-72: shared with `index.ts`'s `findings` tool, which folds
+ * `accessibility.ts`'s own findings into `trace.findings` after this
+ * function has already sorted it once — the same order, so `findings[0]`
+ * stays "the worst one" after the merge, not merely before it.
+ */
+export function sortBySeverity(findings: Finding[]): Finding[] {
   const order: Record<Severity, number> = { error: 0, warning: 1, note: 2 };
-  return findings.sort((a, b) => order[a.severity] - order[b.severity]);
+  return [...findings].sort((a, b) => order[a.severity] - order[b.severity]);
 }
 
 /** `error`-severity exit reasons (GRA-58#exit-findings) — see `findingsOf`'s own comment for the rest of the mapping. */

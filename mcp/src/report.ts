@@ -124,15 +124,22 @@ export function renderReport(trace: Trace, options: RenderReportOptions = {}): s
   // marked run, where it drops an ERROR below two WARNINGs and defeats the one
   // job of a prioritised list. The mark rides along on the line instead.
   for (const finding of trace.findings) {
-    lines.push(`  ${colorSeverity(finding.severity, color)}  ${finding.title}`);
+    // GRA-103: a finding `porthole capture --systrace` pulled out of the
+    // system trace, not out of the device's own event stream, is tagged so a
+    // reader can tell which tool is making the claim — the same distinction
+    // `/api/findings` (timeline.ts) already carries as `source`, now visible
+    // in the CLI's own report too.
+    const tag = finding.source === "trace" ? "[trace] " : "";
+    lines.push(`  ${colorSeverity(finding.severity, color)}  ${tag}${finding.title}`);
     if (finding.during) lines.push(`           during "${finding.during}"`);
     if (finding.detail) lines.push(`           ${finding.detail}`);
     // GRA-201: printed only once resolved — an unresolved `where` is a fact
     // for an agent's structured payload to act on, not a line worth adding
-    // to a report a person reads top to bottom for what is wrong.
+    // to a report a person reads top to bottom for what is wrong. GRA-205:
+    // `line` is never optional on a resolved `where` any more, so this is
+    // always a breakpoint address, never a bare path.
     if (finding.where?.resolved) {
-      const at = finding.where.line ? `${finding.where.path}:${finding.where.line}` : finding.where.path;
-      lines.push(`           at ${at}`);
+      lines.push(`           at ${finding.where.path}:${finding.where.line}`);
     }
   }
 

@@ -79,7 +79,7 @@ describe("the window", () => {
 
   // GRA-55: `since` lives on the same shared `windowShape` `sinceMs` does,
   // for the same reason — one declaration, not a hand-rolled copy per tool.
-  it("puts since: \"last\"/\"all\" on the shared windowShape too, not a second hand-rolled copy", () => {
+  it('puts since: "last"/"all" on the shared windowShape too, not a second hand-rolled copy', () => {
     const handRolled = source.match(/^\s+since: z/gm) ?? [];
     expect(handRolled.length, "a tool has grown its own `since` again").toBe(1); // the definition
     expect(source).toMatch(/since:\s*z\s*\n\s*\.enum\(\["last", "all"\]\)/);
@@ -93,18 +93,71 @@ describe("the window", () => {
     const rig = await buildRig();
     try {
       const tools = await rig.client.listTools();
-      const windowed = ["findings", "save_moment", "recompositions", "frames", "blocking", "logs", "timeline"];
+      const windowed = [
+        "findings",
+        "save_moment",
+        "recompositions",
+        "frames",
+        "blocking",
+        "logs",
+        "timeline",
+      ];
       for (const name of windowed) {
         const tool = tools.find((t) => t.name === name);
         expect(tool, `${name} is not registered`).toBeDefined();
-        const props = (tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+        const props =
+          (tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
         const since = props.since as { enum?: string[] } | undefined;
         expect(since, `${name}'s schema has no \`since\``).toBeDefined();
-        expect(since?.enum?.slice().sort(), `${name}'s \`since\` is not enum(["last","all"])`).toEqual([
-          "all",
-          "last",
-        ]);
+        expect(
+          since?.enum?.slice().sort(),
+          `${name}'s \`since\` is not enum(["last","all"])`,
+        ).toEqual(["all", "last"]);
       }
+    } finally {
+      await rig.close();
+    }
+  });
+});
+
+describe("the shared detail parameter (GRA-68)", () => {
+  it("gives every tool the same shared declaration, not a hand-rolled copy — the same discipline windowShape's own test enforces", () => {
+    // Unlike `windowShape` (declared inside index.ts itself), `detailShape`
+    // lives in render.ts — GRA-68's own "shared rendering path" module — so
+    // index.ts's own source must show *zero* hand-rolled `detail: z`
+    // declarations: every tool reaches it only through `...detailShape`.
+    const handRolledInIndex = source.match(/^\s+detail: z/gm) ?? [];
+    expect(handRolledInIndex.length, "a tool has hand-rolled its own `detail` in index.ts").toBe(0);
+
+    const renderSource = readFileSync(new URL("./render.ts", import.meta.url), "utf8");
+    const declarations = renderSource.match(/^\s+detail: z/gm) ?? [];
+    expect(
+      declarations.length,
+      "detailShape's own declaration is missing or duplicated in render.ts",
+    ).toBe(1);
+  });
+
+  it("every registered tool actually declares detail as an enum of summary/normal/full, not just in source text", async () => {
+    const rig = await buildRig();
+    try {
+      const tools = await rig.client.listTools();
+      const violations: string[] = [];
+      for (const tool of tools) {
+        const props =
+          (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+        const detail = props.detail as { enum?: string[] } | undefined;
+        if (!detail?.enum) {
+          violations.push(tool.name);
+          continue;
+        }
+        if (detail.enum.slice().sort().join(",") !== "full,normal,summary") {
+          violations.push(`${tool.name}: ${JSON.stringify(detail.enum)}`);
+        }
+      }
+      expect(
+        violations,
+        `tool(s) with no (or a wrong) detail enum: ${violations.join(", ")}`,
+      ).toEqual([]);
     } finally {
       await rig.close();
     }
@@ -119,7 +172,12 @@ describe("findings", () => {
   // GRA-185: `buildTrace` now takes the resolved profile explicitly; none of
   // `events` above carries a device/profile event, so this resolves to the
   // same 60Hz fallback it always used internally.
-  const profile = resolveProfile({ liveEvents: events, windowTo: 1000, sessionProfile: null, hello: null });
+  const profile = resolveProfile({
+    liveEvents: events,
+    windowTo: 1000,
+    sessionProfile: null,
+    hello: null,
+  });
 
   it("runs the same analyser the headless capture runs", () => {
     // One analyser, so a finding means the same thing in CI as in an editor.
@@ -261,8 +319,9 @@ describe("porthole_status's exitTrace parameter", () => {
       const tools = await rig.client.listTools();
       const tool = tools.find((t) => t.name === "porthole_status");
       expect(tool, "porthole_status is not registered").toBeDefined();
-      const props = (tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] })
-        .properties ?? {};
+      const props =
+        (tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] })
+          .properties ?? {};
       const required = (tool?.inputSchema as { required?: string[] }).required ?? [];
       expect(props.exitTrace, "porthole_status has no exitTrace parameter").toBeDefined();
       expect(required, "exitTrace must be optional").not.toContain("exitTrace");
@@ -275,7 +334,10 @@ describe("porthole_status's exitTrace parameter", () => {
       // of this ticket.
       const exitTrace = props.exitTrace as Record<string, unknown>;
       const branches = (exitTrace.anyOf ?? exitTrace.oneOf) as Array<{ type?: string }> | undefined;
-      expect(branches, `exitTrace schema has no anyOf/oneOf: ${JSON.stringify(exitTrace)}`).toBeDefined();
+      expect(
+        branches,
+        `exitTrace schema has no anyOf/oneOf: ${JSON.stringify(exitTrace)}`,
+      ).toBeDefined();
       const types = branches!.map((b) => b.type);
       expect(types).toContain("integer");
       expect(types).toContain("string");
@@ -304,7 +366,10 @@ describe("capture_system_trace's restartApp parameter", () => {
       const tools = await rig.client.listTools();
       const tool = tools.find((t) => t.name === "capture_system_trace");
       expect(tool, "capture_system_trace is not registered").toBeDefined();
-      const schema = tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+      const schema = tool?.inputSchema as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
       const props = schema.properties ?? {};
       const required = schema.required ?? [];
       expect(props.restartApp, "capture_system_trace has no restartApp parameter").toBeDefined();
@@ -337,7 +402,9 @@ describe("capture_system_trace's restartApp parameter", () => {
     const descriptionStart = tool.indexOf("description:");
     const inputSchemaStart = tool.indexOf("inputSchema:");
     expect(descriptionStart, "capture_system_trace has no description: field").toBeGreaterThan(-1);
-    expect(inputSchemaStart, "capture_system_trace has no inputSchema: field").toBeGreaterThan(descriptionStart);
+    expect(inputSchemaStart, "capture_system_trace has no inputSchema: field").toBeGreaterThan(
+      descriptionStart,
+    );
     const description = tool.slice(descriptionStart, inputSchemaStart);
     expect(description).toContain("restartApp");
   });
@@ -385,6 +452,24 @@ function readmeToolNames(): string[] {
   return names;
 }
 
+/**
+ * The two tools with a required, non-window argument — anything else here
+ * is optional, so `{}` is a valid call. Shared by the GRA-55 sinceLast walk
+ * below and the GRA-68 detail walk beside it, so the two "call every
+ * registered tool with a minimal, valid argument set" walks cannot drift
+ * into two different ideas of "minimal, valid" for the same tool.
+ */
+const ARGS_BY_TOOL: Record<string, Record<string, unknown>> = {
+  save_moment: { from: 0, to: 2_000 },
+  what_was_happening: { at: 1_000 },
+  // No real trace file or trace_processor binary in this environment — this
+  // call is expected to `fail()`, which carries no payload at all (by
+  // `fail()`'s own design) and is explicitly excluded below, the same way
+  // `capture_system_trace` (no real adb) is excluded without needing an
+  // entry here.
+  ask_system_trace: { trace: "/nonexistent.pftrace" },
+};
+
 describe("GRA-55: every tool's result carries sinceLast", () => {
   // The EM's own warning on this ticket: "make the test assert the *absence*
   // of a tool that skipped it — otherwise the one tool that forgets is the
@@ -394,18 +479,6 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
   // this file) so a future tool that forgets `ok()` — or forgets to route
   // through it — fails this test by name, without anyone remembering to
   // extend a list.
-  const ARGS_BY_TOOL: Record<string, Record<string, unknown>> = {
-    // The two tools with a required, non-window argument — anything else
-    // here is optional, so `{}` is a valid call.
-    save_moment: { from: 0, to: 2_000 },
-    what_was_happening: { at: 1_000 },
-    // No real trace file or trace_processor binary in this environment —
-    // this call is expected to `fail()`, which carries no payload at all
-    // (by `fail()`'s own design) and is explicitly excluded below, the same
-    // way `capture_system_trace` (no real adb) is excluded without needing
-    // an entry here.
-    ask_system_trace: { trace: "/nonexistent.pftrace" },
-  };
 
   // This walk calls every registered tool, and several shell out to adb. On a runner with no adb the
   // spawn failures alone took 7.7 s on windows-latest, past the 5 s default (GRA-186's CI run); GRA-62's
@@ -420,36 +493,424 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
   // actually asking. `porthole_connect`'s "devices -l" IS configured, to an empty list, so it returns a
   // real `ok()` result (not `fail()`) and is actually exercised by this walk's `sinceLast` check instead
   // of being silently skipped alongside `capture_system_trace`/`ask_system_trace`.
-  it("every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern", { timeout: 30_000 }, async () => {
+  it(
+    "every successful (ok()) tool result has a sinceLast field on its payload — a fail() result carries no payload at all, and is not this test's concern",
+    { timeout: 30_000 },
+    async () => {
+      const fakeAdb = buildFakeAdb({
+        [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+      });
+      const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: { name: "Cart" } },
+          { event: "nav", t: 1_500, data: { route: "cart" } },
+        ]);
+
+        const tools = await rig.client.listTools();
+        expect(tools.length).toBeGreaterThan(0); // positive control: a broken listTools() must not read as "nothing to check"
+
+        const missing: string[] = [];
+        for (const tool of tools) {
+          // GRA-68: `detail: "normal"` explicitly — this walk's whole point is
+          // to inspect the JSON payload for `sinceLast`, and `detail`'s own
+          // new default (`"summary"`) returns no payload at all, which is a
+          // different, already-covered guarantee (see `render.test.ts`'s own
+          // "summary omits the payload entirely" case), not a regression of
+          // this one.
+          const args = { ...(ARGS_BY_TOOL[tool.name] ?? {}), detail: "normal" };
+          const result = await rig.client.callTool(tool.name, args);
+          if (result.isError) continue; // no payload block at all — see fail()
+          const payload = result.json;
+          const hasSinceLast =
+            payload !== null && typeof payload === "object" && "sinceLast" in (payload as object);
+          if (!hasSinceLast) missing.push(tool.name);
+        }
+        expect(
+          missing,
+          `tool(s) whose successful result has no sinceLast field: ${missing.join(", ")}`,
+        ).toEqual([]);
+      } finally {
+        await rig.close();
+        fakeAdb.cleanup();
+      }
+    },
+  );
+});
+
+describe("GRA-68: detail — summary is the default, on every tool", () => {
+  // The same walk GRA-55's sinceLast test runs, over the same registered
+  // tool list and the same minimal, valid `ARGS_BY_TOOL` — but this one
+  // asks a structural question instead of a payload-field question: does
+  // *not* passing `detail` at all leave the JSON payload block off
+  // entirely, the EM's own ruling that "summary" is the default, for every
+  // tool, not just the ones this file happened to hand-test.
+  it(
+    "every registered tool, called with no detail at all, returns exactly one content block — no JSON payload",
+    { timeout: 30_000 },
+    async () => {
+      const fakeAdb = buildFakeAdb({
+        [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+      });
+      const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: { name: "Cart" } },
+          { event: "nav", t: 1_500, data: { route: "cart" } },
+        ]);
+
+        const tools = await rig.client.listTools();
+        expect(tools.length).toBeGreaterThan(0);
+
+        const violations: string[] = [];
+        for (const tool of tools) {
+          const args = ARGS_BY_TOOL[tool.name] ?? {};
+          const result = await rig.client.callTool(tool.name, args);
+          if (result.isError) continue; // fail() carries no payload either way — not this test's concern
+          const textBlocks = result.content.filter((c) => c.type === "text");
+          // `screenshot` also carries an image block on success under this
+          // unconfigured fake adb it never reaches (see GRA-55's own comment
+          // above) — every tool actually exercised here fails before that
+          // point, so one text block is the right expectation across the
+          // board, screenshot included.
+          if (textBlocks.length !== 1) {
+            violations.push(`${tool.name}: ${textBlocks.length} text block(s), expected 1`);
+          }
+        }
+        expect(violations, violations.join("; ")).toEqual([]);
+      } finally {
+        await rig.close();
+        fakeAdb.cleanup();
+      }
+    },
+  );
+
+  it(
+    'every registered tool, called with detail: "normal", returns a JSON payload block',
+    { timeout: 30_000 },
+    async () => {
+      const fakeAdb = buildFakeAdb({
+        [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+      });
+      const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: { name: "Cart" } },
+          { event: "nav", t: 1_500, data: { route: "cart" } },
+        ]);
+
+        const tools = await rig.client.listTools();
+        const violations: string[] = [];
+        for (const tool of tools) {
+          const args = { ...(ARGS_BY_TOOL[tool.name] ?? {}), detail: "normal" };
+          const result = await rig.client.callTool(tool.name, args);
+          if (result.isError) continue;
+          const textBlocks = result.content.filter((c) => c.type === "text");
+          if (textBlocks.length !== 2) {
+            violations.push(`${tool.name}: ${textBlocks.length} text block(s), expected 2`);
+          }
+        }
+        expect(violations, violations.join("; ")).toEqual([]);
+      } finally {
+        await rig.close();
+        fakeAdb.cleanup();
+      }
+    },
+  );
+
+  it("every summary carries a size note naming what it returned", { timeout: 30_000 }, async () => {
     const fakeAdb = buildFakeAdb({
       [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
     });
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
-      await rig.pushEvents([
-        { event: "recompose", t: 1_000, data: { name: "Cart" } },
-        { event: "nav", t: 1_500, data: { route: "cart" } },
-      ]);
-
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
       const tools = await rig.client.listTools();
-      expect(tools.length).toBeGreaterThan(0); // positive control: a broken listTools() must not read as "nothing to check"
-
-      const missing: string[] = [];
+      const violations: string[] = [];
       for (const tool of tools) {
-        const args = ARGS_BY_TOOL[tool.name] ?? {};
-        const result = await rig.client.callTool(tool.name, args);
-        if (result.isError) continue; // no payload block at all — see fail()
-        const payload = result.json;
-        const hasSinceLast =
-          payload !== null && typeof payload === "object" && "sinceLast" in (payload as object);
-        if (!hasSinceLast) missing.push(tool.name);
+        const result = await rig.client.callTool(tool.name, ARGS_BY_TOOL[tool.name] ?? {});
+        if (result.isError) continue;
+        if (!/\[[\d.]+[A-Za-z]*B returned/.test(result.text)) {
+          violations.push(tool.name);
+        }
       }
-      expect(missing, `tool(s) whose successful result has no sinceLast field: ${missing.join(", ")}`).toEqual(
-        [],
-      );
+      expect(violations, `tool(s) with no size note: ${violations.join(", ")}`).toEqual([]);
     } finally {
       await rig.close();
       fakeAdb.cleanup();
+    }
+  });
+
+  it(
+    "no tool silently returns less than it says it did — the claimed byte count matches the actual payload bytes",
+    { timeout: 30_000 },
+    async () => {
+      const fakeAdb = buildFakeAdb({
+        [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\n\n" },
+      });
+      const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+      try {
+        await rig.pushEvents([
+          { event: "recompose", t: 1_000, data: { name: "Cart" } },
+          { event: "nav", t: 1_500, data: { route: "cart" } },
+        ]);
+        const tools = await rig.client.listTools();
+        const violations: string[] = [];
+        for (const tool of tools) {
+          const args = { ...(ARGS_BY_TOOL[tool.name] ?? {}), detail: "normal" };
+          const result = await rig.client.callTool(tool.name, args);
+          if (result.isError) continue;
+          const payloadBlock = result.content.filter((c) => c.type === "text")[1];
+          if (!payloadBlock?.text) continue; // screenshot's failure branch etc. — covered by the count checks above
+          const claimed = /\[(\d+)B returned/.exec(result.text);
+          if (!claimed) continue; // KB/MB-formatted sizes are checked for presence elsewhere; exact match only makes sense at the byte-count grain
+          const actual = Buffer.byteLength(payloadBlock.text, "utf8");
+          if (Number(claimed[1]) !== actual) {
+            violations.push(`${tool.name}: claimed ${claimed[1]}B, actually ${actual}B`);
+          }
+        }
+        expect(violations, violations.join("; ")).toEqual([]);
+      } finally {
+        await rig.close();
+        fakeAdb.cleanup();
+      }
+    },
+  );
+
+  it("payload text is compact — never pretty-printed — whatever the tool", async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
+      const result = await rig.client.callTool("timeline", { detail: "normal" });
+      const payload = result.content.filter((c) => c.type === "text")[1];
+      expect(payload?.text).toBeDefined();
+      expect(payload!.text).not.toMatch(/\n/);
+      expect(payload!.text).toBe(JSON.stringify(JSON.parse(payload!.text!)));
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('findings: detail: "summary" returns the summary line and the window, and nothing else — a follow-up call quoting the window works', async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "db_start", t: 900, data: { id: "q-1" } },
+        {
+          event: "db_end",
+          t: 950,
+          data: { id: "q-1", sql: "SELECT * FROM cart", onMainThread: "true", durationMs: 40 },
+        },
+      ]);
+
+      const summary = await rig.client.callTool("findings", {});
+      expect(summary.isError).toBeFalsy();
+      expect(summary.content.filter((c) => c.type === "text")).toHaveLength(1); // "and nothing else"
+      expect(summary.text).toMatch(/database quer(y|ies)/);
+
+      const windowMatch = /window (\{"from":\d+,"to":\d+\})/.exec(summary.text);
+      expect(windowMatch, `no quotable window in "${summary.text}"`).not.toBeNull();
+      const window = JSON.parse(windowMatch![1]) as { from: number; to: number };
+
+      // The follow-up call an agent would actually make: quote that window
+      // back, explicitly, and get the same finding again.
+      const followUp = await rig.client.callTool("findings", {
+        from: window.from,
+        to: window.to,
+        detail: "normal",
+      });
+      expect(followUp.isError).toBeFalsy();
+      const payload = followUp.json as { findings: Array<{ id: string }> };
+      expect(payload.findings.some((f) => f.id === "db-on-main-thread")).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("timeline: the truncation note survives at every detail level", async () => {
+    async function fresh() {
+      const rig = await buildRig();
+      const events = Array.from({ length: 20 }, (_, i) => ({
+        event: "recompose",
+        t: 1_000 + i * 10,
+        data: {},
+      }));
+      await rig.pushEvents(events);
+      return rig;
+    }
+
+    for (const detail of ["summary", "normal", "full"] as const) {
+      const rig = await fresh();
+      try {
+        const result = await rig.client.callTool("timeline", { detail, limit: 5, since: "all" });
+        expect(result.text, `detail: ${detail}`).toContain(
+          "20 matched, newest 5 returned — raise `limit` or narrow the window.",
+        );
+      } finally {
+        await rig.close();
+      }
+    }
+  });
+
+  it("recompositions: the 'busiest N of M nodes shown' truncation note survives at every detail level", async () => {
+    async function fresh() {
+      return buildRig({
+        handlers: {
+          recompositions: () => ({
+            nodes: [{ name: "Cart", count: 5, triggeredBy: [] }],
+            totalNodes: 9,
+            truncated: true,
+            unattributedWrites: [],
+          }),
+        },
+      });
+    }
+
+    for (const detail of ["summary", "normal", "full"] as const) {
+      const rig = await fresh();
+      try {
+        const result = await rig.client.callTool("recompositions", { detail });
+        expect(result.text, `detail: ${detail}`).toContain("Busiest 1 of 9 nodes shown.");
+      } finally {
+        await rig.close();
+      }
+    }
+  });
+
+  it('porthole_status: exitTrace bumps the default to detail: "normal" so the trace text an agent explicitly asked for is not silently withheld', async () => {
+    const rig = await buildRig({
+      handlers: {
+        exit_trace: () => ({
+          timestamp: 1_700_000_000_000,
+          found: true,
+          trace: "ANR in com.example",
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("porthole_status", { exitTrace: 1_700_000_000_000 });
+      expect(result.isError).toBeFalsy();
+      // Not "summary"'s usual one block — the payload carrying `exitTrace`
+      // came back specifically because it was asked for.
+      expect(result.content.filter((c) => c.type === "text")).toHaveLength(2);
+      const payload = result.json as { exitTrace: { trace: string } };
+      expect(payload.exitTrace.trace).toBe("ANR in com.example");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('semantics_tree: detail: "summary" reports node count, unlabelled count and instrumented coverage (GRA-91)', async () => {
+    const rig = await buildRig({
+      handlers: {
+        semantics_tree: () => ({
+          capturedAt: 0,
+          merged: true,
+          root: {
+            testTag: "root",
+            children: [
+              { text: "Buy now", testTag: "buy-now" },
+              { contentDescription: "cart icon" },
+              {},
+            ],
+          },
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("semantics_tree", {});
+      expect(result.text).toContain("4 node(s)");
+      // root (testTag only) and the trailing "{}" leaf both carry neither
+      // text nor contentDescription.
+      expect(result.text).toContain("2 unlabelled");
+      expect(result.text).toContain("2 instrumented");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('state: detail: "summary" names each unattributable field and the API that would fix it (GRA-91)', async () => {
+    const rig = await buildRig({
+      handlers: {
+        state: () => ({
+          capturedAt: 0,
+          owners: [
+            {
+              name: "CartViewModel",
+              fields: [
+                {
+                  key: "CartViewModel.pricesFlow",
+                  kind: "StateFlow",
+                  type: "Map",
+                  value: {},
+                  attributable: false,
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    });
+    try {
+      const result = await rig.client.callTool("state", {});
+      expect(result.text).toContain("CartViewModel.pricesFlow");
+      expect(result.text).toContain("collectAsNamedState");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('timeline: detail: "summary" names the busiest second, the longest gap, and the thing that happened exactly once (GRA-91)', async () => {
+    const rig = await buildRig();
+    try {
+      await rig.pushEvents([
+        { event: "recompose", t: 1_000, data: {} },
+        { event: "recompose", t: 1_100, data: {} },
+        { event: "recompose", t: 1_200, data: {} },
+        { event: "recompose", t: 9_000, data: {} },
+        { event: "screenshot", t: 9_500, data: {} },
+      ]);
+      const result = await rig.client.callTool("timeline", {});
+      expect(result.text).toMatch(/busiest second at t=1000 \(3 events\)/);
+      expect(result.text).toMatch(/longest gap \d+ms/);
+      expect(result.text).toContain("only one screenshot");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA F1: timeline's highlights are computed over the matched window, not the capped slice — a moment the cap pushed off the end is still named", async () => {
+    // QA's own repro: one anr at t=1000, then 300 recompose events from
+    // t=2000 (10ms apart) — 301 events matched, but the default cap at
+    // "summary"/"normal" only returns the newest 100. Before the fix,
+    // computing highlights over that capped slice made the anr (the thing
+    // that happened exactly once) invisible, suppressed the busiest
+    // second, and reported the longest gap as 10ms — the spacing inside
+    // the recompose burst — instead of the real 1000ms gap between the
+    // anr and the first recompose.
+    async function fresh() {
+      const rig = await buildRig();
+      const events = [{ event: "anr", t: 1_000, data: {} }];
+      for (let i = 0; i < 300; i++) {
+        events.push({ event: "recompose", t: 2_000 + i * 10, data: {} });
+      }
+      await rig.pushEvents(events);
+      return rig;
+    }
+
+    for (const detail of ["summary", "normal"] as const) {
+      const rig = await fresh();
+      try {
+        const result = await rig.client.callTool("timeline", { detail, since: "all" });
+        expect(result.text, `detail: ${detail}`).toContain("only one anr");
+        expect(result.text, `detail: ${detail}`).toMatch(/longest gap 1000ms \(t=1000-2000\)/);
+        // The truncation note still says only 100 of the 301 matched came
+        // back — the cap still applies to what is *returned*, only the
+        // highlights themselves are computed over the whole match.
+        expect(result.text, `detail: ${detail}`).toContain("301 matched, newest 100 returned");
+      } finally {
+        await rig.close();
+      }
     }
   });
 });
@@ -474,6 +935,7 @@ describe("the tool surface", () => {
     "what_was_happening",
     "recompositions",
     "semantics_tree",
+    "accessibility",
     "nav_state",
     "state",
     "inflight",
@@ -515,10 +977,13 @@ describe("the tool surface", () => {
       const documented = readmeToolNames();
       const undocumented = registered.filter((n) => !documented.includes(n));
       const phantom = documented.filter((n) => !registered.includes(n));
-      expect(undocumented, `registered but not documented in README.md: ${undocumented.join(", ")}`).toEqual(
+      expect(
+        undocumented,
+        `registered but not documented in README.md: ${undocumented.join(", ")}`,
+      ).toEqual([]);
+      expect(phantom, `documented in README.md but not registered: ${phantom.join(", ")}`).toEqual(
         [],
       );
-      expect(phantom, `documented in README.md but not registered: ${phantom.join(", ")}`).toEqual([]);
     } finally {
       await rig.close();
     }
@@ -566,7 +1031,8 @@ describe("stripComments (GRA-166 item 6)", () => {
     // correctly blanks a comment on a CRLF-ending line, which is worth
     // pinning in its own right given .gitattributes makes it otherwise
     // unreachable from any real file in this checkout.
-    const crlf = 'const ok = 1;\r\n// state === "connected", left here on purpose\r\nconst after = 2;\r\n';
+    const crlf =
+      'const ok = 1;\r\n// state === "connected", left here on purpose\r\nconst after = 2;\r\n';
     const stripped = stripComments(crlf);
     expect(stripped).not.toContain('state === "connected"');
     // And the blanking is real, not a side effect of the whole line
@@ -628,7 +1094,8 @@ describe("stripComments (GRA-168 item 1): string literals do not open or close a
     // GRA-168 item 2's (which is about the guard's own positive controls),
     // but it is the same root cause as item 1's headline case, and the same
     // fix closes both.
-    const src = 'const url = "http://example.com"; const c = ({ state: "c" } as { state: string }).state === "connected";';
+    const src =
+      'const url = "http://example.com"; const c = ({ state: "c" } as { state: string }).state === "connected";';
     const scanned = stripComments(src);
     expect(scanned).toContain('const url = "http://example.com";');
     expect(scanned).toContain('state === "connected"');
@@ -807,9 +1274,10 @@ describe("ConnectionState reads (GRA-162)", () => {
     for (const file of files) {
       const text = readFileSync(new URL(file, import.meta.url), "utf8");
       const scanned = stripComments(text);
-      expect(scanned.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
-        0,
-      );
+      expect(
+        scanned.trim().length,
+        `${file}: nothing left to scan after stripComments()`,
+      ).toBeGreaterThan(0);
       // GRA-168 item 2: the check above only catches stripComments() handing
       // back nothing at all. It does not catch truncation -- a mutation that
       // feeds stripComments() only part of the file (real code surviving,
@@ -911,9 +1379,10 @@ describe("ConnectionState switches (GRA-166 item 4)", () => {
     for (const file of files) {
       const raw = readFileSync(new URL(file, import.meta.url), "utf8");
       const text = stripComments(raw);
-      expect(text.trim().length, `${file}: nothing left to scan after stripComments()`).toBeGreaterThan(
-        0,
-      );
+      expect(
+        text.trim().length,
+        `${file}: nothing left to scan after stripComments()`,
+      ).toBeGreaterThan(0);
       // GRA-168 item 2: same line-count invariant as the guard above, kept
       // on this loop separately since each describe block owns its own file
       // loop and a truncation here would silently shrink the text this
@@ -945,7 +1414,9 @@ describe("timeline's kinds param (GRA-200)", () => {
     // string someone pasted its output into once and never touched again.
     const block = toolSource("timeline");
     expect(block).toContain("timelineKindsDescription()");
-    expect(block).not.toMatch(/kinds: z\s*\.array\(z\.string\(\)\)\s*\.optional\(\)\s*\.describe\(\s*"/);
+    expect(block).not.toMatch(
+      /kinds: z\s*\.array\(z\.string\(\)\)\s*\.optional\(\)\s*\.describe\(\s*"/,
+    );
   });
 });
 
@@ -967,9 +1438,13 @@ describe("porthole_status's one exception stays inert against a test-injected de
     // in index.test.ts silently starting to depend on this machine's real
     // adb and real attached devices, which is the regression this pins.
     const fakeAdb = buildFakeAdb({});
-    const rig = await buildRig({ connectDevice: false, adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
+    const rig = await buildRig({
+      connectDevice: false,
+      adbBinary: fakeAdb.binaryPath,
+      adbEnv: fakeAdb.env,
+    });
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       expect(status.json).toMatchObject({ deviceDiagnosis: null });
       // The exact pre-GRA-62 message, unchanged — this is what every other
@@ -1008,7 +1483,7 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", {});
+      const result = await rig.client.callTool("porthole_connect", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("No Android device or emulator is attached");
     } finally {
@@ -1024,7 +1499,7 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", {});
+      const result = await rig.client.callTool("porthole_connect", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("A1");
       expect(result.text).toContain("B2");
@@ -1042,11 +1517,13 @@ describe("porthole_connect", () => {
     // `forwardTarget` refuses outright, before adb's own `forward` is ever
     // invoked at all.
     const adb = buildFakeAdb({
-      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\n",
+      },
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", {});
+      const result = await rig.client.callTool("porthole_connect", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("PORTHOLE_APPLICATION_ID");
       expect(result.json).toMatchObject({ serial: "A1" });
@@ -1065,15 +1542,27 @@ describe("porthole_connect", () => {
     // `packageName` explicitly, exactly as an agent without a
     // PORTHOLE_APPLICATION_ID configured would have to.
     const adb = buildFakeAdb({
-      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\n",
+      },
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "forward",
+        `tcp:${PORT}`,
+        "localabstract:porthole.com.example.shop",
+      ])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
-        stdout: "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ HAS_CODE ]\n",
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ HAS_CODE ]\n",
       },
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop" });
+      const result = await rig.client.callTool("porthole_connect", {
+        detail: "normal",
+        packageName: "com.example.shop",
+      });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("release build");
       expect(result.json).toMatchObject({ installed: true, debuggable: false });
@@ -1084,8 +1573,16 @@ describe("porthole_connect", () => {
 
   it("offers to launch an installed-but-not-running debug build, rather than launching unasked — GRA-62 AC4", async () => {
     const adb = buildFakeAdb({
-      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\n",
+      },
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "forward",
+        `tcp:${PORT}`,
+        "localabstract:porthole.com.example.shop",
+      ])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
@@ -1094,7 +1591,10 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop" });
+      const result = await rig.client.callTool("porthole_connect", {
+        detail: "normal",
+        packageName: "com.example.shop",
+      });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("not running");
       expect(result.text).toContain("launch: true");
@@ -1108,13 +1608,29 @@ describe("porthole_connect", () => {
 
   it("launches the app when asked, issuing the monkey launcher intent", async () => {
     const adb = buildFakeAdb({
-      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\n",
+      },
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "forward",
+        `tcp:${PORT}`,
+        "localabstract:porthole.com.example.shop",
+      ])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
       },
-      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { exitCode: 1 },
+      // GRA-233: sequenced — checkInstalledApp's own pre-launch check reads
+      // "not running" first; no resolve-activity response is configured
+      // above, so launchAppAsync falls back to monkey and then judges
+      // success by polling pidof again afterwards, which this second entry
+      // answers "running".
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { exitCode: 1 },
+        { stdout: "12345\n" },
+      ],
       [fakeAdbArgsKey([
         "-s",
         "A1",
@@ -1129,7 +1645,11 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop", launch: true });
+      const result = await rig.client.callTool("porthole_connect", {
+        detail: "normal",
+        packageName: "com.example.shop",
+        launch: true,
+      });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("Launched com.example.shop");
       expect(result.json).toMatchObject({ launched: true });
@@ -1140,13 +1660,31 @@ describe("porthole_connect", () => {
 
   it("restarts an already-running app when asked — force-stop then the launcher intent, the same pair restartApp always issues", async () => {
     const adb = buildFakeAdb({
-      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
-      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["devices", "-l"])]: {
+        stdout: "List of devices attached\nA1  device model:Pixel_5\n",
+      },
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "forward",
+        `tcp:${PORT}`,
+        "localabstract:porthole.com.example.shop",
+      ])]: {},
       [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
         stdout:
           "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
       },
-      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: { stdout: "12345\n" },
+      // GRA-233 QA F14: sequenced — checkInstalledApp's own "is it running"
+      // check, then restartAppAsync's pid-before-force-stop capture (same
+      // pid, 12345, is fine for both of those), then the post-relaunch poll
+      // reading a genuinely DIFFERENT pid once the restart has actually
+      // landed. A single fixed pid here would read as the old process
+      // surviving force-stop, not as a successful restart.
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { stdout: "12345\n" },
+        { stdout: "12345\n" },
+        { stdout: "67890\n" },
+      ],
       [fakeAdbArgsKey(["-s", "A1", "shell", "am", "force-stop", "com.example.shop"])]: {},
       [fakeAdbArgsKey([
         "-s",
@@ -1162,7 +1700,11 @@ describe("porthole_connect", () => {
     });
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("porthole_connect", { packageName: "com.example.shop", restart: true });
+      const result = await rig.client.callTool("porthole_connect", {
+        detail: "normal",
+        packageName: "com.example.shop",
+        restart: true,
+      });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("Restarted com.example.shop");
       expect(result.json).toMatchObject({ restarted: true });
@@ -1177,6 +1719,56 @@ describe("porthole_connect", () => {
       await closeAll(rig, adb);
     }
   });
+
+  it("GRA-233 QA F16: launchState/totalTimeMs are visible in the summary sentence itself — matters now that detail: \"summary\" (GRA-68's default) returns no payload at all", async () => {
+    const adb = buildFakeAdb({
+      [fakeAdbArgsKey(["devices", "-l"])]: { stdout: "List of devices attached\nA1  device model:Pixel_5\n" },
+      [fakeAdbArgsKey(["-s", "A1", "forward", `tcp:${PORT}`, "localabstract:porthole.com.example.shop"])]: {},
+      [fakeAdbArgsKey(["-s", "A1", "shell", "dumpsys", "package", "com.example.shop"])]: {
+        stdout:
+          "Package [com.example.shop] (abcd1234):\n    versionName=1.0.0\n    flags=[ DEBUGGABLE HAS_CODE ]\n",
+      },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "pidof", "com.example.shop"])]: [
+        { stdout: "12345\n" },
+        { stdout: "12345\n" },
+        { stdout: "67890\n" },
+      ],
+      [fakeAdbArgsKey(["-s", "A1", "shell", "am", "force-stop", "com.example.shop"])]: {},
+      [fakeAdbArgsKey([
+        "-s",
+        "A1",
+        "shell",
+        "cmd",
+        "package",
+        "resolve-activity",
+        "--brief",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "com.example.shop",
+      ])]: { stdout: "com.example.shop/.MainActivity\n" },
+      [fakeAdbArgsKey(["-s", "A1", "shell", "am", "start", "-W", "-n", "com.example.shop/.MainActivity"])]: {
+        stdout:
+          "Starting: Intent { cmp=com.example.shop/.MainActivity }\nStatus: ok\nLaunchState: COLD\n" +
+          "Activity: com.example.shop/.MainActivity\nTotalTime: 812\nComplete\n",
+      },
+    });
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      // No `detail` argument at all — GRA-68's default, "summary", which
+      // returns no JSON payload block whatsoever. If launchState/totalTimeMs
+      // only lived in the payload, this call would have no way to see them.
+      const result = await rig.client.callTool("porthole_connect", {
+        packageName: "com.example.shop",
+        restart: true,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("Restarted com.example.shop on A1 (cold, 812 ms).");
+      // The resolve-activity path ran, not the monkey fallback.
+      expect(adb.calls().some((c) => c.includes("monkey"))).toBe(false);
+    } finally {
+      await closeAll(rig, adb);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1184,7 +1776,11 @@ describe("porthole_connect", () => {
 // ---------------------------------------------------------------------------
 
 describe("screenshot", () => {
-  function solidPng(width: number, height: number, [r, g, b]: [number, number, number] = [0, 0, 0]): Buffer {
+  function solidPng(
+    width: number,
+    height: number,
+    [r, g, b]: [number, number, number] = [0, 0, 0],
+  ): Buffer {
     const png = new PNG({ width, height });
     for (let i = 0; i < png.data.length; i += 4) {
       png.data[i] = r;
@@ -1204,12 +1800,11 @@ describe("screenshot", () => {
     const adb = buildFakeScreencapAdb(solidPng(1200, 2000, [40, 90, 200]));
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("screenshot", {});
+      const result = await rig.client.callTool("screenshot", { detail: "normal" });
       expect(result.isError).toBeFalsy();
 
       const image = result.content.find((c) => c.type === "image") as
-        | { type: "image"; data: string; mimeType: string }
-        | undefined;
+        { type: "image"; data: string; mimeType: string } | undefined;
       expect(image, "no image content block in the result").toBeDefined();
       expect(image?.mimeType).toBe("image/jpeg");
       // Round-trip: what came back must actually decode as a JPEG, not just
@@ -1230,7 +1825,7 @@ describe("screenshot", () => {
     const adb = buildFakeScreencapAdb(solidPng(200, 400, [0, 0, 0]));
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("screenshot", {});
+      const result = await rig.client.callTool("screenshot", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("FLAG_SECURE");
       expect(result.content.some((c) => c.type === "image")).toBe(false);
@@ -1245,9 +1840,80 @@ describe("screenshot", () => {
     const adb = buildFakeScreencapAdb(solidPng(20, 20, [10, 20, 30]));
     const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
     try {
-      const result = await rig.client.callTool("screenshot", { displayId: 2 });
+      const result = await rig.client.callTool("screenshot", { detail: "normal", displayId: 2 });
       expect(result.isError).toBeFalsy();
       expect(adb.calls()[0]).toEqual(["exec-out", "screencap", "-p", "-d", "2"]);
+    } finally {
+      await rig.close();
+      adb.cleanup();
+    }
+  });
+
+  /**
+   * Parses the size note's own "[NB returned...]"/"[N.NKB returned...]"
+   * figure back into an approximate byte count — anchored on "returned",
+   * not just any "NNNB"/"NNNKB" substring, since `screenshot`'s own
+   * caption already contains an unrelated one ("...NNNKB JPEG.") ahead of
+   * the note.
+   */
+  function parseFormattedBytes(text: string): number {
+    const m = /\[([\d.]+)(K|M)?B returned/.exec(text);
+    expect(m, `no size-note byte count in "${text}"`).not.toBeNull();
+    const value = Number(m![1]);
+    return m![2] === "M" ? value * 1_000_000 : m![2] === "K" ? value * 1_000 : value;
+  }
+
+  it("QA F2: the size note counts the image block's own bytes, not just the small JSON metadata beside it", async () => {
+    // A busy 800x1600 frame (a gradient, not a solid fill) so the
+    // re-encoded JPEG is a realistic few-tens-of-KB size — a solid colour
+    // compresses to almost nothing and would not distinguish "counts the
+    // image" from "got lucky".
+    const png = new PNG({ width: 800, height: 1600 });
+    for (let i = 0; i < png.data.length; i += 4) {
+      const p = i / 4;
+      png.data[i] = p % 256;
+      png.data[i + 1] = (p * 3) % 256;
+      png.data[i + 2] = (p * 7) % 256;
+      png.data[i + 3] = 255;
+    }
+    const adb = buildFakeScreencapAdb(PNG.sync.write(png));
+    const rig = await buildRig({ adbBinary: adb.binaryPath, adbEnv: adb.env });
+    try {
+      // One call, at the default ("summary") level — screenshot returns
+      // its image content block at every detail level (see index.ts's own
+      // comment on this tool), so the image this same call actually sent
+      // is the ground truth to check its own note against, no second
+      // capture or second rig needed.
+      const summaryResult = await rig.client.callTool("screenshot", {});
+      expect(summaryResult.isError).toBeFalsy();
+      expect(summaryResult.content.filter((c) => c.type === "text")).toHaveLength(1); // "summary": no JSON block
+
+      const image = summaryResult.content.find((c) => c.type === "image") as
+        { type: "image"; data: string; mimeType: string } | undefined;
+      expect(image, "no image content block").toBeDefined();
+      const actualImageBytes = Buffer.byteLength(image!.data, "utf8");
+      // A real screenshot's base64 is comfortably into five figures — this
+      // is also this test's own positive control, so a fixture that
+      // stopped producing a real image would fail loudly here rather than
+      // trivially passing every assertion below.
+      expect(actualImageBytes).toBeGreaterThan(5_000);
+
+      // QA's own repro named "[66B returned; normal ≈ 138B]" — a couple of
+      // hundred bytes while a real image went out beside it. The claimed
+      // "returned" size at "summary" must be within the same order of
+      // magnitude as the actual image bytes, not the bare JSON metadata.
+      const claimedAtSummary = parseFormattedBytes(summaryResult.text);
+      expect(claimedAtSummary).toBeGreaterThan(actualImageBytes * 0.9);
+
+      // detail: "normal"'s own claimed size, and the estimate it should
+      // ideally never need (nothing bigger than "normal" exists for this
+      // tool — no distinct "full" payload), must likewise reflect the
+      // image, not just the ~100-byte metadata object. Same rig, same
+      // fake adb, a second call — screenshot carries no state between
+      // calls, so this is not a race with the one above.
+      const normalResult = await rig.client.callTool("screenshot", { detail: "normal" });
+      const claimedAtNormal = parseFormattedBytes(normalResult.text);
+      expect(claimedAtNormal).toBeGreaterThan(actualImageBytes * 0.9);
     } finally {
       await rig.close();
       adb.cleanup();
@@ -1272,14 +1938,15 @@ describe("every tool's not-connected text names porthole_status and porthole_con
     const rig = await buildRig({ connectDevice: false });
     try {
       for (const name of ["findings", "what_was_happening", "porthole_status"]) {
-        const result = await rig.client.callTool(name, {});
+        const result = await rig.client.callTool(name, { detail: "normal" });
         expect(result.isError, `${name} unexpectedly errored`).toBeFalsy();
         expect(result.text, `${name}'s not-connected text does not name porthole_status`).toContain(
           "porthole_status",
         );
-        expect(result.text, `${name}'s not-connected text does not name porthole_connect`).toContain(
-          "porthole_connect",
-        );
+        expect(
+          result.text,
+          `${name}'s not-connected text does not name porthole_connect`,
+        ).toContain("porthole_connect");
       }
     } finally {
       await rig.close();

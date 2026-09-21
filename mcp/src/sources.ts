@@ -40,7 +40,8 @@ import { resolveProjectRoot } from "./adb.js";
  * say: the feature is off (see below), or there was no name/frame to look up
  * in the first place. Once there is something to look up and the feature is
  * on, they always return a `Where`, resolved or not — an unresolved `Where`
- * is itself the useful fact ("ambiguous", "not found", "synthetic").
+ * is itself the useful fact ("ambiguous", "not found", "synthetic", "not in
+ * project").
  *
  * Follow-up: a same-named file or label in two modules is the case this
  * exists for and used to always read "ambiguous" — the multi-module app
@@ -58,9 +59,31 @@ export type WhereUnresolvedReason =
   | "not found"
   | "ambiguous"
   | "synthetic"
+  | "not in project"
   | "too many source files under the project root to search them all";
 
-export type Where = { resolved: true; path: string; line?: number } | { resolved: false; reason: WhereUnresolvedReason };
+/**
+ * GRA-205: a resolved `where` is a breakpoint address, not merely a file —
+ * `line` is required whenever `resolved: true`, never optional, and `kind`
+ * says whether that line came from the evidence itself (`"frame"` — a stack
+ * frame's own rendered `File.kt:NN`) or from the declaration `whereForName`
+ * found in source for a name that never carried a line to begin with
+ * (`"declaration"`). A frame whose own line is unusable (StackFormat can
+ * render a known file with an unmapped line — no `LineNumberTable`, the
+ * realistic shape of a stripped release build) does not fall back to
+ * `kind: "declaration"`: there is no name to look up a declaration for,
+ * only a file, so it is reported unresolved (`"synthetic"`) rather than
+ * inventing a line — see `whereForFrame`.
+ *
+ * `reason: "ambiguous"` carries `candidates`: every path that matched, so a
+ * caller can say which files it actually found instead of just "more than
+ * one" — narrowing by package (`narrowByPackage`) already tried and failed
+ * before this is ever returned.
+ */
+export type Where =
+  | { resolved: true; path: string; line: number; kind: "frame" | "declaration" }
+  | { resolved: false; reason: "ambiguous"; candidates: string[] }
+  | { resolved: false; reason: Exclude<WhereUnresolvedReason, "ambiguous"> };
 
 /**
  * Directories a walk never descends into, symlink or not: build output
@@ -337,7 +360,46 @@ function narrowByPackage<T extends { path: string }>(
   return filtered.length === 1 ? filtered[0] : null;
 }
 
-function resolveFile(root: string, fileName: string, packageName: string | null): Where {
+/**
+ * GRA-205: a lookup that matched nothing distinguishes "genuinely not
+ * authored in this project" from a plainer "not found" whenever the
+ * evidence named a package — a library frame (`okhttp3.internal...`, an
+ * androidx class) resolves here every time, since none of its own source is
+ * ever under `PORTHOLE_PROJECT_ROOT` in the first place.
+ *
+ * No file is opened to decide this: Gradle's standard source layout mirrors
+ * a package onto its directory (`com.example.shop.data` ->
+ * `.../com/example/shop/data/`, true of every fixture and every real module
+ * in this repo), so the walk's own file paths — already in memory, no extra
+ * I/O — are enough to ask "does this project have a directory for that
+ * package at all." A package with no such directory anywhere under the root
+ * did not enter through this checkout; that is exactly the shape a library
+ * frame always has. Tolerant on purpose, the same as everything else in
+ * this module: a project that genuinely breaks the convention could in
+ * principle read as "not in project" for one of its own packages, which is
+ * why this only ever narrows a lookup that already found nothing — never a
+ * reason to skip a real file search first.
+ */
+function packageLooksExternal(entry: CacheEntry, packageName: string): boolean {
+  const pkgPath = `/${packageName.split(".").join("/")}/`;
+  return !entry.files.some((f) => f.includes(pkgPath));
+}
+
+/**
+ * The intermediate, line-less result a basename search produces —
+ * `whereForFrame` is the only caller, and only it knows whether the
+ * evidence's own line is usable, so it is the one that assembles the final,
+ * public `Where` (`kind: "frame"`, `line` required). Kept distinct from
+ * `Where` itself so a `resolved: true` here — deliberately missing `line`
+ * and `kind` — can never leak out as one by a caller forgetting to finish
+ * the job.
+ */
+type FileResolution =
+  | { resolved: true; path: string }
+  | { resolved: false; reason: "ambiguous"; candidates: string[] }
+  | { resolved: false; reason: Exclude<WhereUnresolvedReason, "ambiguous"> };
+
+function resolveFile(root: string, fileName: string, packageName: string | null): FileResolution {
   const entry = getEntry(root);
   const matches = entry.byBaseName.get(fileName) ?? [];
   if (matches.length === 1) return { resolved: true, path: matches[0] };
@@ -349,10 +411,17 @@ function resolveFile(root: string, fileName: string, packageName: string | null)
       packageName,
     );
     if (narrowed) return { resolved: true, path: narrowed.path };
-    return { resolved: false, reason: "ambiguous" };
+    // Sorted -- readdirSync's own order is filesystem-dependent, and
+    // `candidates` is wire output an agent may compare or display; a caller
+    // should never see it reorder between two calls that found the same
+    // files.
+    return { resolved: false, reason: "ambiguous", candidates: [...matches].sort() };
   }
   if (entry.capped) {
     return { resolved: false, reason: "too many source files under the project root to search them all" };
+  }
+  if (packageName && packageLooksExternal(entry, packageName)) {
+    return { resolved: false, reason: "not in project" };
   }
   return { resolved: false, reason: "not found" };
 }
@@ -365,20 +434,25 @@ function resolveFile(root: string, fileName: string, packageName: string | null)
  * Splits a qualified prefix (everything before the trailing
  * `(File.kt:NN)`, e.g. `com.example.shop.ui.CartViewModel.blockTheMainThread`)
  * into a package, on the one convention the JVM actually guarantees: a
- * package segment is lowercase, a class is not (`CartViewModel`, or a
- * top-level Kotlin file's own `ScreensKt`). The longest lowercase-segment
- * prefix is the package; the first non-lowercase segment after it — a class
+ * package segment *starts* lowercase, a class does not (`CartViewModel`, or
+ * a top-level Kotlin file's own `ScreensKt`). QA F20: the segment itself may
+ * still carry uppercase letters past the first character — `exampleApp` is
+ * exactly as valid a package segment as `example` under ordinary Java
+ * identifier rules, and Android package names in the wild do this
+ * (`com.exampleApp.shop`) — so this only requires a lowercase (or `_`)
+ * first character, never lowercase throughout. The longest such prefix is
+ * the package; the first segment starting uppercase after it — a class
  * name, possibly followed by more (a method, `$1`, a nested class) — is
  * everything else, which this function has no use for. Returns `null` when
- * there is no such split to make: nothing lowercase at the front (a
- * default-package frame, or a bare dummy prefix in a test that names no
- * real package), or lowercase all the way through (nothing left to be the
- * class/method that would confirm the split is real).
+ * there is no such split to make: nothing lowercase-starting at the front
+ * (a default-package frame, or a bare dummy prefix in a test that names no
+ * real package), or lowercase-starting all the way through (nothing left to
+ * be the class/method that would confirm the split is real).
  */
 function packageFromQualifiedFrame(qualified: string): string | null {
   const segments = qualified.split(".").filter(Boolean);
   let i = 0;
-  while (i < segments.length && /^[a-z_][a-z0-9_]*$/.test(segments[i])) i++;
+  while (i < segments.length && /^[a-z_][A-Za-z0-9_]*$/.test(segments[i])) i++;
   if (i === 0 || i >= segments.length) return null;
   return segments.slice(0, i).join(".");
 }
@@ -417,6 +491,14 @@ export function parseFrame(
  * `Where`, because "this frame is not resolvable" (a native frame, an
  * obfuscated one, a file the walk genuinely could not find) is itself the
  * fact worth reporting.
+ *
+ * GRA-205: `resolved: true` only when the frame's own line survives —
+ * `kind: "frame"` says the line is exactly what the evidence carried, never
+ * a declaration this walk found on its own. A frame whose file resolves but
+ * whose own line does not (StackFormat can render a real file name next to
+ * an unmapped line — no `LineNumberTable`, same shape as a stripped release
+ * build) is not a breakpoint address either, and reads `"synthetic"` rather
+ * than a `resolved: true` missing the one field that makes it useful.
  */
 export function whereForFrame(frameLine: string | undefined | null): Where | undefined {
   if (!frameLine) return undefined;
@@ -428,7 +510,8 @@ export function whereForFrame(frameLine: string | undefined | null): Where | und
 
   const fileResult = resolveFile(root, parsed.file, parsed.packageName);
   if (!fileResult.resolved) return fileResult;
-  return parsed.line ? { resolved: true, path: fileResult.path, line: parsed.line } : fileResult;
+  if (!parsed.line) return { resolved: false, reason: "synthetic" };
+  return { resolved: true, path: fileResult.path, line: parsed.line, kind: "frame" };
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +601,10 @@ function splitQualifiedClassName(name: string): { packageName: string; simpleNam
   const simpleName = segments[segments.length - 1];
   if (!/^[A-Z][A-Za-z0-9_]*$/.test(simpleName)) return null;
   const packageSegments = segments.slice(0, -1);
-  if (!packageSegments.every((s) => /^[a-z_][a-z0-9_]*$/.test(s))) return null;
+  // QA F20: the same fix as packageFromQualifiedFrame's — a package segment
+  // only has to *start* lowercase (`exampleApp`), not stay lowercase
+  // throughout.
+  if (!packageSegments.every((s) => /^[a-z_][A-Za-z0-9_]*$/.test(s))) return null;
   return { packageName: packageSegments.join("."), simpleName };
 }
 
@@ -533,6 +619,13 @@ function splitQualifiedClassName(name: string): { packageName: string; simpleNam
  * name (every composable label, most registered names) resolves exactly as
  * before.
  */
+/**
+ * GRA-205: every resolution here carries `kind: "declaration"` — the
+ * evidence is a name, never a line, so `line` is always the enclosing
+ * `class`/`fun`/label declaration's own line, exactly what `Declaration`
+ * already records at index-build time. `reason: "ambiguous"` carries
+ * `candidates`, the same as `resolveFile`'s.
+ */
 export function whereForName(name: string | undefined | null): Where | undefined {
   if (!name) return undefined;
   const root = rootForResolution();
@@ -544,14 +637,27 @@ export function whereForName(name: string | undefined | null): Where | undefined
 
   const entry = getEntry(root);
   const matches = getNameIndex(root).get(lookupName) ?? [];
-  if (matches.length === 1) return { resolved: true, path: matches[0].path, line: matches[0].line };
+  if (matches.length === 1) {
+    return { resolved: true, path: matches[0].path, line: matches[0].line, kind: "declaration" };
+  }
   if (matches.length > 1) {
     const narrowed = narrowByPackage(root, entry, matches, qualified?.packageName ?? null);
-    if (narrowed) return { resolved: true, path: narrowed.path, line: narrowed.line };
-    return { resolved: false, reason: "ambiguous" };
+    if (narrowed) return { resolved: true, path: narrowed.path, line: narrowed.line, kind: "declaration" };
+    // QA F19: de-duped by path, not one entry per `Declaration` — the same
+    // file can register `name` twice (`class Dup` and `fun Dup` both live
+    // in `Dup.kt`), which is one ambiguous *file*, not two, and a caller
+    // comparing or displaying `candidates` should never see a path repeat.
+    return {
+      resolved: false,
+      reason: "ambiguous",
+      candidates: [...new Set(matches.map((m) => m.path))].sort(),
+    };
   }
   if (entry.capped) {
     return { resolved: false, reason: "too many source files under the project root to search them all" };
+  }
+  if (qualified && packageLooksExternal(entry, qualified.packageName)) {
+    return { resolved: false, reason: "not in project" };
   }
   return { resolved: false, reason: "not found" };
 }

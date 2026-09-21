@@ -15,6 +15,15 @@ internal object Redaction {
     private const val MAX_SQL_CHARS = 400
 
     /**
+     * LeakCanary's own trace text runs one line per object in the reference
+     * path plus a header and can run to a few thousand characters for a
+     * deep chain — unbounded compared to everything else that goes in an
+     * event, the same reason [collapseSql] caps a statement rather than
+     * shipping it whole.
+     */
+    private const val MAX_LEAK_TRACE_CHARS = 6000
+
+    /**
      * Strips every query-string value, keeping the names.
      *
      * Names are kept because knowing a request carried a `token` is useful and
@@ -40,4 +49,16 @@ internal object Redaction {
         val one = sql.replace(Regex("\\s+"), " ").trim()
         return if (one.length > MAX_SQL_CHARS) one.take(MAX_SQL_CHARS) + "..." else one
     }
+
+    /**
+     * Bounds a LeakCanary leak trace (GRA-64) the same way [collapseSql] bounds
+     * a statement — a length cap with a visible marker, not a content filter.
+     * A leak trace's own lines are class and field names, not free-text values
+     * an app put there, so there is nothing to strip the way a query string's
+     * values are; what there is, is no natural limit on how many objects a
+     * reference path can hold, and a trace pasted into a chat window should not
+     * be the one event that blows past every other bound in the ring.
+     */
+    fun leakTrace(text: String): String =
+        if (text.length > MAX_LEAK_TRACE_CHARS) text.take(MAX_LEAK_TRACE_CHARS) + "..." else text
 }

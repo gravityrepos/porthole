@@ -20,6 +20,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import live.gravitylabs.porthole.collect.CompositionTreeCollector
 import live.gravitylabs.porthole.collect.FrameCollector
 import live.gravitylabs.porthole.collect.InflightCollector
 import live.gravitylabs.porthole.collect.LogCollector
@@ -30,6 +31,7 @@ import live.gravitylabs.porthole.collect.SemanticsCollector
 import live.gravitylabs.porthole.collect.SnapshotWatcher
 import live.gravitylabs.porthole.collect.StateCollector
 import live.gravitylabs.porthole.collect.Window
+import live.gravitylabs.porthole.integration.LeakCanaryPorthole
 import live.gravitylabs.porthole.integration.WorkManagerPorthole
 import live.gravitylabs.porthole.protocol.BlockingReport
 import live.gravitylabs.porthole.protocol.FrameReport
@@ -102,6 +104,8 @@ object Porthole {
         val ring: EventRing,
         val snapshots: SnapshotWatcher,
         val recompositions: RecompositionCollector,
+        /** GRA-235: whole-tree recomposition counting. See its own doc comment. */
+        val compositionTree: CompositionTreeCollector,
         val semantics: SemanticsCollector,
         val state: StateCollector,
         val inflight: InflightCollector,
@@ -141,6 +145,20 @@ object Porthole {
      * Idempotent, and safe to call from any thread: the second call returns
      * without doing anything.
      *
+     * GRA-240: the project's whole security argument is "debug-only,
+     * device-local, app-local" — this is where the first of those is
+     * actually enforced rather than assumed. [app]'s own
+     * `ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE` is read
+     * before anything else runs; if it is clear, [install] logs one line at
+     * `Log.w` naming the build type and returns — no socket, no collectors,
+     * no reflection, same as a release build linking `runtime-noop`. This
+     * only matters for a build type that lands here at all: the plugin's own
+     * `debugBuildTypes` (see README's "Setup" section) is what puts the real
+     * `runtime` artifact on a build type in the first place, and it can name
+     * a build type that is not actually marked `isDebuggable = true` (a
+     * `staging` type used for QA, say) — this check is what stops that
+     * combination from quietly opening the socket anyway.
+     *
      * @param port the port to bind on the device, defaulting to the
      *   `porthole_port` resource the Gradle plugin generates, and to
      *   [DEFAULT_PORT] if that resource is absent.
@@ -152,6 +170,17 @@ object Porthole {
         synchronized(this) {
             if (session != null) return
 
+            val debuggable = isDebuggable(app)
+            if (!debuggable) {
+                Log.w(
+                    TAG,
+                    "not starting: this is a \"${buildTypeOf(app)}\" build and " +
+                        "ApplicationInfo.FLAG_DEBUGGABLE is not set — porthole only ever runs on a " +
+                        "debuggable build (see README's build-type section); no socket, no collectors.",
+                )
+                return
+            }
+
             val ring = EventRing(capacity = ringCapacityFromResources(app))
             // Constructed before anything else below: GRA-60's origin and
             // Application.onCreate-entry timestamps are both taken at
@@ -160,7 +189,11 @@ object Porthole {
             val startup = StartupCollector(ring)
             val appPackages = appPackagesOf(app)
             val snapshots = SnapshotWatcher(ring, appPackages)
-            val recompositions = RecompositionCollector(ring, snapshots)
+            val composableNames = composableNamesFromResources(app)
+            val compositionTree = CompositionTreeCollector(snapshots, composableNames)
+            val recompositions = RecompositionCollector(ring, snapshots, composableNamesEnabled = composableNames)
+            recompositions.wholeTreeAvailable = compositionTree.available
+            recompositions.observerNames = compositionTree
             val semantics = SemanticsCollector()
             val state = StateCollector(snapshots)
             val inflight = InflightCollector(ring)
@@ -219,6 +252,24 @@ object Porthole {
             memory.start()
             collectors += "memory"
             if (deviceContext.install(app)) collectors += "device"
+
+            // GRA-64: LeakCanaryPorthole.install() does its own classpath
+            // probe before touching a single LeakCanary type — the same
+            // presence-gate shape as WorkManager just above — and returns
+            // false, silently, for an app that never added
+            // leakcanary-android. Setup.recordLeakCanary is only ever
+            // called from inside it, never unconditionally here, which is
+            // what keeps "absent" meaning no setup entry at all rather than
+            // a present-but-false one (see that method's own doc comment).
+            //
+            // QA: the actual hook now runs on its own background thread
+            // (see install()'s own doc comment for why — touching
+            // LeakCanary.config for the first time is expensive enough to
+            // stall the main thread on a cold launch), so `true` here means
+            // "an attempt was launched," not "confirmed hooked" — this
+            // collectors line is best-effort, and whether it actually hooked
+            // is always Setup.report()'s own leakcanary row, never this list.
+            if (LeakCanaryPorthole.install(ring)) collectors += "leakcanary"
             if (exitInfo.install(app)) collectors += "exit_info"
             if (autoWire.install(app)) collectors += "autowire"
 
@@ -257,6 +308,34 @@ object Porthole {
                         "module (debug builds only — never set it in release).",
                 )
                 null
+            }
+
+            // GRA-235: whole-tree recomposition counting. Unlike strictMode this
+            // is not opt-in at the attach level — CompositionTreeCollector.install
+            // itself already declines when CompositionObserver isn't on the
+            // classpath (Compose < 1.6) — only naming (composableNames, read
+            // above) is opt-in. Setup is told either way for the same reason
+            // strict mode is: the entry exists even when it never had a chance to
+            // attach.
+            if (compositionTree.install(app, recompositions)) {
+                collectors += "compose_tree"
+                Setup.recordComposeTree(
+                    available = true,
+                    note = if (composableNames) {
+                        "composableNames is on: recompose scopes get real names, at the cost of " +
+                            "forceRecomposeScopes — see the recompositions report's own notes."
+                    } else {
+                        null
+                    },
+                )
+            } else {
+                Setup.recordComposeTree(
+                    available = false,
+                    note = "this build's Compose runtime is below 1.6, or " +
+                        "androidx.compose.runtime.tooling.CompositionObserver was otherwise " +
+                        "unavailable — recompositions falls back to PortholeScreen/Modifier.portholeNode " +
+                        "counts only, as it did before GRA-235.",
+                )
             }
 
             // Snapshotted rather than handed over live: Session used to receive
@@ -301,6 +380,7 @@ object Porthole {
                 ring = ring,
                 snapshots = snapshots,
                 recompositions = recompositions,
+                compositionTree = compositionTree,
                 semantics = semantics,
                 state = state,
                 inflight = inflight,
@@ -356,7 +436,9 @@ object Porthole {
             s.autoWire.stop()
             s.watchdog.stop()
             s.strictMode?.stop()
+            LeakCanaryPorthole.uninstall()
             s.recompositions.stop()
+            s.compositionTree.stop(s.app)
             s.nav?.unregister()
             s.workManager?.stop()
             session = null
@@ -497,7 +579,16 @@ object Porthole {
     internal fun inflight(): InflightCollector? = session?.inflight
 
     internal fun onRecompose(nodeId: String, name: String, screen: String?, pass: Int) {
-        session?.recompositions?.onRecompose(nodeId, name, screen, pass)
+        val s = session ?: return
+        // GRA-235: causal attribution for a wrapped call site, when the
+        // observer has a pass open — otherwise unchanged (null falls back to
+        // RecompositionCollector's own temporal correlation). Order matters:
+        // read the pass's triggers before notifying it fired, since
+        // notifyWrappedFired is what onEndComposition uses to decide how many
+        // map entries this pass's wrapped fires account for.
+        val causalTriggers = s.compositionTree.currentPassTriggers()
+        s.compositionTree.notifyWrappedFired()
+        s.recompositions.onRecompose(nodeId, name, screen, pass, causalTriggers)
     }
 
     // -- rpc ---------------------------------------------------------------
@@ -512,7 +603,7 @@ object Porthole {
                     versionName = runCatching {
                         s.app.packageManager.getPackageInfo(s.app.packageName, 0).versionName
                     }.getOrNull(),
-                    debuggable = true,
+                    debuggable = isDebuggable(s.app),
                     device = Build.MANUFACTURER + " " + Build.MODEL,
                     sdkInt = Build.VERSION.SDK_INT,
                     startedAt = s.startedAt,
@@ -749,6 +840,35 @@ object Porthole {
         runCatching { Class.forName(name, false, Porthole::class.java.classLoader) }.isSuccess
 
     /**
+     * GRA-240: the actual OS-enforced flag, not the literal `true` this used
+     * to be. `ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE` is
+     * what `dumpsys package` reports as `pkgFlags`'s `DEBUGGABLE` entry, and
+     * what decides whether `run-as`/JDWP attach work — the same signal a
+     * release build's manifest (`android:debuggable` defaulting to `false`,
+     * forced `false` by AGP's own release signing regardless of manifest
+     * overrides) is judged by. `getOrDefault(false)`: a context that cannot
+     * even answer this is treated as not debuggable, never the other way.
+     */
+    private fun isDebuggable(context: Context): Boolean = runCatching {
+        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }.getOrDefault(false)
+
+    /**
+     * Best-effort name for the one line [install] logs when it refuses to
+     * start. There is no public Android API for "which Gradle build type is
+     * this" — that is a compile-time AGP concept — so this reflects on the
+     * consuming app's own generated `<applicationId>.BuildConfig.BUILD_TYPE`,
+     * the same field AGP writes for every variant. Reflection because
+     * `runtime` cannot depend on an app module's generated class; any failure
+     * (obfuscated away, field renamed, class simply absent) reads as
+     * `"unknown"` rather than throwing from inside a log line.
+     */
+    private fun buildTypeOf(context: Context): String = runCatching {
+        val cls = Class.forName(context.packageName + ".BuildConfig", false, context.classLoader)
+        cls.getField("BUILD_TYPE").get(null) as? String
+    }.getOrNull() ?: "unknown"
+
+    /**
      * The Gradle plugin writes the port as a generated integer resource, which
      * avoids a manifest placeholder the consuming app would have to declare.
      * Without the plugin, or with it left at its default, this is [DEFAULT_PORT].
@@ -813,6 +933,21 @@ object Porthole {
         if (id != 0) context.resources.getBoolean(id) else false
     }.getOrDefault(false)
 
+    /**
+     * The Gradle plugin's `composableNames` DSL setting (GRA-235), written
+     * the same way as `strictMode`: a generated `bool` resource
+     * ([RES_COMPOSABLE_NAMES]), absent (reads `false`) for a build predating
+     * this flag or never setting it — the same off-by-default a stale plugin
+     * jar has to fall back to, since turning this on changes how the app
+     * under test recomposes (`forceRecomposeScopes`) and that has to be a
+     * deliberate choice. See [live.gravitylabs.porthole.collect.CompositionTreeCollector]'s
+     * own doc comment for what it costs.
+     */
+    private fun composableNamesFromResources(context: Context): Boolean = runCatching {
+        val id = context.resources.getIdentifier(RES_COMPOSABLE_NAMES, "bool", context.packageName)
+        if (id != 0) context.resources.getBoolean(id) else false
+    }.getOrDefault(false)
+
     private fun processName(context: Context): String = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             Application.getProcessName()
@@ -862,6 +997,7 @@ object Porthole {
     private const val RES_RING_CAPACITY = "porthole_ring_capacity"
     private const val RES_STRICT_MODE = "porthole_strict_mode"
     private const val RES_LEGACY_TCP_PORT = "porthole_legacy_tcp_port"
+    private const val RES_COMPOSABLE_NAMES = "porthole_composable_names"
 }
 
 /**

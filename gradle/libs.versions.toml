@@ -1,5 +1,8 @@
-# Bump these to whatever your app is on. The runtime only needs Compose >= 1.5
-# and kotlinx-serialization; nothing here is pinned for behaviour.
+# Bump these to whatever your app is on. The runtime needs Compose >= 1.5 for
+# PortholeScreen/Modifier.portholeNode and kotlinx-serialization; whole-tree
+# recomposition counting (GRA-235, CompositionObserver) additionally needs
+# Compose >= 1.6 and degrades gracefully — not a floor, a ceiling on one
+# feature — below it. Nothing here is pinned for behaviour.
 [versions]
 # Porthole's own release version, and the only place it is written. The
 # runtime, the no-op, the plugin and the version the plugin hands consumers
@@ -27,12 +30,24 @@ sqlite = "2.4.0"
 sqldelight = "2.0.2"
 ktor = "3.0.3"
 dokka = "2.2.0"
+# GRA-64: the floor this module compiles LeakCanaryPorthole against — see
+# that file's own FLOOR_VERSION constant, which the setup hint quotes when a
+# present LeakCanary's API does not match it. Bump both together.
+leakcanaryAndroid = "2.14"
 
 [libraries]
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-runtime = { module = "androidx.compose.runtime:runtime" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-util = { module = "androidx.compose.ui:ui-util" }
+# GRA-235: parses the C(Name)…:File.kt#hash slot-table source-info format
+# the compose compiler writes — the same published artifact the Layout
+# Inspector uses, rather than hand-parsing it. Only touched when
+# `porthole { composableNames.set(true) }` is on; bundled unconditionally
+# (implementation, not compileOnly) because it is Porthole's own
+# implementation detail, not an app-optional integration — see
+# CompositionTreeCollector's own doc comment.
+compose-ui-tooling-data = { module = "androidx.compose.ui:ui-tooling-data" }
 
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
@@ -76,6 +91,13 @@ work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work"
 sqldelight-android = { module = "app.cash.sqldelight:android-driver", version.ref = "sqldelight" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+# The umbrella artifact: its own Gradle module metadata publishes
+# leakcanary-android-core, shark-android and shark as `api`-scoped
+# dependencies, so this one line is enough to put leakcanary.LeakCanary,
+# leakcanary.OnHeapAnalyzedListener and shark.HeapAnalysis/Leak all on the
+# compile classpath — unlike the okio/okhttp pair above, nothing here needs
+# a second, explicit entry.
+leakcanary-android = { module = "com.squareup.leakcanary:leakcanary-android", version.ref = "leakcanaryAndroid" }
 
 # for the gradle-plugin build
 agp-api = { module = "com.android.tools.build:gradle-api", version.ref = "agp" }

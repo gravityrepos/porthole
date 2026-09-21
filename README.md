@@ -34,6 +34,7 @@ them they cover:
 | `findings` | start here: what is wrong right now, ranked, each with the tool that shows its evidence |
 | `recompositions` | which composables recomposed, how often, and which state keys were written just before |
 | `semantics_tree` | the semantics tree with an id that stays stable across captures |
+| `accessibility` | a lint pass over a fresh semantics capture: missing labels, small touch targets, click/role mismatches, undescribed images, duplicated descriptions, text tight at a large font scale |
 | `nav_state` | back stack, arguments on each entry, and the deep link that got you here |
 | `state` | current values of your ViewModel state, named automatically, and whether writes to it are attributable |
 | `inflight` | open HTTP calls with the phase each is stuck in, running queries, WorkManager jobs |
@@ -118,6 +119,71 @@ finding on their own. `alsoInWindow.exits` gives the same `reason`/`timestamp`
 shape `exits` does, so `porthole_status {"exitTrace": <timestamp>}` still
 works without a second lookup. The field, and the one sentence both tools
 append for it, are absent — not empty — when there is nothing to add.
+
+## `detail`: answers sized for a context window
+
+Every tool used to return a summary line plus its entire JSON payload,
+pretty-printed. A 500-event `timeline` call is tens of thousands of tokens,
+and an agent that calls tools repeatedly pays that cost every time — whether
+or not it ever reads past the first sentence. Every tool now takes a
+`detail` parameter (unrelated to a `Finding`'s own `detail` field, which
+this shares a name with only by coincidence — one is a request parameter,
+the other a response field several tools already had before this existed):
+
+- **`"summary"` — the default.** The summary line, its headline numbers, and
+  anything needed to make a follow-up call — a window is always quotable
+  straight from the text itself. No JSON payload at all. This is what you
+  get when `detail` is omitted, same as every other parameter.
+- **`"normal"`.** Today's JSON payload, alongside the summary — compact now,
+  not pretty-printed (no change in *what* it carries, only how the bytes are
+  spent on the wire).
+- **`"full"`.** The complete data, at whatever the old, uncapped defaults
+  were before `detail` existed — `timeline`'s 500 events, `semantics_tree`'s
+  1500 nodes — also compact. `timeline` and `semantics_tree` default to a
+  smaller, context-sized cap (100 events, 300 nodes) at `"summary"`/`"normal"`
+  now; pass an explicit `limit`/`maxNodes` to ask for something else at any
+  level, and it wins outright regardless of `detail`.
+
+Every level ends its summary line with the size it actually returned, and
+what the next level up would cost — `[7.9KB returned; full ≈ 38.6KB]` — so an
+agent can decide whether asking for more is worth it before asking. The
+"next level" figure is occasionally an estimate (`semantics_tree`'s, when the
+tree hit its own node budget) rather than a second, discarded fetch; the
+"returned" figure never is — it is measured off the response this call
+actually sent, not guessed ahead of building it.
+
+Three tools' `"summary"` says more than a generic headline number, because a
+bare count would not actually answer the question that detail level exists
+to answer in one line: `semantics_tree` reports the node count, how many
+nodes carry neither `text` nor `contentDescription` ("unlabelled"), and what
+fraction carry a porthole node id ("instrumented"); `state` names every
+field that is not attributable and the API that would make it so
+(`collectAsNamedState` for a `Flow`/`StateFlow`, wrapping it as `State` for a
+plain field); `timeline` names the busiest one-second window, the longest
+gap between two consecutive events, and the one event kind that happened
+exactly once, if there is one.
+
+Truncation notes survive at every level — "20 matched, newest 5 returned",
+"Busiest 1 of 9 nodes shown" — because they are built from the summary
+line's own inputs at every level, not stripped out below `"full"`; only the
+JSON payload block comes and goes with `detail`. Most tools' summary line
+is otherwise identical at every level, apart from the size note appended to
+it. Two are not, precisely: `timeline`'s event-count clause ("N events over
+Xms: kind counts...") and its truncation note vary with the level's own cap
+on *returned* events — its busiest-second/longest-gap/once-only clause does
+not, since it is computed over the whole matched window, never the capped
+slice, so a moment the cap pushed out of what came back is still named.
+`semantics_tree`'s summary sentence (node count, unlabelled, instrumented
+coverage) varies at every level outright, because `"normal"` and `"full"`
+ask the device for a different node budget before the capture is even
+taken — there is no way to report `"full"`'s true counts without paying for
+`"full"`'s own fetch, which is exactly the round trip `detail` exists to
+let `"summary"`/`"normal"` skip.
+
+`porthole_status {"exitTrace": <timestamp>}` is the one exception to
+`"summary"` being the default: the trace text is the entire reason to make
+that call, so an explicit `exitTrace` bumps the effective default to
+`"normal"` on its own — an explicit `detail` still overrides it either way.
 
 ## Layout
 
@@ -263,6 +329,18 @@ The plugin puts `runtime` on your debug build types and `runtime-noop` on
 everything else, and generates the `porthole_port` resource so the port is
 configured in exactly one place.
 
+**Naming a build type in `debugBuildTypes` is not the same as marking it
+`isDebuggable = true`.** They are two different AGP concepts that usually
+line up — `debug` is both, by convention — but do not have to: a `staging`
+type used for QA builds can be named here to get the real `runtime` artifact
+on the classpath, while still shipping with `isDebuggable = false`. The
+runtime checks the actual flag for itself at startup
+(`ApplicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE`, not a literal),
+and if it is clear, it refuses to start: no socket, no collectors, one line
+at `Log.w` naming the build type and why. `debugBuildTypes` decides which
+build types are *eligible* to run the porthole; `isDebuggable` decides
+whether one of them actually does (GRA-240).
+
 `port` is **the host port the forward listens on**, not a port the device
 opens. Since GRA-199, the runtime binds no TCP port on the device at all: it
 listens on an Android abstract-namespace Unix socket named
@@ -355,6 +433,12 @@ Two things worth knowing before you run it:
   launches or restarts anything on its own; when the fix needs that (not
   installed, a release build, installed but not running), it names
   `porthole_connect`, a second tool that can act on the app under test.
+  `restart`/`launch` judge success by the app's process actually coming up
+  (`pidof`, polled for a couple of seconds), not by what the launcher
+  printed — a noisy or silent-looking launch is not read as a failure. When
+  it can resolve the launcher activity directly, it launches through `am
+  start -W` rather than `monkey`, and the result's payload carries that
+  call's own `launchState` (`COLD`/`WARM`/`HOT`) and `totalTimeMs` (GRA-233).
 - **If nothing responds once "connected", something is holding the *host*
   port** — the only place a collision can still happen since GRA-199.
   `portholeConnect`'s `adb forward` succeeds whether or not anything else on
@@ -767,6 +851,58 @@ device said so — a query ran on the main thread, a frame missed its deadline.
 not causation; the recomposition hotspot is the only one of those, and it says
 "ordering, not proof" in its own text. There is no `cause` field.
 
+### `--systrace`: the device's view, alongside the app's own
+
+`porthole capture` records what the app itself saw; `capture_system_trace`
+and `ask_system_trace` (see [System traces](#system-traces) below) record
+what the whole device was doing. They used to never meet, which meant a CI
+regression could be described but not explained — was it thermal
+throttling, ART still compiling, or the app itself? `--systrace` closes that
+gap:
+
+```bash
+porthole capture --scenario checkout --systrace -- ./gradlew connectedRoomDebugAndroidTest
+```
+
+* `--systrace-seconds <n>` — the on-device recording's own safety ceiling,
+  1-120s (the same clamp `capture_system_trace` uses). Defaults to the max,
+  because the *real* bound is the command's own lifetime: the recording
+  starts in the background right before the command runs and is stopped the
+  moment it exits, whichever of the two ends first. It never blocks the
+  command waiting on a fixed duration.
+* `--systrace-categories <a,b>` — atrace categories, comma-separated.
+  Defaults to the same set `capture_system_trace` uses.
+
+Two files come out: `<out>` (the trace JSON, as always) and `<out>` with its
+extension swapped for `.pftrace` — `porthole-trace.json` and
+`porthole-trace.pftrace` by default. When `trace_processor_shell` can be
+found (see `capture_system_trace`'s own paragraph below for how it is
+fetched), the system trace is asked the same eight questions
+`ask_system_trace` answers, scoped to the window the capture covered, and
+the answers are merged straight into the same `findings` list `porthole
+report` already prints — each one now carrying `source: "porthole"` or
+`source: "trace"` so a reader (or another tool) can tell which side is
+making the claim. `porthole report` tags a trace-sourced finding `[trace]`
+so it reads differently at a glance from one the runtime itself observed.
+
+**No `trace_processor_shell`, no problem — mostly.** The capture and the
+`.pftrace` still happen. What does not happen is the eight questions: a
+note in the trace JSON's `systrace.notes` says so and names
+`./gradlew portholeTraceProcessor` as the fix, the same binary
+`capture_system_trace`/`ask_system_trace` need. The `.pftrace` itself is
+always readable at ui.perfetto.dev regardless.
+
+**`portholeLabels: 0` is a warning, not a footnote.** If the on-device
+recording came back with none of the runtime's own atrace sections in it —
+the app was not running with the runtime attached, or this device only
+reads the app trace tag at process start (see the restart note under
+`capture_system_trace` below) — that is a `warning`-severity finding in the
+same `findings` array, not just a sentence you have to go looking for.
+
+`compare` was never told to look at `findings` in the first place — it only
+ever diffs `metrics` — so a baseline captured without `--systrace` compares
+cleanly against a run captured with it, and the other way around too.
+
 ### Steps
 
 `Porthole.mark("checkout")` puts a label on the timeline, and findings name the
@@ -1070,33 +1206,61 @@ composable name — and since the MCP server already runs inside the
 project's own checkout (`PORTHOLE_PROJECT_ROOT`, above), it can answer the
 question the agent would otherwise spend a turn on: which file is that. A
 finding whose evidence names something resolvable carries `where: { path,
-line, resolved: true }`, paths relative to the project root; one that
-cannot be resolved with confidence carries `resolved: false` and why —
-`"not found"` (nothing under the root has that name), `"ambiguous"` (more
-than one thing does — a bare `CartViewModel.kt` is not enough in a
-multi-module app with two of them), or `"synthetic"` (the name is not a
-real source location at all — an obfuscated frame, a Compose-internal
-state key). When the evidence names a package too — a stack frame's own
-fully qualified class, or a `state`/recomposition name registered as one —
-`where` narrows by package before deciding: two `Repository.kt` across two
-modules resolve to the right one when the frame says which package it
-blocked in, and stay `"ambiguous"` only when the package matches neither or
-more than one, never picking one of several by guessing. The index behind
-this refreshes on a short TTL rather than watching file mtimes, so an edit
-is visible within a few seconds rather than instantly — cheap, bounded, and
-enough for how this is actually used, a burst of tool calls seconds apart.
-The **rule is resolve, never diagnose**: `where` is a fact about where the
-evidence lives on disk, decided by whether a name (and, when given, a
-package) matches under the project root, never a conclusion about the
-app's behaviour — it never changes a finding's `title`, `severity` or
-`detail`, and Porthole never opens the file to reason about what is in it.
-`blocking`, `recompositions` and `porthole_status`'s `exits` carry the same
-field for the same reason; the timeline UI shows it beside the evidence it
-explains, copy-ready; `porthole report` prints it under a resolved finding.
-Off entirely — no `where` key at all, not merely an unresolved one —
-whenever `PORTHOLE_PROJECT_ROOT` is unset: resolving source locations
-against whatever `cwd` happens to be is a worse outcome than saying
-nothing, since nothing confirms that directory is this project at all.
+line, resolved: true, kind }` — paths relative to the project root, `line`
+required, never optional, because a resolved `where` is meant to be a
+breakpoint address: somewhere an agent can actually open the file and land
+on the right statement, not merely the right file. `kind` says where that
+line came from: `"frame"` when the evidence itself carried it (a stack
+frame's own rendered `File.kt:NN`), `"declaration"` when it did not — a
+composable or `state` name is never a line, only a name, so this is the
+line of the `class`/`fun`/label declaration the lookup actually found in
+source. A stack frame whose own line is unusable (a stripped release build
+can carry a real file name next to no line table at all) does not fall back
+to a declaration's line either — there is no name to look one up for, only
+a file — so it reads unresolved (`"synthetic"`) rather than a `resolved:
+true` missing the one field that makes it useful.
+
+One that cannot be resolved with confidence carries `resolved: false` and
+why — `"not found"` (nothing under the root has that name), `"ambiguous"`
+(more than one thing does — a bare `CartViewModel.kt` is not enough in a
+multi-module app with two of them; the finding also carries `candidates`,
+every distinct path it actually found — a name declared twice in one file,
+a class and a function sharing an identifier, still counts as one candidate
+file, not two — so an agent can say which files rather than just "more than
+one"), `"not in project"` (the evidence named a package,
+and nothing under the root is authored in it at all — a library frame,
+`okhttp3.internal.connection.RealCall`, an androidx class: the class is
+real, but none of its own source ever shipped in this checkout), or
+`"synthetic"` (the name is not a real source location at all — an
+obfuscated frame, a Compose-internal state key). `"not in project"` is
+decided the same tolerant, no-extra-I/O way as everything else here:
+Gradle's standard source layout mirrors a package onto its own directory,
+so a package that owns no such directory anywhere under the root did not
+enter through this project's own source — never a read of any file's
+actual `package` line, and never a reason to skip a real file search first;
+it only ever applies to a lookup that already matched nothing. When the
+evidence names a package too — a stack frame's own fully qualified class,
+or a `state`/recomposition name registered as one — `where` narrows by
+package before deciding: two `Repository.kt` across two modules resolve to
+the right one when the frame says which package it blocked in, and stay
+`"ambiguous"` only when the package matches neither or more than one, never
+picking one of several by guessing. The index behind this refreshes on a
+short TTL rather than watching file mtimes, so an edit is visible within a
+few seconds rather than instantly — cheap, bounded, and enough for how this
+is actually used, a burst of tool calls seconds apart. The **rule is
+resolve, never diagnose**: `where` is a fact about where the evidence lives
+on disk, decided by whether a name (and, when given, a package) matches
+under the project root, never a conclusion about the app's behaviour — it
+never changes a finding's `title`, `severity` or `detail`, and Porthole
+never opens the file to reason about what is in it. `blocking`,
+`recompositions` and `porthole_status`'s `exits` carry the same field for
+the same reason; the timeline UI shows it beside the evidence it explains,
+copy-ready, and lists every candidate under an ambiguous one; `porthole
+report` prints it under a resolved finding. Off entirely — no `where` key
+at all, not merely an unresolved one — whenever `PORTHOLE_PROJECT_ROOT` is
+unset: resolving source locations against whatever `cwd` happens to be is a
+worse outcome than saying nothing, since nothing confirms that directory is
+this project at all.
 
 ## A recomposition hotspot says why it is not skippable
 
@@ -1168,9 +1332,13 @@ against which source state" a human needs to decide whether to re-run the
 task — but never the report's `skippable` verdict, which may no longer be
 true of the source as it stands.
 
-**What joins, and what does not.** A `recompose` event carries the string
-literal given to `PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`,
-never `LeakyRow`. The compiler's report is keyed by the enclosing Kotlin
+**What joins, and what does not.** This join is keyed on a `"wrapped"` node's
+own explicit label — a `recompose` event carries the string literal given to
+`PortholeScreen`/`Modifier.portholeNode` — `"Cart.ItemRow"`, never
+`LeakyRow`. GRA-235's `"observer"` nodes (whole-tree, unwrapped) carry no
+such label to resolve through `where`'s source index, so `composeReport`
+never appears on one today — wrap the call site to get both counts and this
+join together. The compiler's report is keyed by the enclosing Kotlin
 function's own name, having never heard of the label. The join reuses
 [`where`](#what-happened-while-you-were-not-looking)'s own source index to
 resolve the label to `{path, line}`, then reads the nearest `fun` declaration
@@ -1478,6 +1646,18 @@ CPU starvation, blocked I/O, the runtime compiling its own bytecode in the
 background — and answering yes to one of those means the app's own work was
 never the whole story.
 
+`trace` is stat'd before any of that runs. A path that does not exist or
+cannot be read is reported in one plain sentence naming it — not by putting
+all eight questions through `trace_processor_shell` anyway and reporting
+every one of them "unanswered" for the same underlying reason. When a
+similarly named file exists under the same directory (typically
+`.porthole/traces/`, where `capture_system_trace` and
+`system_trace_snapshot` both write) the message names it too — the closest
+basename match, or the newest `.pftrace` file there when nothing matches —
+as a likely fix. `asked`, `skipped`, `unanswered` and `findings` all come
+back empty in this case, not populated with a result from a file that was
+never actually opened (GRA-234).
+
 An `ask` parameter narrows which of the eight actually run, by id — omit it
 and every question runs, same as before this parameter existed. The result
 always says `asked` (what ran) and `skipped` (what `ask` left out) as two
@@ -1539,34 +1719,56 @@ Perfetto trace directly, for the same reason.
 This matters more than usual, because an agent will take these outputs at face
 value.
 
-**Recomposition counts cover instrumented call sites only** — for now. The
-porthole counts the scopes you wrapped in `PortholeScreen` or
-`Modifier.portholeNode`. A composable that does not appear in the report is
-uninstrumented, not idle. The report says so in its own `notes` field.
+**Recomposition counts cover the whole tree, on Compose >= 1.6.**
+`androidx.compose.runtime.tooling.CompositionObserver` hands the porthole
+every invalidated recompose scope *and the state objects that invalidated
+it*, whether or not the app ever wrapped that composable — GRA-70's spike
+attached it with no app code at all, and GRA-235 is that spike shipped. A
+`recompositions` report's `wholeTreeCoverage` field says whether it attached
+this session; each node's `source` says `"wrapped"` (you named it —
+`PortholeScreen` / `Modifier.portholeNode`) or `"observer"` (found, not
+wrapped). A wrapped call site is merged with its own observer entry rather
+than counted twice — see
+[docs/spikes/GRA-70-recomposition-counts.md](docs/spikes/GRA-70-recomposition-counts.md)
+for the mechanism, and `CompositionTreeCollector`'s own doc comment for
+exactly what the merge guarantees and where it is a best effort rather than
+a proof.
 
-This is going to stop being true, and the reason it was true has already
-expired. The sentence above used to continue "Compose exposes no public hook
-for every recomposition in the tree"; there is one.
-`androidx.compose.runtime.tooling.CompositionObserver`, added in Compose 1.6,
-hands over every invalidated recompose scope *and the state objects that
-invalidated it*. The GRA-70 spike attached it to the sample with no app code
-whatsoever — a component declared in the manifest, the way `androidx.startup`
-installs itself — and got counts matching the instrumented ones, for the whole
-tree instead of the wrapped part of it. Counting that way is measurably close
-to free; deriving a readable *name* for a scope costs more and will be opt-in,
-because it makes Compose allocate a recompose scope for every composable and
-so slightly changes the app being measured. Two conditions come with it, and
-they are why this paragraph is a plan and not yet a feature: the API is
-experimental, and it does not exist before Compose 1.6, so apps on 1.5 keep
-the behaviour described above. The workings, the measurements and the proposed
-follow-up are in
-[docs/spikes/GRA-70-recomposition-counts.md](docs/spikes/GRA-70-recomposition-counts.md).
+**Names cost more than counts, and are opt-in.** An observer-only node's
+`name` is a stable placeholder like `<uninstrumented:1a>` unless you turn on:
 
-**Attribution is temporal, not causal.** `Snapshot.registerApplyObserver` tells
-us which state objects were written in each apply, and we pair that with the
-recompositions that follow within ~32ms (two frames). When three states change
-in one frame, all three are listed as possible triggers. It is a strong signal,
-not a proof.
+```kotlin
+porthole {
+    composableNames.set(true)
+}
+```
+
+Resolving a real name needs Compose's own `collectParameterInformation()` —
+what the Layout Inspector uses — which sets `forceRecomposeScopes = true` for
+the whole app: Compose allocates a recompose scope for *every* composable,
+not only the ones that need one, so a build with this on recomposes
+measurably differently than the same build with it off. `composableNames` is
+false by default for exactly that reason, and the report's own `notes` say so
+again whenever it is on — turn it off to measure the app as it ships, on when
+a placeholder id isn't enough to find the composable you're looking for.
+
+**Below Compose 1.6, this all falls back to counting instrumented call sites
+only** — the porthole's entire behaviour before GRA-235. The `recompositions`
+report says `wholeTreeCoverage: false` and its `notes` say why; the runtime
+starts and logs the same thing once, and nothing crashes. A composable that
+does not appear in the report is then uninstrumented, not idle. `setup`
+carries a `compose_tree` entry either way, so whether whole-tree counting
+attached is never something you have to infer from its absence.
+
+**Attribution is causal when whole-tree coverage is on, temporal otherwise.**
+A node's `attribution` field says which: `"observer"` means Compose's own
+invalidation map named the actual state objects that caused it — not a guess.
+`"temporal"` (always the case below Compose 1.6, or for the rare pass this
+mechanism can't resolve precisely) falls back to `Snapshot.registerApplyObserver`
+pairing a recomposition with whatever state was written within ~32ms (two
+frames) before it. When three states change in one frame, a temporal
+correlation lists all three as possible triggers — a strong signal, not a
+proof. A causal one names the one that actually did it.
 
 **Names come from an owner.** A state object has no name of its own, so every
 name in a report came from something that owns it. View models are found for
@@ -1886,6 +2088,117 @@ cost is always counted in refreshes. Dividing by a relaxed deadline reported a
 Needs API 24. Below that the only techniques available force a vsync, so the
 collector reports nothing rather than lying.
 
+## Accessibility
+
+Porthole already captures the merged Compose semantics tree — what TalkBack
+reads: bounds, roles, text, state descriptions, actions and stable ids
+(`semantics_tree`, above) — and until GRA-72 used it only to line a node up
+with its own recomposition count. The same tree answers a short list of
+categorical, checkable questions nobody in that loop otherwise answers.
+`accessibility` runs the pass on a fresh capture:
+
+- **`warning`** — an interactive node (clickable, or carrying a role like
+  `Button`/`Checkbox`) with no `text` and no `contentDescription` at all: a
+  screen reader has nothing to announce for it. A **decorative** icon with
+  no description is correct, not a defect, and is never flagged here — only
+  a node that is actually interactive, or a non-decorative image (below),
+  ever reaches this rule.
+- **`warning`/`note`** — a touch target measurably under the 48dp minimum,
+  converted from the captured pixel bounds using the device's own density
+  (`DisplayMetrics.density`, carried on the `profile` device event this
+  reads through `ProfileData.density`). Compose's own
+  `minimumInteractiveComponentSize` modifier — wired into `IconButton`,
+  `Checkbox`, `RadioButton`, `Switch` and friends by default — pads a
+  visually smaller target back up to 48dp at touch time, invisibly to the
+  semantics tree (`bounds` here is always the *visual* size, never the
+  padded touch target, and nothing in the captured tree says whether a
+  parent disabled the minimum). So a target between 24dp and 48dp is a
+  `note` — that automatic padding may already have fixed it — and only a
+  target under 24dp, too small for that padding to plausibly explain away,
+  is a `warning`. Every finding says exactly this, not only the number.
+- **`note`** — a node whose role implies it is actionable (`Button`,
+  `Checkbox`, `Switch`, `RadioButton`, `Tab`, `DropdownList`) but carries no
+  click action, or the reverse: a click action with no semantic role a
+  screen reader would announce as actionable.
+- **`note`** — a `Role.Image` node with no `contentDescription`. A node
+  Compose itself marked `invisibleToUser` never reaches any rule at all —
+  see "invisibleToUser" below — so this branch no longer needs its own
+  decorative-image check the way an earlier build did.
+- **`note`** — a description repeated across two or more (visible) siblings:
+  a screen reader announces the same thing for each, with nothing to tell
+  them apart.
+- **`note`, `confidence: "correlated"`** — text whose box sits within 4dp of
+  its parent's on every edge, only when the system font scale is over 1.3×.
+  Conservative on purpose: this is where overflow at a larger scale is
+  plausible, never a confirmed clip.
+
+**`invisibleToUser` hides a node and its whole subtree, not just one rule.**
+Compose's own `invisibleToUser` marker — the same one TalkBack itself reads
+to skip a node entirely — used to be honoured only by the image rule: a
+node that was both `clickable` and `invisibleToUser`, well under the
+touch-target minimum, still earned a missing-label warning *and* a
+touch-target warning, even though no assistive technology ever reaches it.
+Every rule now skips a hidden node and everything beneath it outright — none
+of it is walked for `nodesChecked` either — and `coverage` counts them
+separately: `"N node(s) hidden from assistive technology, not checked."`
+
+**Attribution: a finding whose node the app cannot be said to own is not
+reported.** An EM ruling on this ticket, not a guess: "a finding whose node
+is not attributable to the app's own composables is not a finding. `stableId`
+is ours, and the instrumented-node coverage number says how much of the
+screen we can speak for. Use both." A raw Compose semantics tree includes
+framework and library UI Porthole had no hand in — a bare
+`Modifier.clickable {}` with no explicit role is the ordinary spelling for a
+plain clickable `Card`/`Row`, and without this rule every one of those (a
+whole list of them, say) reads as its own click-mismatch note. A node
+counts as attributable, and so does everything beneath it, when it or an
+ancestor carries a `testTag` (a Porthole `portholeNode`/`PortholeScreen` id
+becomes the wire `testTag` the same way a plain `Modifier.testTag(...)`
+does, and both count — this is "an app author named this," not about which
+API did the naming), or its own `text`/`contentDescription` resolves
+through the project's own source the same way `where` does elsewhere. A
+finding that fails all three is not listed — it is counted instead,
+honestly: `"M possible defect(s) on nodes outside instrumented composables,
+not reported."`
+
+Every finding that *is* reported names the node's `stableId`, its path in
+the tree and any `testTag`. **There is no screenshot annotation** —
+visually marking the defect on a captured frame was cut from this build —
+so pairing a finding to what is actually on screen is by `stableId` through
+`semantics_tree`'s own output only, one more call away, never a picture.
+
+**Coverage is stated honestly, always**, and — since QA F7 — it is not
+buried behind an extra call to see: at `detail: "summary"` (the default,
+GRA-68), the summary line itself carries every coverage sentence, the tally
+by severity, and the worst few findings (`<severity> <id> <stableId>
+<path/testTag> — <title>`, capped at five with a "+N more" note), not only
+a bare "N finding(s) over M node(s) checked." Coverage itself says: only the
+Compose semantics tree is checked — a node drawn by a plain Android `View`
+is invisible to this pass the same way it is invisible to TalkBack reading
+the merged tree; how many nodes were hidden (`invisibleToUser`) and never
+checked; how many possible defects went unreported for being unattributable;
+and the instrumented-node fraction `semantics_tree`'s own summary already
+computes, reused rather than a second count of the same thing. A clean,
+fully-attributed, fully-visible screen says so explicitly, `"nothing found,
+N node(s) checked"`, never a bare empty list indistinguishable from "did not
+look."
+
+`findings` folds these findings in too, but **only when a semantics capture
+already landed inside the window being asked about** — from `semantics_tree`
+or `accessibility`, either counts. `findings` never triggers a fresh
+capture of its own: that would add a live round trip to a tool every caller
+runs constantly, most of whom never asked about accessibility. Call
+`accessibility` (or `semantics_tree`) yourself first, then `findings` over
+a window covering that moment, and the accessibility findings ride along
+for free; ask `findings` about a window with no capture in it and they are
+silently absent, at no extra cost.
+
+Out of scope, on purpose: colour contrast (nothing captured here carries a
+rendered colour), a View hierarchy's own accessibility tree, and any claim
+of WCAG or platform compliance — this proves what the captured tree proves,
+never a certification. The TalkBack check on a real device remains the
+hardware pass this cannot replace.
+
 ## Main thread blocking
 
 `frames` says a frame was late. `blocking` says what was holding the thread.
@@ -1929,6 +2242,10 @@ look.
 
 The timeline puts the main thread lane next to dropped frames, because a block
 and the frames it cost are the same event seen twice.
+
+A stall that lines up with a [LeakCanary](#leakcanary) heap dump is reported
+as that, at `note`, rather than as a `main-thread-stall` finding pointed at
+the app.
 
 ## StrictMode
 
@@ -1994,6 +2311,95 @@ violation and never a number that stopped moving early.
 Needs API 28 (`penaltyListener`, which hands the violation over as an object
 instead of a log line). Below that, `strictMode.set(true)` installs nothing
 at all — no log-scraping fallback — and the `setup` tool says why.
+
+## LeakCanary
+
+LeakCanary already finds the leak and already writes the trace. What it does
+not do is put either one where an agent already looks — its own notification
+and on-device UI, not the timeline. If your app already ships it:
+
+```kotlin
+debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
+```
+
+No app code beyond the dependency. LeakCanary installs its own
+`ContentProvider` and starts watching automatically, the same
+zero-configuration shape `ComponentActivity`'s own `fullyDrawnReporter` gets
+for [startup](#startup); Porthole hooks the one seam it offers for "a heap
+was analyzed" — `LeakCanary.config.onHeapAnalyzedListener` — chaining onto
+whatever listener was already there, the same way every other integration
+here chains rather than replaces. On its own background thread: the first
+touch of `LeakCanary.config` runs LeakCanary's own static init, expensive
+enough on a cold launch to be a `main-thread-stall` finding in its own right
+if this ran where it originally did, synchronously during process start.
+
+Each leak LeakCanary classifies becomes its own event: the leaking object's
+class, the retained heap size, how many separate occurrences this one heap
+dump found, and LeakCanary's own rendered trace text. `findings` promotes an
+application leak — an app-code reference holding a dead Activity, Fragment or
+View — to `warning`, with the retained size and the head of the reference
+path; a library leak LeakCanary already recognizes and classifies as a known,
+framework-side defect stays a `note`.
+
+**Absent means silence, not a recommendation.** `setup` never suggests adding
+LeakCanary — it is a debug-only, opt-in dependency, and this project's `setup`
+tool otherwise only ever names a gap in something you already shipped. If it
+is present but its own API does not match what Porthole compiled against
+(floor: leakcanary-android 2.14), `setup` says exactly that — present but
+signature mismatch — rather than the generic "not hooked" every other
+integration falls back to.
+
+**A heap dump is not a stall, and `blocking` says so.** LeakCanary pauses the
+whole VM for the dump itself, sometimes for seconds — long enough that the
+main-thread watchdog cannot tell that pause apart from a real hang once the
+process resumes. Reconstructed from LeakCanary's own `createdAtTimeMillis`
+and `dumpDurationMillis`, that window is matched against any stall reported
+inside it: a stall LeakCanary's own dump caused is reported as exactly
+that — "heap dump by LeakCanary", `note`, not the app's defect — instead of
+becoming a `main-thread-stall` finding pointed at the wrong culprit.
+
+## Thermal, activity lifecycle and permissions
+
+Three more device-context signals, each a callback rather than a poll —
+nothing here is on a timer.
+
+**Thermal.** `PowerManager.addThermalStatusListener` (API 29+) reports every
+transition the platform itself declares — `none` through `shutdown` — the
+instant it happens, with `getThermalHeadroom` (API 30+, a 10-second forecast)
+riding along when the platform supports it. This is the app's own,
+timeline-correlated half of thermal state; [`system_context`](#system-traces)
+is the other half — a live, on-demand snapshot pulled from the device's own
+thermal sensors over `adb shell`, useful for "what is the device doing right
+now" in a way a stream of past transitions is not. `findings` correlates the
+two only loosely: a SEVERE-or-worse span sustained past ten seconds, with
+dropped frames inside that same window, becomes a `thermal-throttling`
+finding — `warning`, and deliberately `correlated`, never `observed`. Two
+things sharing a window is ordering, not proof one caused the other, and this
+finding's own wording says so: it reports what coincided, not what caused
+what.
+
+**Activity lifecycle.** Every Activity's `onCreate`/`onDestroy` is reported
+with `isChangingConfigurations` and whether a saved instance state came back.
+Confirmed on a real device: `isChangingConfigurations` is only ever true on
+the *destroy* event — the framework sets it on the outgoing instance during a
+configuration-driven recreate (a rotation, say) and never on the incoming
+one's own `onCreate`, whatever caused it to run. So the tell for "rotation vs
+process restore" is not that flag on `create` at all — it is whether a
+`destroy` event for the same Activity, `isChangingConfigurations` true,
+immediately precedes it in the same session. A rotation always has one; a
+process-death restore (`onCreate` alone, with a saved state) never does,
+because the old process — and its own `onDestroy` call — is already gone.
+Wired into the same `Application.ActivityLifecycleCallbacks`
+[`StartupCollector`](#startup) and this collector's own foreground/background
+tracking already register — exactly one registration for the whole app, not a
+second, competing observer that would double-count the same callbacks.
+
+**Permissions.** The current grant set — one `checkSelfPermission` pass over
+exactly the permissions the manifest declared, read from `PackageManager`
+rather than a fixed list — reported once at install and again on every
+foreground transition. A permission revoked while the app was backgrounded
+(Settings, or `adb shell pm revoke`) is invisible to the process until the OS
+hands control back to it, which is exactly when the next check runs.
 
 ## Startup
 
@@ -2152,7 +2558,11 @@ reachability still requires `adb forward`. Either way, reaching the socket
 from off-device requires `adb forward`, which requires USB debugging
 authorisation. On top of that, the whole runtime is debug-only: release
 builds link the no-op artifact, which contains no socket, no collectors and
-no reflection.
+no reflection. That covers a *build type* nobody named in `debugBuildTypes`;
+for one that is named there but not actually `isDebuggable` (see
+[Setup](#setup)), the runtime itself checks `ApplicationInfo.FLAG_DEBUGGABLE`
+before doing anything else and refuses to start rather than assuming the
+name implies the flag (GRA-240).
 
 Log capture is the one collector that will happily forward whatever the app
 prints, including anything a developer logged that they should not have. It is
@@ -2446,9 +2856,9 @@ consumer is most likely to be looking for. It carries Dokka's HTML now.
 ## Building
 
 ```bash
-./gradlew test                           # runtime, no-op and the Gradle plugin
+./gradlew test                           # runtime, no-op, sample and the Gradle plugin
 ./gradlew check                          # the same, plus Android lint
-./gradlew build                          # check, and the artifacts — Android modules only
+./gradlew build                          # check, and the Android modules' own artifacts
 ./gradlew :runtime:testDebugUnitTest     # runtime
 ./gradlew :runtime-noop:testDebugUnitTest  # api parity with the runtime
 ./gradlew -p gradle-plugin test          # plugin alone, ProjectBuilder and TestKit
@@ -2458,13 +2868,20 @@ cd mcp/ui && npm test                    # timeline logic
 
 The plugin is a separate Gradle build, pulled in by `includeBuild` from the
 `pluginManagement` block in `settings.gradle.kts`. An included build's lifecycle
-tasks are not reachable from the including build's, so the root `test` and
-`check` name the plugin's explicitly; without that they walk the three Android
-modules and stop, which is what they used to do. `build` is the exception — it
-still covers the Android modules only, so `check` is the command that verifies
-everything the JVM side can. Two of the plugin's tests, the AGP pair, skip unless
-you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and need the network,
-which is why they are opt-in.
+tasks are not reachable from the including build's by name alone, so the root
+`test` and `check` name the plugin's, and the three Android subprojects' own
+`test`/`check`, explicitly — `:test` and `:check` (qualified) now depend on the
+identical task set their unqualified forms reach by Gradle's own cross-project
+name-matching, so either spelling means the same thing. `build` depends on the
+plugin's `check`, not its `build`: the latter is `java-gradle-plugin`'s/
+`com.gradle.plugin-publish`'s own assemble-and-publish-bundle path, which
+`releaseDryRun` exercises deliberately elsewhere — an ordinary local
+`./gradlew build` only needs to know the plugin still passes its own tests, not
+to assemble artifacts nobody asked for. Two of the plugin's tests, the AGP
+pair, skip unless you pass `-Pporthole.agpVersion`; they publish to `~/.m2` and
+need the network, which is why they are opt-in. Aside from that pair,
+`./gradlew -p gradle-plugin test` is expected to pass with zero failures on
+Linux, macOS and Windows alike.
 
 The runtime tests run the request-body tee against a real client and a real
 socket via MockWebServer. The property they exist to hold down is the boring
@@ -2773,16 +3190,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**2159 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**2436 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
-[Testing](#testing)): 686 on the JVM (`./gradlew test`, which covers both
-build types of `runtime` and `runtime-noop` plus the Gradle plugin — 678
-passed, 0 failed, 8 skipped), 1160 in the MCP server (`cd mcp && npm test` —
-1154 passed, 0 failed, 6 skipped), and 313 in the timeline UI (`cd mcp && npm
-run test:ui`, a separate suite from the server's — 313 passed, 0 failed, 0
+[Testing](#testing)): 771 on the JVM (`./gradlew test`, which covers both
+build types of `runtime` and `runtime-noop` plus the Gradle plugin — 763
+passed, 0 failed, 8 skipped), 1353 in the MCP server (`cd mcp && npm test` —
+1347 passed, 0 failed, 6 skipped), and 312 in the timeline UI (`cd mcp && npm
+run test:ui`, a separate suite from the server's — 312 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 2159 disagrees with the sum of the three suites' totals stated
+XML, and when 2436 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison

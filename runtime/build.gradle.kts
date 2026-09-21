@@ -45,6 +45,11 @@ dependencies {
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.util)
+    // GRA-235: resolves composable names for whole-tree recomposition
+    // counting when `composableNames` is on. See CompositionTreeCollector's
+    // own doc comment and the libs.versions.toml entry for why this is
+    // implementation, not compileOnly.
+    implementation(libs.compose.ui.tooling.data)
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
@@ -60,6 +65,7 @@ dependencies {
     compileOnly(libs.work.runtime)
     compileOnly(libs.ktor.client.core)
     compileOnly(libs.androidx.activity)
+    compileOnly(libs.leakcanary.android)
 
     // The tee has to be exercised against a real client and a real socket:
     // whether it forwards bytes untouched is not something reading it proves.
@@ -86,6 +92,12 @@ dependencies {
     // production, so without this StartupTest could never see
     // classPresent("androidx.activity.ComponentActivity") come back true.
     testImplementation(libs.androidx.activity)
+
+    // Same reasoning again, for GRA-64: leakcanary-android is compileOnly in
+    // production, so without this LeakCanaryTest could never see
+    // classPresent("leakcanary.LeakCanary") come back true, and
+    // LeakCanary.config itself would not resolve.
+    testImplementation(libs.leakcanary.android)
 }
 
 // The published API is about twenty declarations, and most of them are

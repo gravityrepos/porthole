@@ -1,7 +1,15 @@
 // Copyright 2026 Gravity Labs
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from "vitest";
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  copyFileSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +25,7 @@ import { resolveProjectRoot, resolveSdkDir } from "./adb.js";
 import { joinSummaryAndPayload } from "./index.js";
 import { resetSourceIndexForTests } from "./sources.js";
 import { currentSourceFingerprint, resetComposeReportCacheForTests } from "./composeReport.js";
+import { resetAccessibilityCaptureForTests } from "./accessibility.js";
 
 /**
  * Behavioural tests for the MCP surface.
@@ -39,7 +48,7 @@ import { currentSourceFingerprint, resetComposeReportCacheForTests } from "./com
 describe("the harness", () => {
   it("calls a tool and reads content/isError in four lines", async () => {
     const rig = await buildRig();
-    const result = await rig.client.callTool("porthole_status", {});
+    const result = await rig.client.callTool("porthole_status", { detail: "normal" });
     expect(result.isError).toBeFalsy();
     await rig.close();
   });
@@ -53,7 +62,7 @@ describe("the harness", () => {
     // which makes `connected: false` wrong and this assertion fail.
     const rig = await buildRig({ connectDevice: false });
     try {
-      const result = await rig.client.callTool("findings", {});
+      const result = await rig.client.callTool("findings", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false, findings: [] });
       expect(result.text).toContain("Not connected to the app on");
@@ -63,7 +72,7 @@ describe("the harness", () => {
       // "handshake race" describe block below: summary and payload
       // asserted together, against the real registered tool, so the arm
       // cannot be changed in one without the other going red too.
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       expect(status.json).toMatchObject({ state: "disconnected" });
       expect(status.text).toContain("Not connected to the app on");
@@ -82,7 +91,7 @@ describe("the harness", () => {
       expect(rig.device.state).toBe("connected");
       expect(rig.timeline.buffer()).toHaveLength(0);
 
-      const result = await rig.client.callTool("findings", {});
+      const result = await rig.client.callTool("findings", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: true, findings: [] });
       expect(result.text).not.toContain("Not connected to the app on");
@@ -106,7 +115,7 @@ describe("porthole_status names its SDK and project root sources", () => {
     try {
       const rig = await buildRig();
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.isError).toBeFalsy();
         expect(result.json).toMatchObject({
           sdkDir: "C:\\fake\\porthole\\sdk",
@@ -132,7 +141,7 @@ describe("porthole_status names its SDK and project root sources", () => {
       const expected = resolveSdkDir();
       const rig = await buildRig();
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.isError).toBeFalsy();
         expect(result.json).toMatchObject({
           sdkDir: expected.directory,
@@ -165,7 +174,7 @@ describe("porthole_status names its SDK and project root sources", () => {
     try {
       const rig = await buildRig();
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.isError).toBeFalsy();
         expect(result.json).toMatchObject({
           projectRoot: "C:\\fake\\porthole\\project",
@@ -191,7 +200,7 @@ describe("porthole_status names its SDK and project root sources", () => {
       const expected = resolveProjectRoot();
       const rig = await buildRig();
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.isError).toBeFalsy();
         expect(result.json).toMatchObject({
           projectRoot: expected.directory,
@@ -269,7 +278,7 @@ describe("every tool that declares a window examines the same span", () => {
       expect(names.length).toBeGreaterThan(0);
 
       for (const name of names) {
-        const result = await rig.client.callTool(name, { from, to });
+        const result = await rig.client.callTool(name, { detail: "normal", from, to });
         expect(result.isError, `${name} errored: ${result.text}`).toBeFalsy();
 
         const payload = result.json as Record<string, unknown>;
@@ -281,8 +290,7 @@ describe("every tool that declares a window examines the same span", () => {
         // forwarded `from`/`to` unmodified rather than resolving its own
         // and discarding them.
         const window = (payload.window ?? payload.askedWindow) as
-          | { from?: number; to?: number }
-          | undefined;
+          { from?: number; to?: number } | undefined;
         expect(window, `${name} did not report the window it examined`).toBeTruthy();
         expect(window?.from, `${name} used a different 'from'`).toBe(from);
         expect(window?.to, `${name} used a different 'to'`).toBe(to);
@@ -305,11 +313,19 @@ describe("every tool that declares a window examines the same span", () => {
         { event: "recompose", t: 9_000, data: {} },
       ]);
 
-      const findings = await rig.client.callTool("findings", { from: 2_000, to: 7_000 });
+      const findings = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 2_000,
+        to: 7_000,
+      });
       const quoted = (findings.json as { window: { from: number; to: number; ms: number } }).window;
       expect(quoted).toEqual({ from: 2_000, to: 7_000, ms: 5_000 });
 
-      const timeline = await rig.client.callTool("timeline", { from: quoted.from, to: quoted.to });
+      const timeline = await rig.client.callTool("timeline", {
+        detail: "normal",
+        from: quoted.from,
+        to: quoted.to,
+      });
       const examined = (timeline.json as { window: { from: number; to: number; ms: number } })
         .window;
       expect(examined).toEqual(quoted);
@@ -340,7 +356,11 @@ describe("every tool that declares a window examines the same span", () => {
           { event: "recompose", t: 8_000, data: {} },
         ]);
 
-        const findings = await rig.client.callTool("findings", { sinceMs: 5_000, to: 8_000 });
+        const findings = await rig.client.callTool("findings", {
+          detail: "normal",
+          sinceMs: 5_000,
+          to: 8_000,
+        });
         const quoted = (findings.json as { window: { from: number; to: number; ms: number } })
           .window;
         // This host has no device clock, so `sinceMs` anchors to `to`
@@ -355,6 +375,7 @@ describe("every tool that declares a window examines the same span", () => {
         // proven here by `timeline`'s own reported `window` — the exact
         // field an agent reads to know what span its answer covers.
         const timeline = await rig.client.callTool("timeline", {
+          detail: "normal",
           from: quoted.from,
           to: quoted.to,
         });
@@ -368,7 +389,11 @@ describe("every tool that declares a window examines the same span", () => {
         // actually received on the wire (see `defaultHandlers` in
         // `testing/harness.ts`), so this is the real end-to-end proof that
         // the device was asked about the same span `findings` reported.
-        const frames = await rig.client.callTool("frames", { from: quoted.from, to: quoted.to });
+        const frames = await rig.client.callTool("frames", {
+          detail: "normal",
+          from: quoted.from,
+          to: quoted.to,
+        });
         const framesAsked = (frames.json as { askedWindow: { from?: number; to?: number } })
           .askedWindow;
         expect(framesAsked.from, "frames asked the device for a different 'from'").toBe(
@@ -395,7 +420,11 @@ describe("every tool that declares a window examines the same span", () => {
         { event: "recompose", t: 4_000, data: {} },
         { event: "recompose", t: 8_000, data: {} },
       ]);
-      const frames = await rig.client.callTool("frames", { sinceMs: 300, to: 4_000 });
+      const frames = await rig.client.callTool("frames", {
+        detail: "normal",
+        sinceMs: 300,
+        to: 4_000,
+      });
       const asked = (frames.json as { askedWindow: { from?: number; to?: number } }).askedWindow;
       expect(asked.from).toBe(3_700);
       expect(asked.to).toBe(4_000);
@@ -412,9 +441,14 @@ describe("every tool that declares a window examines the same span", () => {
     // receives must be absolute here.
     const rig = await buildRig();
     try {
-      const frames = await rig.client.callTool("frames", { sinceMs: 5_000, to: 1_000_000 });
-      const asked = (frames.json as { askedWindow: { from?: number; to?: number; sinceMs?: number } })
-        .askedWindow;
+      const frames = await rig.client.callTool("frames", {
+        detail: "normal",
+        sinceMs: 5_000,
+        to: 1_000_000,
+      });
+      const asked = (
+        frames.json as { askedWindow: { from?: number; to?: number; sinceMs?: number } }
+      ).askedWindow;
       expect(asked.sinceMs).toBeUndefined();
       expect(asked.from).toBe(995_000);
       expect(asked.to).toBe(1_000_000);
@@ -446,12 +480,12 @@ describe("every tool that declares a window examines the same span", () => {
       ];
 
       for (const args of shapes) {
-        const timeline = await rig.client.callTool("timeline", args);
+        const timeline = await rig.client.callTool("timeline", { ...args, detail: "normal" });
         const timelineWindow = (
           timeline.json as { window: { from: number; to: number; ms: number } }
         ).window;
 
-        const frames = await rig.client.callTool("frames", args);
+        const frames = await rig.client.callTool("frames", { ...args, detail: "normal" });
         const framesAsked = (frames.json as { askedWindow: { from?: number; to?: number } })
           .askedWindow;
 
@@ -475,7 +509,7 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
   it("rejects sinceMs of 0 at the schema, before resolveWindow ever sees it", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("findings", { sinceMs: 0 });
+      const result = await rig.client.callTool("findings", { detail: "normal", sinceMs: 0 });
       expect(result.isError).toBe(true);
     } finally {
       await rig.close();
@@ -485,7 +519,7 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
   it("rejects a negative sinceMs at the schema", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("findings", { sinceMs: -1 });
+      const result = await rig.client.callTool("findings", { detail: "normal", sinceMs: -1 });
       expect(result.isError).toBe(true);
     } finally {
       await rig.close();
@@ -499,7 +533,11 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
         { event: "recompose", t: 1_000, data: {} },
         { event: "recompose", t: 9_000, data: {} },
       ]);
-      const result = await rig.client.callTool("findings", { from: -500, to: 9_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: -500,
+        to: 9_000,
+      });
       expect(result.isError).toBeFalsy();
       const window = (result.json as { window: { from: number; to: number; ms: number } }).window;
       // Not -500: a timestamp on the device's uptime clock cannot be
@@ -518,7 +556,11 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
       // No pushEvents at all — the live buffer is empty, so this exercises
       // resolveWindow's other branch: the one that widens an explicit
       // {from, to} to work from disk alone (GRA-53).
-      const result = await rig.client.callTool("findings", { from: -500, to: 1_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: -500,
+        to: 1_000,
+      });
       expect(result.isError).toBeFalsy();
       const window = (result.json as { window: { from: number; to: number; ms: number } | null })
         .window;
@@ -532,7 +574,11 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([{ event: "recompose", t: 5_000, data: {} }]);
-      const result = await rig.client.callTool("findings", { from: 9_000, to: 2_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 9_000,
+        to: 2_000,
+      });
       expect(result.isError).toBeFalsy();
       const window = (result.json as { window: unknown }).window;
       // Refused the way the tool already refuses "no window at all" — not a
@@ -547,7 +593,11 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
   it("refuses an explicit from after to with an empty live buffer too", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("findings", { from: 9_000, to: 2_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 9_000,
+        to: 2_000,
+      });
       expect(result.isError).toBeFalsy();
       const window = (result.json as { window: unknown }).window;
       expect(window).toBeNull();
@@ -566,7 +616,7 @@ describe("resolveWindow's edge cases (GRA-120)", () => {
       // No `from`: it defaults to the oldest buffered event (5_000), which is
       // after this `to` — an inverted window with nothing explicit to blame,
       // refused the same way as the fully-explicit case above.
-      const result = await rig.client.callTool("findings", { to: 1_000 });
+      const result = await rig.client.callTool("findings", { detail: "normal", to: 1_000 });
       expect(result.isError).toBeFalsy();
       const window = (result.json as { window: unknown }).window;
       expect(window).toBeNull();
@@ -602,7 +652,10 @@ describe("windowShape's descriptions cannot drift on one tool (GRA-120 AC5)", ()
       const byName = new Map(tools.map((t) => [t.name, t]));
       const reference = byName.get("findings");
       expect(reference, "findings is not registered").toBeTruthy();
-      const refProps = reference!.inputSchema.properties as Record<string, { description?: string }>;
+      const refProps = reference!.inputSchema.properties as Record<
+        string,
+        { description?: string }
+      >;
       for (const field of ["sinceMs", "from", "to"] as const) {
         expect(refProps[field]?.description, `findings.${field} has no description`).toBeTruthy();
       }
@@ -657,7 +710,11 @@ describe("findings", () => {
       // Zero-width, sitting strictly between the two buffered events — so
       // inside the buffer's own span, unlike the "outside the buffer" case
       // below. This is a window that was actually examined and found quiet.
-      const result = await rig.client.callTool("findings", { from: 1_500, to: 1_500 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 1_500,
+        to: 1_500,
+      });
       expect(result.isError).toBeFalsy();
 
       const payload = result.json as {
@@ -687,7 +744,11 @@ describe("findings", () => {
       ]);
 
       // A window nowhere near what is buffered.
-      const result = await rig.client.callTool("findings", { from: 50_000, to: 60_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 50_000,
+        to: 60_000,
+      });
       expect(result.isError).toBeFalsy();
 
       const payload = result.json as {
@@ -717,7 +778,11 @@ describe("findings", () => {
 
       // The first half of this window (0-5000) is older than anything
       // buffered; the second half is fully covered.
-      const result = await rig.client.callTool("findings", { from: 0, to: 6_000 });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 6_000,
+      });
       expect(result.isError).toBeFalsy();
 
       const payload = result.json as { clippedMs: { start: number; end: number } };
@@ -744,7 +809,7 @@ describe("findings", () => {
           data: { id: "q-1", sql: "SELECT 1", onMainThread: "true" },
         },
       ]);
-      const result = await rig.client.callTool("findings", {});
+      const result = await rig.client.callTool("findings", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const payload = result.json as { findings: Array<{ id: string; confidence: string }> };
       expect(payload.findings.some((f) => f.id === "db-on-main-thread")).toBe(true);
@@ -766,9 +831,20 @@ describe("findings", () => {
           { event: "recompose", t: 1_000, data: {} },
           { event: "recompose", t: 2_000, data: {} },
         ]);
-        const result = await rig.client.callTool("findings", { from: 1_500, to: 1_500 });
+        const result = await rig.client.callTool("findings", {
+          detail: "normal",
+          from: 1_500,
+          to: 1_500,
+        });
         expect(result.isError).toBeFalsy();
-        expect(result.text).toBe(
+        // GRA-68: no longer an exact `toBe` on the whole string — `detail`
+        // now appends a quotable `window` and a size note to every summary
+        // (see render.ts's own doc comment), which this test predates and
+        // is not what "byte-identical" was ever about here. What this test
+        // actually pins — `alsoInWindow` staying absent, not `{}` or
+        // all-undefined, when there is nothing to report — is the assertion
+        // two lines down; this one keeps the core sentence unchanged.
+        expect(result.text).toContain(
           "Nothing crossed a threshold in the 0s examined (0 events). That is not the same as the app being fast.",
         );
         expect(result.text).not.toContain("Also in this window");
@@ -789,7 +865,11 @@ describe("findings", () => {
             data: { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000 },
           },
         ]);
-        const result = await rig.client.callTool("findings", { from: 0, to: 2_000 });
+        const result = await rig.client.callTool("findings", {
+          detail: "normal",
+          from: 0,
+          to: 2_000,
+        });
         expect(result.isError).toBeFalsy();
 
         const payload = result.json as {
@@ -800,7 +880,11 @@ describe("findings", () => {
         expect(payload.findings).toEqual([]);
         // The inventory: the exit is still visible.
         expect(payload.alsoInWindow?.exits).toEqual([
-          { reason: "REASON_SIGNALED", timestamp: 1_700_000_000_000, at: "2023-11-14T22:13:20.000Z" },
+          {
+            reason: "REASON_SIGNALED",
+            timestamp: 1_700_000_000_000,
+            at: "2023-11-14T22:13:20.000Z",
+          },
         ]);
         expect(result.text).toContain("porthole_status");
         expect(result.text).toContain("REASON_SIGNALED");
@@ -818,7 +902,11 @@ describe("findings", () => {
           { event: "device", t: 1_001, data: { kind: "network", transport: "wifi" } },
           { event: "memory", t: 1_002, data: { heapUsedMb: "40" } },
         ]);
-        const result = await rig.client.callTool("findings", { from: 0, to: 2_000 });
+        const result = await rig.client.callTool("findings", {
+          detail: "normal",
+          from: 0,
+          to: 2_000,
+        });
         expect(result.isError).toBeFalsy();
 
         const payload = result.json as { alsoInWindow?: { device?: number; memory?: number } };
@@ -869,9 +957,12 @@ describe("porthole_status, findings and what_was_happening agree during the hand
       expect(rig.device.state).toBe("handshaking");
       expect(rig.device.hello).toBeNull();
 
-      const status = await rig.client.callTool("porthole_status", {});
-      const findings = await rig.client.callTool("findings", {});
-      const whatWasHappening = await rig.client.callTool("what_was_happening", { at: 1000 });
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
+      const whatWasHappening = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        at: 1000,
+      });
 
       for (const result of [status, findings, whatWasHappening]) {
         expect(result.isError).toBeFalsy();
@@ -889,7 +980,7 @@ describe("porthole_status, findings and what_was_happening agree during the hand
     // "connected" right below it — one call, two answers.
     const rig = await buildRaceRig();
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const payload = status.json as { state: string; app: unknown };
       expect(payload.state).toBe("handshaking");
       expect(payload.app).toBeNull();
@@ -902,7 +993,7 @@ describe("porthole_status, findings and what_was_happening agree during the hand
   it("findings' summary and connected field agree with each other in the handshake window (kills M5 and M5c)", async () => {
     const rig = await buildRaceRig();
     try {
-      const findings = await rig.client.callTool("findings", {});
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       // M5: `const connected = device.hello !== null` reads the wrong field.
       // hello is null here, so that mutant reports connected: false even
       // though device.state === "handshaking" (loosely "attached") — this
@@ -937,8 +1028,11 @@ describe("porthole_status, findings and what_was_happening agree during the hand
     // constant, is what makes them unable to drift apart again.
     const rig = await buildRaceRig();
     try {
-      const result = await rig.client.callTool("what_was_happening", { at: 1000 });
-      const findings = await rig.client.callTool("findings", {});
+      const result = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        at: 1000,
+      });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const resultConnected = (result.json as { connected: boolean }).connected;
       const findingsConnected = (findings.json as { connected: boolean }).connected;
@@ -958,7 +1052,10 @@ describe("porthole_status, findings and what_was_happening agree during the hand
     // state never leaves "disconnected".
     const rig = await buildRig({ connectDevice: false });
     try {
-      const result = await rig.client.callTool("what_was_happening", { at: 1000 });
+      const result = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        at: 1000,
+      });
       expect(result.isError).toBeFalsy();
       expect(result.json).toMatchObject({ connected: false });
       expect(result.text).toContain("Not connected to the app on");
@@ -981,21 +1078,30 @@ describe("porthole_status, findings and what_was_happening agree during the hand
     try {
       await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
 
-      const neitherArg = await rig.client.callTool("what_was_happening", {});
+      const neitherArg = await rig.client.callTool("what_was_happening", { detail: "normal" });
       expect(neitherArg.isError).toBeFalsy();
       expect(neitherArg.json).toHaveProperty("connected", true);
 
       // No "clocks" event was ever pushed, so a bootMs lookup cannot convert.
-      const noClockSample = await rig.client.callTool("what_was_happening", { bootMs: 5_000 });
+      const noClockSample = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        bootMs: 5_000,
+      });
       expect(noClockSample.isError).toBeFalsy();
       expect(noClockSample.json).toHaveProperty("connected", true);
 
-      const outsideBuffer = await rig.client.callTool("what_was_happening", { at: 999_999 });
+      const outsideBuffer = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        at: 999_999,
+      });
       expect(outsideBuffer.isError).toBeFalsy();
       expect(outsideBuffer.json).toHaveProperty("connected", true);
 
       // The success branch: a moment actually found and described.
-      const found = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      const found = await rig.client.callTool("what_was_happening", {
+        detail: "normal",
+        at: 1_000,
+      });
       expect(found.isError).toBeFalsy();
       expect(found.json).toHaveProperty("connected", true);
     } finally {
@@ -1006,8 +1112,8 @@ describe("porthole_status, findings and what_was_happening agree during the hand
   it("porthole_status and findings tell the same connection story in the handshake window", async () => {
     const rig = await buildRaceRig();
     try {
-      const status = await rig.client.callTool("porthole_status", {});
-      const findings = await rig.client.callTool("findings", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       const statusPayload = status.json as { state: string };
       const findingsPayload = findings.json as { connected: boolean };
 
@@ -1025,12 +1131,15 @@ describe("porthole_status, findings and what_was_happening agree during the hand
   it("ask_system_trace and capture_system_trace name the handshake instead of telling the caller to connect (GRA-157 AC3)", async () => {
     const rig = await buildRaceRig();
     try {
-      const trace = await rig.client.callTool("ask_system_trace", { trace: "whatever.pftrace" });
+      const trace = await rig.client.callTool("ask_system_trace", {
+        detail: "normal",
+        trace: "whatever.pftrace",
+      });
       expect(trace.isError).toBe(true);
       expect(trace.text).toContain("still waiting on its first check-in");
       expect(trace.text).not.toContain("Connect to the app");
 
-      const capture = await rig.client.callTool("capture_system_trace", {});
+      const capture = await rig.client.callTool("capture_system_trace", { detail: "normal" });
       expect(capture.isError).toBe(true);
       expect(capture.text).toContain("Still waiting on the app's first check-in");
     } finally {
@@ -1061,7 +1170,7 @@ describe("porthole_status, findings and what_was_happening agree during the hand
       await waitUntil(() => rig.device.state === "connected", 5_000);
       expect(rig.device.hello).not.toBeNull();
 
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.json).toMatchObject({ state: "connected" });
       expect(status.text).toContain("Connected to com.example.shop");
     } finally {
@@ -1103,14 +1212,14 @@ describe("a stale ring says whose process it belongs to, not the running one's (
     try {
       expect(rig.device.lastExited?.hello.packageName).toBe("com.example.shop");
 
-      const status = await rig.client.callTool("porthole_status", {});
-      const findings = await rig.client.callTool("findings", {});
-      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
+      const wwh = await rig.client.callTool("what_was_happening", { detail: "normal", at: 1_000 });
 
       expect(status.json).toMatchObject({ state: "disconnected" });
-      expect((status.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject(
-        { packageName: "com.example.shop" },
-      );
+      expect(
+        (status.json as { exitedProcess: { packageName: string } }).exitedProcess,
+      ).toMatchObject({ packageName: "com.example.shop" });
       expect(status.text).toContain("com.example.shop");
       expect(status.text).toContain("exited at");
 
@@ -1152,19 +1261,19 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       expect(rig.device.hello).toBeNull();
       expect(rig.device.lastExited?.hello.packageName).toBe("com.example.shop");
 
-      const findings = await rig.client.callTool("findings", {});
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       expect(findings.json).toMatchObject({ connected: false });
       expect(
         (findings.json as { exitedProcess: { packageName: string } }).exitedProcess,
       ).toMatchObject({ packageName: "com.example.shop" });
 
-      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      const wwh = await rig.client.callTool("what_was_happening", { detail: "normal", at: 1_000 });
       expect(wwh.json).toMatchObject({ connected: false });
       expect((wwh.json as { exitedProcess: { packageName: string } }).exitedProcess).toMatchObject({
         packageName: "com.example.shop",
       });
 
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.json).toMatchObject({ state: "handshaking" });
       expect(status.text).toContain("com.example.shop");
       expect(status.text).toContain("exited at");
@@ -1198,7 +1307,7 @@ describe("a stale ring says whose process it belongs to, not the running one's (
   it("the ordinary case is unaffected: connected: true still means the ring is confirmed live, not a previous session's leftovers", async () => {
     const rig = await buildRingInState("connected");
     try {
-      const findings = await rig.client.callTool("findings", {});
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       expect(findings.json).toMatchObject({ connected: true, exitedProcess: null });
       expect(findings.text).not.toContain("exited at");
     } finally {
@@ -1257,9 +1366,9 @@ describe("a stale ring says whose process it belongs to, not the running one's (
       expect(rig.timeline.buffer()).toHaveLength(0);
       expect(rig.device.lastExited?.hello.startedAt).toBe(999);
 
-      const status = await rig.client.callTool("porthole_status", {});
-      const findings = await rig.client.callTool("findings", {});
-      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
+      const wwh = await rig.client.callTool("what_was_happening", { detail: "normal", at: 1_000 });
 
       for (const [name, result] of [
         ["porthole_status", status],
@@ -1433,9 +1542,9 @@ describe("more GRA-163 tools coverage", () => {
       await rig.pushEvents([{ event: "recompose", t: 1_000, data: { name: "Cart" } }]);
       expect(rig.device.lastExited).toBeNull();
 
-      const status = await rig.client.callTool("porthole_status", {});
-      const findings = await rig.client.callTool("findings", {});
-      const wwh = await rig.client.callTool("what_was_happening", { at: 1_000 });
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
+      const wwh = await rig.client.callTool("what_was_happening", { detail: "normal", at: 1_000 });
 
       for (const [name, result] of [
         ["porthole_status", status],
@@ -1568,7 +1677,7 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
       expect(rig.device.state).toBe("connected");
       expect(rig.device.protocolMismatch).not.toBeNull();
 
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       // AC1: a specific, actionable message, not the generic "Connected to
       // ... Collectors: ..." summary the healthy path prints.
@@ -1592,7 +1701,7 @@ describe("porthole_status on a protocol mismatch (GRA-96)", () => {
     const rig = await buildRig(); // default fixture hello() sends protocol: 1
     try {
       expect(rig.device.protocolMismatch).toBeNull();
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const payload = status.json as { protocolMismatch: string | null };
       expect(payload.protocolMismatch).toBeNull();
       expect(status.text).toContain("Collectors:");
@@ -1613,7 +1722,7 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
       expect(rig.device.state).toBe("connected");
       expect(rig.device.packageMismatch).not.toBeNull();
 
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       expect(status.text).not.toContain("Collectors:");
       expect(status.text).toContain("com.example.shop");
@@ -1633,7 +1742,7 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
     const rig = await buildRig({ applicationId: "com.example.shop" });
     try {
       expect(rig.device.packageMismatch).toBeNull();
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const payload = status.json as { packageMismatch: string | null };
       expect(payload.packageMismatch).toBeNull();
       expect(status.text).toContain("Collectors:");
@@ -1646,7 +1755,7 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
     const rig = await buildRig(); // no applicationId — behaviour must be unchanged (AC3)
     try {
       expect(rig.device.packageMismatch).toBeNull();
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const payload = status.json as { packageMismatch: string | null };
       expect(payload.packageMismatch).toBeNull();
     } finally {
@@ -1669,21 +1778,27 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
         { event: "recompose", t: 5_000, data: {} },
       ]);
 
-      const frames = await rig.client.callTool("frames", { from: 0, to: 6_000 });
+      const frames = await rig.client.callTool("frames", { detail: "normal", from: 0, to: 6_000 });
       expect(frames.isError).toBeFalsy();
-      expect(frames.text.startsWith("⚠ Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`")).toBe(
-        true,
-      );
+      expect(
+        frames.text.startsWith(
+          "⚠ Connected to `com.example.shop`, but this MCP server was configured for `com.acme.app`",
+        ),
+      ).toBe(true);
       // Still the tool's own answer underneath, not a replacement for it.
       expect(frames.json).not.toBeNull();
 
-      const findings = await rig.client.callTool("findings", { from: 0, to: 6_000 });
+      const findings = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 6_000,
+      });
       expect(findings.isError).toBeFalsy();
       expect(findings.text).toContain("com.acme.app");
       expect(findings.text).toContain("examined");
       // Said once, never twice: the lead is skipped for a summary that
       // already is the mismatch text (porthole_status, the empty-ring branch).
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.text.split("PORTHOLE_APPLICATION_ID").length - 1).toBe(1);
     } finally {
       await rig.close();
@@ -1694,7 +1809,7 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
     const rig = await buildRig({ applicationId: "com.example.shop" });
     try {
       await rig.pushEvents([{ event: "recompose", t: 1_000, data: {} }]);
-      const frames = await rig.client.callTool("frames", { from: 0, to: 2_000 });
+      const frames = await rig.client.callTool("frames", { detail: "normal", from: 0, to: 2_000 });
       expect(frames.text.startsWith("⚠")).toBe(false);
       expect(frames.text).not.toContain("PORTHOLE_APPLICATION_ID");
     } finally {
@@ -1708,7 +1823,7 @@ describe("porthole_status and findings on a package mismatch (GRA-197)", () => {
   it("findings — an unrelated tool — leads its empty-ring summary with the mismatch too", async () => {
     const rig = await buildRig({ applicationId: "com.acme.app" });
     try {
-      const findings = await rig.client.callTool("findings", {});
+      const findings = await rig.client.callTool("findings", { detail: "normal" });
       expect(findings.isError).toBeFalsy();
       expect(findings.text).toContain("com.example.shop");
       expect(findings.text).toContain("com.acme.app");
@@ -1892,10 +2007,13 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     it("porthole_status's payload is still parseable", async () => {
       const rig = await buildExitedRig(hello);
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.text).toContain("Pixel");
         expect(result.text).toContain("(rooted)");
-        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.device",
+        ).not.toBeUndefined();
         // The payload itself was never at risk — JSON.stringify escapes the
         // newline as `\n`, not a raw line break — so the structured field
         // must still carry the value verbatim, blank line and all.
@@ -1910,10 +2028,13 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     it("findings's payload is still parseable", async () => {
       const rig = await buildExitedRig(hello);
       try {
-        const result = await rig.client.callTool("findings", {});
+        const result = await rig.client.callTool("findings", { detail: "normal" });
         expect(result.text).toContain("Pixel");
         expect(result.text).toContain("(rooted)");
-        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.device",
+        ).not.toBeUndefined();
         expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
           DIRTY_DEVICE,
         );
@@ -1925,10 +2046,16 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     it("what_was_happening's payload is still parseable", async () => {
       const rig = await buildExitedRig(hello);
       try {
-        const result = await rig.client.callTool("what_was_happening", { at: 1_000 });
+        const result = await rig.client.callTool("what_was_happening", {
+          detail: "normal",
+          at: 1_000,
+        });
         expect(result.text).toContain("Pixel");
         expect(result.text).toContain("(rooted)");
-        expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.device",
+        ).not.toBeUndefined();
         expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
           DIRTY_DEVICE,
         );
@@ -1938,17 +2065,22 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     });
   });
 
-  describe("hello.packageName contains a blank line (via each tool's own \"just connected\" branch)", () => {
+  describe('hello.packageName contains a blank line (via each tool\'s own "just connected" branch)', () => {
     const hello = helloOf({ packageName: DIRTY_PACKAGE });
 
     it("porthole_status's payload is still parseable on the ordinary connected summary", async () => {
       const rig = await buildRig({ handlers: { hello: () => hello } });
       try {
-        const result = await rig.client.callTool("porthole_status", {});
+        const result = await rig.client.callTool("porthole_status", { detail: "normal" });
         expect(result.text).toContain("com.example");
         expect(result.text).toContain("shop");
-        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
-        expect((result.json as { app: { packageName: string } }).app.packageName).toBe(DIRTY_PACKAGE);
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.packageName",
+        ).not.toBeUndefined();
+        expect((result.json as { app: { packageName: string } }).app.packageName).toBe(
+          DIRTY_PACKAGE,
+        );
       } finally {
         await rig.close();
       }
@@ -1957,10 +2089,13 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     it("findings's payload is still parseable with an empty, just-connected ring", async () => {
       const rig = await buildRig({ handlers: { hello: () => hello } });
       try {
-        const result = await rig.client.callTool("findings", {});
+        const result = await rig.client.callTool("findings", { detail: "normal" });
         expect(result.text).toContain("com.example");
         expect(result.text).toContain("shop");
-        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.packageName",
+        ).not.toBeUndefined();
       } finally {
         await rig.close();
       }
@@ -1969,10 +2104,13 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     it("what_was_happening's payload is still parseable with an empty, just-connected ring", async () => {
       const rig = await buildRig({ handlers: { hello: () => hello } });
       try {
-        const result = await rig.client.callTool("what_was_happening", {});
+        const result = await rig.client.callTool("what_was_happening", { detail: "normal" });
         expect(result.text).toContain("com.example");
         expect(result.text).toContain("shop");
-        expect(result.json, "payload must survive a blank line in hello.packageName").not.toBeUndefined();
+        expect(
+          result.json,
+          "payload must survive a blank line in hello.packageName",
+        ).not.toBeUndefined();
       } finally {
         await rig.close();
       }
@@ -1994,12 +2132,14 @@ describe("GRA-169 / GRA-171: a blank line in interpolated device data must not b
     const hello = helloOf({ device: DIRTY });
     const rig = await buildExitedRig(hello);
     try {
-      const result = await rig.client.callTool("porthole_status", {});
+      const result = await rig.client.callTool("porthole_status", { detail: "normal" });
       // Structural proof: exactly one summary block and one payload block,
       // by array shape — not "a blank line found somewhere in the text".
       expect(result.content.filter((c) => c.type === "text")).toHaveLength(2);
       expect(result.json, "payload must survive a blank line in hello.device").not.toBeUndefined();
-      expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(DIRTY);
+      expect((result.json as { exitedProcess: { device: string } }).exitedProcess.device).toBe(
+        DIRTY,
+      );
       // Prose-fidelity proof: GRA-169's `collapseBlankLines()` would have
       // turned every one of DIRTY's blank lines into a single space before
       // this text ever reached the summary block — asserting the raw value
@@ -2026,7 +2166,8 @@ describe("porthole_status: why the app died (GRA-58)", () => {
     rss: 23_456,
     versionName: "1.2.3",
     versionAssumed: false,
-    mainStack: "com.example.shop.Cart.load(Cart.kt:9)\nandroid.app.Activity.performCreate(Activity.java:1)",
+    mainStack:
+      "com.example.shop.Cart.load(Cart.kt:9)\nandroid.app.Activity.performCreate(Activity.java:1)",
     otherThreadCount: 2,
     otherThreadStates: { Waiting: 2 },
     ...overrides,
@@ -2036,11 +2177,19 @@ describe("porthole_status: why the app died (GRA-58)", () => {
     const rig = await buildRig();
     try {
       await rig.pushEvents([
-        { event: "exit", t: 1000, data: exitData({ timestamp: 1_700_000_000_000, reason: "REASON_CRASH" }) },
-        { event: "exit", t: 2000, data: exitData({ timestamp: 1_700_000_100_000, reason: "REASON_ANR" }) },
+        {
+          event: "exit",
+          t: 1000,
+          data: exitData({ timestamp: 1_700_000_000_000, reason: "REASON_CRASH" }),
+        },
+        {
+          event: "exit",
+          t: 2000,
+          data: exitData({ timestamp: 1_700_000_100_000, reason: "REASON_ANR" }),
+        },
       ]);
 
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       const exits = (status.json as { exits: { recent: Array<Record<string, unknown>> } }).exits;
       expect(exits.recent).toHaveLength(2);
@@ -2064,7 +2213,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
           data: exitData({ timestamp: 1_700_000_000_000 + i * 1000 }),
         })),
       );
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const exits = (status.json as { exits: { recent: unknown[] } }).exits;
       expect(exits.recent.length).toBeLessThanOrEqual(10);
     } finally {
@@ -2075,7 +2224,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("says the API is unavailable below API 30, sourced from hello.sdkInt alone", async () => {
     const rig = await buildRig({ handlers: { hello: () => ({ ...defaultHello(), sdkInt: 28 }) } });
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const exits = (status.json as { exits: { apiUnavailable: string | null } }).exits;
       expect(exits.apiUnavailable).toContain("API 30");
       expect(exits.apiUnavailable).toContain("28");
@@ -2087,7 +2236,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("says nothing is unavailable at or above API 30", async () => {
     const rig = await buildRig();
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const exits = (status.json as { exits: { apiUnavailable: string | null } }).exits;
       expect(exits.apiUnavailable).toBeNull();
     } finally {
@@ -2100,7 +2249,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
       { event: "exit", t: 1000, data: exitData({ timestamp: Date.now() - 5_000 }) },
     ]);
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.text).toContain("died");
       expect(status.text).toContain("REASON_ANR");
     } finally {
@@ -2113,7 +2262,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
       { event: "exit", t: 1000, data: exitData({ timestamp: Date.now() - 60 * 60 * 1000 }) },
     ]);
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.text).not.toContain("died:");
     } finally {
       await rig.close();
@@ -2123,7 +2272,7 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("leaves exitTrace null in the payload when the parameter is omitted", async () => {
     const rig = await buildRig();
     try {
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect((status.json as { exitTrace: unknown }).exitTrace).toBeNull();
     } finally {
       await rig.close();
@@ -2136,16 +2285,20 @@ describe("porthole_status: why the app died (GRA-58)", () => {
         exit_trace: (params) => ({
           timestamp: params.timestamp,
           found: true,
-          text: "\"main\" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)",
+          text: '"main" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)',
           truncated: false,
         }),
       },
     });
     try {
-      const status = await rig.client.callTool("porthole_status", { exitTrace: 1_700_000_000_000 });
+      const status = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: 1_700_000_000_000,
+      });
       expect(status.isError).toBeFalsy();
-      const exitTrace = (status.json as { exitTrace: { found: boolean; text: string; timestamp: number } })
-        .exitTrace;
+      const exitTrace = (
+        status.json as { exitTrace: { found: boolean; text: string; timestamp: number } }
+      ).exitTrace;
       expect(exitTrace.found).toBe(true);
       expect(exitTrace.timestamp).toBe(1_700_000_000_000);
       expect(exitTrace.text).toContain("com.example.shop.Cart.load");
@@ -2165,7 +2318,10 @@ describe("porthole_status: why the app died (GRA-58)", () => {
       },
     });
     try {
-      const status = await rig.client.callTool("porthole_status", { exitTrace: 999 });
+      const status = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: 999,
+      });
       expect(status.isError).toBeFalsy();
       const exitTrace = (status.json as { exitTrace: { found: boolean; error: string } }).exitTrace;
       expect(exitTrace.found).toBe(false);
@@ -2183,7 +2339,10 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("rejects an empty exitTrace inside the handler, with one line naming why", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("porthole_status", { exitTrace: "" });
+      const result = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: "",
+      });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("exitTrace");
       expect(result.text).toMatch(/not a valid/i);
@@ -2195,7 +2354,10 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("rejects a malformed (non-parseable) exitTrace inside the handler, with one line naming why", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("porthole_status", { exitTrace: "not-a-timestamp" });
+      const result = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: "not-a-timestamp",
+      });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("not-a-timestamp");
       expect(result.text).toMatch(/not a valid/i);
@@ -2207,7 +2369,10 @@ describe("porthole_status: why the app died (GRA-58)", () => {
   it("rejects a negative exitTrace before the handler ever runs (the number branch is unchanged)", async () => {
     const rig = await buildRig();
     try {
-      const result = await rig.client.callTool("porthole_status", { exitTrace: -5 });
+      const result = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: -5,
+      });
       expect(result.isError).toBe(true);
     } finally {
       await rig.close();
@@ -2220,23 +2385,30 @@ describe("porthole_status: why the app died (GRA-58)", () => {
         exit_trace: (params) => ({
           timestamp: params.timestamp,
           found: true,
-          text: "\"main\" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)",
+          text: '"main" prio=5 tid=1 Native\n  at com.example.shop.Cart.load(Cart.kt:9)',
           truncated: false,
         }),
       },
     });
     try {
-      await rig.pushEvents([{ event: "exit", t: 1000, data: exitData({ timestamp: 1_700_000_000_000 }) }]);
-      const status = await rig.client.callTool("porthole_status", {});
-      const exits = (status.json as { exits: { recent: Array<{ timestamp: number; at: string }> } }).exits;
+      await rig.pushEvents([
+        { event: "exit", t: 1000, data: exitData({ timestamp: 1_700_000_000_000 }) },
+      ]);
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
+      const exits = (status.json as { exits: { recent: Array<{ timestamp: number; at: string }> } })
+        .exits;
       expect(exits.recent[0].timestamp).toBe(1_700_000_000_000);
       expect(exits.recent[0].at).toBe(new Date(1_700_000_000_000).toISOString());
 
       // The obvious next move the device pass measured failing: quote `at` back.
-      const traced = await rig.client.callTool("porthole_status", { exitTrace: exits.recent[0].at });
+      const traced = await rig.client.callTool("porthole_status", {
+        detail: "normal",
+        exitTrace: exits.recent[0].at,
+      });
       expect(traced.isError).toBeFalsy();
-      const exitTrace = (traced.json as { exitTrace: { found: boolean; timestamp: number; text: string } })
-        .exitTrace;
+      const exitTrace = (
+        traced.json as { exitTrace: { found: boolean; timestamp: number; text: string } }
+      ).exitTrace;
       expect(exitTrace.found).toBe(true);
       expect(exitTrace.timestamp).toBe(1_700_000_000_000);
       expect(exitTrace.text).toContain("com.example.shop.Cart.load");
@@ -2347,6 +2519,14 @@ if (a[0] === "shell" && a[1] === "am" && a[2] === "force-stop") {
   logOrder("force-stop");
   process.exit(0);
 }
+// GRA-233: resolve-activity is never configured to succeed in this file's
+// own fixture — every restart/launch this preload drives falls back to
+// monkey, the same as before this ticket, so the "force-stop"/"launch"
+// ordering these tests already pin stays exactly as it was.
+if (a[0] === "shell" && a[1] === "cmd" && a[2] === "package" && a[3] === "resolve-activity") {
+  process.stderr.write("No activity found\\n");
+  process.exit(1);
+}
 if (a[0] === "shell" && a[1] === "monkey") {
   logOrder("launch");
   // GRA-186 self-check (a): PORTHOLE_TEST_MONKEY_FAIL simulates the
@@ -2356,8 +2536,26 @@ if (a[0] === "shell" && a[1] === "monkey") {
     process.stderr.write("No activities found to run, monkey aborted.\\n");
     process.exit(1);
   }
+  // GRA-233: touches the same marker directory waitForCaptureToStart's own
+  // marker uses, so the pidof handler below can honestly answer "is it up"
+  // instead of every restart/launch in this file needing its own opt-in.
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  if (markerDir) fs.writeFileSync(path.join(markerDir, "app-running"), "1");
   process.stdout.write("Events injected: 1\\n");
   process.exit(0);
+}
+// GRA-233: restartAppAsync/launchAppAsync poll this after the launch step —
+// "up" exactly when the monkey handler above most recently marked it so,
+// never unconditionally, so the monkey-fails self-check still sees no
+// process and reports the real failure.
+if (a[0] === "shell" && a[1] === "pidof") {
+  const markerDir = process.env.PORTHOLE_TEST_MARKER_DIR;
+  const markerFile = markerDir ? path.join(markerDir, "app-running") : null;
+  if (markerFile && fs.existsSync(markerFile)) {
+    process.stdout.write("12345\\n");
+    process.exit(0);
+  }
+  process.exit(1);
 }
 process.stderr.write("fake-adb: unhandled args " + JSON.stringify(a) + "\\n");
 process.exit(17);
@@ -2464,7 +2662,11 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
     try {
       const seconds = 3;
       const started = Date.now();
-      const capturePromise = rig.client.callTool("capture_system_trace", { seconds, outputDir });
+      const capturePromise = rig.client.callTool("capture_system_trace", {
+        detail: "normal",
+        seconds,
+        outputDir,
+      });
 
       // The fake device is "recording" for `seconds` real seconds in a
       // separate OS process (see FAKE_ADB_PRELOAD_SOURCE's sleepSync) while
@@ -2475,7 +2677,7 @@ describe("GRA-89: capture_system_trace does not block the server while it runs",
       // regression back to `runAdb`'s `spawnSync` would freeze this whole
       // process for the recording's duration, and these calls would not
       // return until after it did.
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       const statusElapsedMs = Date.now() - started;
       expect(status.isError).toBeFalsy();
       expect(statusElapsedMs).toBeLessThan(1_500);
@@ -2508,6 +2710,7 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       const capture = await rig.client.callTool("capture_system_trace", {
+        detail: "normal",
         seconds: 2,
         outputDir,
         packages: ["com.example.shop"],
@@ -2520,7 +2723,13 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
       // tag for yet) and not after (the window would already be over) — so
       // "perfetto-start" must lead "force-stop"/"launch", which in turn must
       // lead the pull/cleanup that only run once the recording resolves.
-      expect(fakeAdb.order()).toEqual(["perfetto-start", "force-stop", "launch", "pull", "cleanup"]);
+      expect(fakeAdb.order()).toEqual([
+        "perfetto-start",
+        "force-stop",
+        "launch",
+        "pull",
+        "cleanup",
+      ]);
     } finally {
       await rig.close();
       fakeAdb.cleanup();
@@ -2534,6 +2743,7 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       const capture = await rig.client.callTool("capture_system_trace", {
+        detail: "normal",
         seconds: 1,
         outputDir,
         packages: ["com.example.shop"],
@@ -2557,9 +2767,14 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
     // connectDevice: false leaves device.hello null and state "disconnected"
     // (not "handshaking"), so the existing GRA-157 early-return does not
     // fire and this reaches the GRA-186 code with apps === [].
-    const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env, connectDevice: false });
+    const rig = await buildRig({
+      adbBinary: fakeAdb.binaryPath,
+      adbEnv: fakeAdb.env,
+      connectDevice: false,
+    });
     try {
       const capture = await rig.client.callTool("capture_system_trace", {
+        detail: "normal",
         seconds: 1,
         outputDir,
         restartApp: true,
@@ -2585,6 +2800,7 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
     const rig = await buildRig({ adbBinary: fakeAdb.binaryPath, adbEnv: fakeAdb.env });
     try {
       const capture = await rig.client.callTool("capture_system_trace", {
+        detail: "normal",
         seconds: 1,
         outputDir,
         packages: ["com.example.shop"],
@@ -2596,13 +2812,101 @@ describe("GRA-186: capture_system_trace can restart the app mid-capture", () => 
       expect(notes).toContain("Could not restart com.example.shop for this capture:");
       expect(notes).toContain("No activities found to run, monkey aborted.");
       // The force-stop half still ran — only the launch failed.
-      expect(fakeAdb.order()).toEqual(["perfetto-start", "force-stop", "launch", "pull", "cleanup"]);
+      expect(fakeAdb.order()).toEqual([
+        "perfetto-start",
+        "force-stop",
+        "launch",
+        "pull",
+        "cleanup",
+      ]);
     } finally {
       await rig.close();
       fakeAdb.cleanup();
       rmSync(outputDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }, 20_000);
+});
+
+describe("GRA-234: ask_system_trace on a trace path that does not exist", () => {
+  // `traceProcessor` only needs to be a path `existsSync` accepts — the
+  // stat-before-load check this ticket adds short-circuits before this
+  // tool would ever actually spawn it, the same way it never reaches
+  // askTrace()'s real trace_processor invocation at all. Using this
+  // process's own node binary keeps the fixture honest and cross-platform
+  // without needing a real trace_processor_shell on the test machine.
+  const traceProcessor = process.execPath;
+
+  it("names the missing path in one plain sentence, with asked/unanswered/findings all empty — not '8 question(s) failed'", async () => {
+    const rig = await buildRig();
+    const dir = mkdtempSync(path.join(tmpdir(), "porthole-gra234-"));
+    try {
+      const missing = path.join(dir, "porthole-2026-09-19T12-00-00.pftrace");
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: missing,
+        from: 0,
+        to: 1_000,
+        traceProcessor,
+        detail: "normal",
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain(`No such trace file: ${missing}`);
+      // The old bug's exact wording — this proves the fix replaced it, not
+      // just that the new wording happens to also be present.
+      expect(result.text).not.toContain("question(s) failed");
+      expect(result.json).toMatchObject({ asked: [], skipped: [], unanswered: [], findings: [] });
+    } finally {
+      await rig.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the nearest same-prefix candidate under the same directory when one exists", async () => {
+    const rig = await buildRig();
+    const dir = mkdtempSync(path.join(tmpdir(), "porthole-gra234-"));
+    try {
+      const candidate = path.join(dir, "porthole-ring-2026-09-19T11-59-00.pftrace");
+      writeFileSync(candidate, "");
+      const missing = path.join(dir, "porthole-ring-2026-09-19T12-00-00.pftrace");
+
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: missing,
+        from: 0,
+        to: 1_000,
+        traceProcessor,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain(`Did you mean ${candidate}?`);
+    } finally {
+      await rig.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still resolves the handshake/connection checks first — a missing trace never masks 'still waiting on its first check-in'", async () => {
+    // Same shape as the GRA-157 describe block's own buildRaceRig (not
+    // reused here — it is scoped to that block): connectDevice: false skips
+    // buildRig's wait-for-hello, and a hello handler that never resolves,
+    // with the socket nudged to connect and waited on, holds "handshaking"
+    // open for the length of this test.
+    const rig = await buildRig({
+      connectDevice: false,
+      handlers: { hello: () => new Promise(() => {}) },
+    });
+    rig.device.start();
+    await waitUntil(() => rig.device.state === "handshaking");
+    try {
+      const result = await rig.client.callTool("ask_system_trace", {
+        trace: path.join(tmpdir(), "does-not-exist.pftrace"),
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("still waiting on its first check-in");
+      expect(result.text).not.toContain("No such trace file");
+    } finally {
+      await rig.close();
+    }
+  });
 });
 
 describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a real project", () => {
@@ -2630,7 +2934,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
           stalls: [
             {
               durationMs: 900,
-              stack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+              stack:
+                "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
             },
           ],
           mainThreadQueries: [],
@@ -2639,13 +2944,14 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("blocking", {});
+      const result = await rig.client.callTool("blocking", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const stalls = (result.json as { stalls: Array<{ where?: unknown }> }).stalls;
       expect(stalls[0].where).toEqual({
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();
@@ -2669,13 +2975,14 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("recompositions", {});
+      const result = await rig.client.callTool("recompositions", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       const nodes = (result.json as { nodes: Array<{ where?: unknown }> }).nodes;
       expect(nodes[0].where).toEqual({
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureScreens.kt",
         line: 14,
+        kind: "declaration",
       });
     } finally {
       await rig.close();
@@ -2732,9 +3039,10 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("recompositions", {});
+      const result = await rig.client.callTool("recompositions", { detail: "normal" });
       expect(result.isError).toBeFalsy();
-      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> })
+        .nodes;
       expect(nodes[0].composeReport).toMatchObject({
         joined: true,
         enclosingFunction: "FixtureCartScreen",
@@ -2742,12 +3050,12 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         skippable: false,
         stale: false,
       });
-      expect((nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason).toContain(
-        "`FixtureCartScreen` is restartable but not skippable",
-      );
-      expect((nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason).toContain(
-        "`RowHighlight` is unstable because it has a `var` property (`tappedAt`)",
-      );
+      expect(
+        (nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason,
+      ).toContain("`FixtureCartScreen` is restartable but not skippable");
+      expect(
+        (nodes[0].composeReport as { notSkippableReason?: string }).notSkippableReason,
+      ).toContain("`RowHighlight` is unstable because it has a `var` property (`tappedAt`)");
     } finally {
       await rig.close();
       withProjectRoot(savedProjectRoot);
@@ -2799,9 +3107,10 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("recompositions", {});
+      const result = await rig.client.callTool("recompositions", { detail: "normal" });
       expect(result.isError).toBeFalsy();
-      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> })
+        .nodes;
       // Mutation quoted: dropping the `if (join.stale) { return {...,
       // stale: true, staleNote: ... } }` early-return branch in
       // composeReportNodeInfo (index.ts) is what makes this assertion
@@ -2817,7 +3126,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         kotlinVersion: "2.1.0",
         strongSkippingInBuild: "unknown",
         stale: true,
-        staleNote: "report from 2026-09-20T04:10:00.000Z at git a1b2c3d, sources have changed since — not used for a reason.",
+        staleNote:
+          "report from 2026-09-20T04:10:00.000Z at git a1b2c3d, sources have changed since — not used for a reason.",
       });
       expect(nodes[0].composeReport).not.toHaveProperty("skippable");
     } finally {
@@ -2848,7 +3158,13 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
         gitHead: "abc",
         sourceFingerprint: currentSourceFingerprint(moduleRoot),
         composables: [
-          { name: "SomethingUnrelated", packageName: "com.example.shop.ui", restartable: true, skippable: true, parameters: [] },
+          {
+            name: "SomethingUnrelated",
+            packageName: "com.example.shop.ui",
+            restartable: true,
+            skippable: true,
+            parameters: [],
+          },
         ],
         classes: [],
       }),
@@ -2864,9 +3180,10 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("recompositions", {});
+      const result = await rig.client.callTool("recompositions", { detail: "normal" });
       expect(result.isError).toBeFalsy();
-      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> }).nodes;
+      const nodes = (result.json as { nodes: Array<{ composeReport?: Record<string, unknown> }> })
+        .nodes;
       expect(nodes[0].composeReport).toEqual({ joined: false, reason: "no report entry matched" });
     } finally {
       await rig.close();
@@ -2890,17 +3207,19 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
           data: {
             reason: "REASON_ANR",
             timestamp: Date.now(),
-            mainStack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+            mainStack:
+              "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
           },
         },
       ]);
-      const status = await rig.client.callTool("porthole_status", {});
+      const status = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(status.isError).toBeFalsy();
       const exits = (status.json as { exits: { recent: Array<{ where?: unknown }> } }).exits;
       expect(exits.recent[0].where).toEqual({
         resolved: true,
         path: "app/src/main/kotlin/com/example/shop/ui/FixtureCartViewModel.kt",
         line: 11,
+        kind: "frame",
       });
     } finally {
       await rig.close();
@@ -2919,7 +3238,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
           stalls: [
             {
               durationMs: 900,
-              stack: "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
+              stack:
+                "com.example.shop.ui.FixtureCartViewModel.blockTheMainThread(FixtureCartViewModel.kt:11)",
             },
           ],
           mainThreadQueries: [],
@@ -2928,7 +3248,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
       },
     });
     try {
-      const result = await rig.client.callTool("blocking", {});
+      const result = await rig.client.callTool("blocking", { detail: "normal" });
       const stalls = (result.json as { stalls: Array<{ where?: unknown }> }).stalls;
       expect(stalls[0].where).toBeUndefined();
     } finally {
@@ -2961,7 +3281,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const onRig = await buildRig({ handlers: { recompositions: () => deviceReply } });
     let onJson: { nodes: Array<Record<string, unknown>> };
     try {
-      onJson = (await onRig.client.callTool("recompositions", {})).json as typeof onJson;
+      onJson = (await onRig.client.callTool("recompositions", { detail: "normal" }))
+        .json as typeof onJson;
     } finally {
       await onRig.close();
     }
@@ -2971,7 +3292,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const offRig = await buildRig({ handlers: { recompositions: () => deviceReply } });
     let offJson: { nodes: Array<Record<string, unknown>> };
     try {
-      offJson = (await offRig.client.callTool("recompositions", {})).json as typeof offJson;
+      offJson = (await offRig.client.callTool("recompositions", { detail: "normal" }))
+        .json as typeof offJson;
     } finally {
       await offRig.close();
       withProjectRoot(savedProjectRoot);
@@ -2995,7 +3317,7 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const onRig = await buildRig({ handlers: { state: () => deviceReply } });
     let onJson: { owners: Array<Record<string, unknown>> };
     try {
-      onJson = (await onRig.client.callTool("state", {})).json as typeof onJson;
+      onJson = (await onRig.client.callTool("state", { detail: "normal" })).json as typeof onJson;
     } finally {
       await onRig.close();
     }
@@ -3005,7 +3327,8 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const offRig = await buildRig({ handlers: { state: () => deviceReply } });
     let offJson: { owners: Array<Record<string, unknown>> };
     try {
-      offJson = (await offRig.client.callTool("state", {})).json as typeof offJson;
+      offJson = (await offRig.client.callTool("state", { detail: "normal" }))
+        .json as typeof offJson;
     } finally {
       await offRig.close();
       withProjectRoot(savedProjectRoot);
@@ -3017,5 +3340,377 @@ describe("GRA-201: tools attach where when PORTHOLE_PROJECT_ROOT points at a rea
     const { where: onWhere, ...onOwnerRest } = onJson.owners[0];
     const { where: offWhere, ...offOwnerRest } = offJson.owners[0];
     expect(onOwnerRest).toEqual(offOwnerRest);
+  });
+});
+
+/**
+ * GRA-72: an accessibility lint pass over a fresh Compose semantics
+ * capture. The fixture tree below mirrors what `SemanticsCollector.kt`
+ * would actually emit for the sample's own `Cart.ClearPromo` (an IconButton
+ * with no contentDescription, GRA-72's own deliberate fixture in
+ * Screens.kt) and `Cart.TinyTarget` (a 32dp clickable box) -- hand-built,
+ * per the ticket's own allowance, rather than a live emulator capture.
+ * Density 3 (xxhdpi): 144px == 48dp exactly (the IconButton, at the real
+ * minimum -- isolates the missing-label fixture from the touch-target
+ * rule), 96px == 32dp (TinyTarget).
+ */
+describe("GRA-72: accessibility", () => {
+  const CAPTURED_AT = 5_000;
+  const DENSITY = 3;
+
+  function a11ySemanticsTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: null,
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 1080, bottom: 2000 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [
+          {
+            stableId: "iconbtn-clearpromo",
+            nodeId: 2,
+            role: "Button",
+            testTag: "Cart.ClearPromo",
+            text: null,
+            contentDescription: null,
+            bounds: { left: 100, top: 200, right: 244, bottom: 344 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+          {
+            stableId: "tiny-target",
+            nodeId: 3,
+            role: null,
+            testTag: "Cart.TinyTarget",
+            text: null,
+            contentDescription: "Clear promo code (small target)",
+            bounds: { left: 100, top: 400, right: 196, bottom: 496 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+        ],
+      },
+    };
+  }
+
+  function cleanSemanticsTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: "Just some text",
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 300, bottom: 100 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [],
+      },
+    };
+  }
+
+  /**
+   * QA F9: a bare clickable row (no role, no testTag anywhere in the tree)
+   * -- the ordinary shape of a plain Card/Row with `Modifier.clickable {}`
+   * -- with no PortholeScreen/portholeNode wrapping it anywhere.
+   */
+  function unattributedClickableRowTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: null,
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 1080, bottom: 2000 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [
+          {
+            stableId: "row1",
+            nodeId: 2,
+            role: null,
+            testTag: null,
+            text: "Item",
+            contentDescription: null,
+            bounds: { left: 0, top: 0, right: 1080, bottom: 200 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+        ],
+      },
+    };
+  }
+
+  /** The same row, this time under a PortholeScreen("Cart")-shaped root -- testTag on the ancestor, none on the row itself. */
+  function attributedClickableRowTree() {
+    const tree = unattributedClickableRowTree();
+    tree.root.testTag = "Cart";
+    return tree;
+  }
+
+  const densityEvent = {
+    event: "device",
+    t: 0,
+    data: { kind: "profile", density: String(DENSITY) },
+  };
+
+  afterEach(() => resetAccessibilityCaptureForTests());
+
+  it("QA F9: a clickable row with no role is not reported when nothing in its ancestry is attributable", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: unattributedClickableRowTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: Array<{ id: string }>; coverage: string[] };
+      expect(payload.findings.find((f) => f.id === "a11y-click-mismatch")).toBeUndefined();
+      expect(
+        payload.coverage.some((c) => c.includes("possible defect(s) on nodes outside instrumented composables")),
+      ).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA F9: the same clickable row IS reported once an ancestor (a PortholeScreen root) carries a testTag", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: attributedClickableRowTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: Array<{ id: string; evidence?: Record<string, unknown> }> };
+      const finding = payload.findings.find((f) => f.id === "a11y-click-mismatch");
+      expect(finding).toBeDefined();
+      expect(finding?.evidence).toMatchObject({ stableId: "row1" });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA F8: a clickable, tiny, invisibleToUser node yields no findings, and coverage counts it as hidden", async () => {
+    const hiddenTinyClickable = () => {
+      const tree = attributedClickableRowTree();
+      tree.root.children[0] = {
+        ...tree.root.children[0],
+        stableId: "hidden-tiny",
+        bounds: { left: 0, top: 0, right: 20, bottom: 20 }, // ~6.7dp at density 3 -- would also be a touch-target warning
+        flags: ["clickable", "invisibleToUser"],
+      };
+      return tree;
+    };
+    const rig = await buildRig({ handlers: { semantics_tree: hiddenTinyClickable } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: unknown[]; coverage: string[] };
+      expect(payload.findings).toEqual([]);
+      expect(payload.coverage.some((c) => c.includes("hidden from assistive technology"))).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports the IconButton fixture (no contentDescription) with its stableId and position", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      expect(result.isError).toBeFalsy();
+      const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
+      const finding = findings.find((f) => f.id === "a11y-missing-label");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("warning");
+      const evidence = finding?.evidence as { stableId: string; path: string; testTag: string };
+      expect(evidence.stableId).toBe("iconbtn-clearpromo");
+      expect(evidence.testTag).toBe("Cart.ClearPromo");
+      expect(evidence.path).toContain("Cart.ClearPromo");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // QA F7 (blocker): at the default detail ("summary", GRA-68), this used
+  // to return only "1 finding(s) over 2 node(s) checked" and nothing else
+  // -- no stableId, no path, no title, no coverage -- which is the whole
+  // answer an agent sees unless it already knows to ask for detail:
+  // "normal". summarizeAccessibilityResult now carries the coverage
+  // sentences, the severity tally and the worst findings (each with
+  // stableId/path/title) directly in that summary line.
+  it("QA F7: at detail 'summary' (the default), the text alone names the IconButton fixture's stableId and a coverage sentence", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      // No `detail` at all -- proving the *default*, not an explicit ask.
+      const result = await rig.client.callTool("accessibility", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.json).toBeUndefined(); // "summary" carries no payload block at all
+      expect(result.text).toContain("iconbtn-clearpromo");
+      expect(result.text).toContain("a11y-missing-label");
+      expect(result.text).toContain("Only the Compose semantics tree is checked");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("reports the deliberately 32dp target with its measured size", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const findings = (result.json as { findings: Array<Record<string, unknown>> }).findings;
+      const finding = findings.find((f) => f.id === "a11y-touch-target-small");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("note"); // 32dp: under 48, not under the 24dp warning line
+      expect(finding?.evidence).toMatchObject({
+        stableId: "tiny-target",
+        measuredDp: { width: 32, height: 32 },
+      });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("a correct screen reports 'nothing found, N nodes checked' explicitly", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: cleanSemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      expect(result.isError).toBeFalsy();
+      expect(result.text).toContain("nothing found, 1 node(s) checked");
+      const payload = result.json as {
+        findings: unknown[];
+        nodesChecked: number;
+        coverage: string[];
+      };
+      expect(payload.findings).toEqual([]);
+      expect(payload.nodesChecked).toBe(1);
+      expect(payload.coverage.length).toBeGreaterThan(0);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("the stableId a finding names resolves through semantics_tree's own output to the same node", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const a11y = await rig.client.callTool("accessibility", { detail: "normal" });
+      const findings = (a11y.json as { findings: Array<{ evidence?: Record<string, unknown> }> })
+        .findings;
+      const stableId = findings[0]?.evidence?.stableId as string;
+      expect(stableId).toBeTruthy();
+
+      const tree = await rig.client.callTool("semantics_tree", { detail: "normal" });
+      const raw = tree.json as { root: Record<string, unknown> };
+      const found = findByStableId(raw.root, stableId);
+      expect(found, `stableId ${stableId} did not resolve through semantics_tree`).toBeDefined();
+    } finally {
+      await rig.close();
+    }
+
+    function findByStableId(node: Record<string, unknown> | null, id: string): unknown {
+      if (!node) return undefined;
+      if (node.stableId === id) return node;
+      for (const child of (node.children as Array<Record<string, unknown>>) ?? []) {
+        const hit = findByStableId(child, id);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+  });
+
+  it("findings folds accessibility findings in when a semantics capture landed inside the window", async () => {
+    let semanticsCalls = 0;
+    const rig = await buildRig({
+      handlers: {
+        semantics_tree: () => {
+          semanticsCalls++;
+          return a11ySemanticsTree();
+        },
+      },
+    });
+    try {
+      await rig.pushEvents([densityEvent, { event: "recompose", t: 6_000, data: {} }]);
+
+      // A capture, from the pre-existing semantics_tree tool -- GRA-72's own
+      // decision that either tool feeds the same cache.
+      await rig.client.callTool("semantics_tree", { detail: "normal" });
+      expect(semanticsCalls).toBe(1);
+
+      const before = semanticsCalls;
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 10_000,
+      });
+      // No fresh RPC paid for by findings itself -- the whole point of
+      // GRA-72's fold-in decision.
+      expect(semanticsCalls).toBe(before);
+
+      const findings = (result.json as { findings: Array<{ id: string }> }).findings;
+      expect(findings.some((f) => f.id.startsWith("a11y-"))).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings does not fold anything in when no semantics capture falls inside the window", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent, { event: "recompose", t: 1_000, data: {} }]);
+
+      // A capture at CAPTURED_AT (5000) -- but findings then asks about a
+      // window that does not cover it.
+      await rig.client.callTool("accessibility", { detail: "normal" });
+      const result = await rig.client.callTool("findings", {
+        detail: "normal",
+        from: 0,
+        to: 1_000,
+      });
+      const findings = (result.json as { findings: Array<{ id: string }> }).findings;
+      expect(findings.some((f) => f.id.startsWith("a11y-"))).toBe(false);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("findings never calls semantics_tree on its own when nothing has ever been captured", async () => {
+    let semanticsCalls = 0;
+    const rig = await buildRig({
+      handlers: {
+        semantics_tree: () => {
+          semanticsCalls++;
+          return { capturedAt: 0, merged: true, root: null };
+        },
+      },
+    });
+    try {
+      await rig.pushEvents([{ event: "recompose", t: 1_000, data: {} }]);
+      await rig.client.callTool("findings", { detail: "normal", from: 0, to: 2_000 });
+      expect(semanticsCalls).toBe(0);
+    } finally {
+      await rig.close();
+    }
   });
 });

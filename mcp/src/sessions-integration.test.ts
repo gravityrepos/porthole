@@ -84,7 +84,11 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const timeline1 = new TimelineServer(device1, 0);
     devices.push(device1);
     timelines.push(timeline1);
-    const { server: server1 } = createPortholeServer({ device: device1, timeline: timeline1, version: "0.0.0-test" });
+    const { server: server1 } = createPortholeServer({
+      device: device1,
+      timeline: timeline1,
+      version: "0.0.0-test",
+    });
 
     device1.start();
     await waitUntil(() => device1.hello !== null, 10_000);
@@ -114,7 +118,11 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const timeline2 = new TimelineServer(device2, 0);
     devices.push(device2);
     timelines.push(timeline2);
-    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    const { server: server2 } = createPortholeServer({
+      device: device2,
+      timeline: timeline2,
+      version: "0.0.0-test",
+    });
 
     device2.start();
     await waitUntil(() => device2.hello !== null, 10_000);
@@ -123,7 +131,7 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const client = await connect(server2);
     clients.push(client);
 
-    const result = await client.callTool("what_was_happening", { at: navAt });
+    const result = await client.callTool("what_was_happening", { detail: "normal", at: navAt });
 
     expect(result.isError).toBeFalsy();
     // The old failure mode, verbatim from the ticket's own "Why": this must
@@ -183,7 +191,11 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const timeline2 = new TimelineServer(device2, 0);
     devices.push(device2);
     timelines.push(timeline2);
-    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    const { server: server2 } = createPortholeServer({
+      device: device2,
+      timeline: timeline2,
+      version: "0.0.0-test",
+    });
     device2.start();
     await waitUntil(() => device2.hello !== null, 10_000);
 
@@ -201,7 +213,7 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     // A window that reaches earlier than anything ever recorded (0) and
     // later than anything recorded so far (4000), straddling the restart at
     // 2000-3000 in the middle.
-    const result = await client.callTool("findings", { from: 0, to: 4_000 });
+    const result = await client.callTool("findings", { detail: "normal", from: 0, to: 4_000 });
     expect(result.isError).toBeFalsy();
     const payload = result.json as {
       clippedMs: { start: number; end: number };
@@ -272,9 +284,12 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const client = await connect(server);
     clients.push(client);
 
-    const result = await client.callTool("findings", { from: 3_000, to: 7_000 });
+    const result = await client.callTool("findings", { detail: "normal", from: 3_000, to: 7_000 });
     expect(result.isError).toBeFalsy();
-    const payload = result.json as { clippedMs: { start: number; end: number }; eventsExamined: number };
+    const payload = result.json as {
+      clippedMs: { start: number; end: number };
+      eventsExamined: number;
+    };
 
     expect(payload.eventsExamined).toBe(0); // genuinely nothing happened in this sub-window
     expect(payload.clippedMs).toEqual({ start: 0, end: 0 }); // but it was fully recorded, so it is not clipped
@@ -330,7 +345,11 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     const timeline2 = new TimelineServer(device2, 0);
     devices.push(device2);
     timelines.push(timeline2);
-    const { server: server2 } = createPortholeServer({ device: device2, timeline: timeline2, version: "0.0.0-test" });
+    const { server: server2 } = createPortholeServer({
+      device: device2,
+      timeline: timeline2,
+      version: "0.0.0-test",
+    });
     device2.start();
     await waitUntil(() => device2.hello !== null, 10_000);
     expect(timeline2.buffer().length).toBe(0); // the live ring really is empty after the "restart"
@@ -343,9 +362,13 @@ describe("GRA-53: what_was_happening survives an MCP server restart", () => {
     clients.push(client);
 
     // The boundary (2000-3000) sits inside the window, not at its edge.
-    const result = await client.callTool("timeline", { from: 500, to: 3_500 });
+    const result = await client.callTool("timeline", { detail: "normal", from: 500, to: 3_500 });
     expect(result.isError).toBeFalsy();
-    const payload = result.json as { events: Array<{ t: number; seq: number }>; matched: number; returned: number };
+    const payload = result.json as {
+      events: Array<{ t: number; seq: number }>;
+      matched: number;
+      returned: number;
+    };
 
     expect(payload.events.map((e) => e.t)).toEqual([1_000, 2_000, 3_000]);
     expect(payload.returned).toBe(3);

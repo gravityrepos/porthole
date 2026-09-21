@@ -22,7 +22,11 @@ describe("buildSetupReport", () => {
   it("passes every entry through untouched, socket and strictmode included (GRA-228 AC: 'every entry the UI's setup panel shows')", () => {
     const raw: SetupEntry[] = [
       entry({ name: "socket", instrumented: true, hint: null }),
-      entry({ name: "strictmode", instrumented: false, hint: "off by default; enable with porthole { strictMode.set(true) }" }),
+      entry({
+        name: "strictmode",
+        instrumented: false,
+        hint: "off by default; enable with porthole { strictMode.set(true) }",
+      }),
       entry({ name: "okhttp", instrumented: true }),
     ];
     // Mutation this catches: filtering `entries` down to only the names
@@ -94,7 +98,9 @@ describe("buildSetupReport", () => {
     // itself already guards this (`Setup.kt`'s `hint = if (present &&
     // !wired) ...`), but this module must not defeat that guard by
     // ranking on `!instrumented` alone.
-    const raw: SetupEntry[] = [entry({ name: "room", onClasspath: false, instrumented: false, hint: null })];
+    const raw: SetupEntry[] = [
+      entry({ name: "room", onClasspath: false, instrumented: false, hint: null }),
+    ];
     expect(buildSetupReport(raw).gaps).toEqual([]);
   });
 
@@ -151,8 +157,10 @@ describe("SNIPPETS stay in sync with README.md (GRA-65 EM: 'keep in sync by test
   // loop, so removing an entry (or emptying its snippet) fails here even
   // when the generated per-entry test it would have produced is simply
   // gone rather than failing.
-  it("covers all five integrations, each with a real, non-empty snippet", () => {
-    expect(Object.keys(SNIPPETS)).toHaveLength(5);
+  it("covers all six integrations, each with a real, non-empty snippet", () => {
+    // GRA-64 added `leakcanary` — see setup.ts's own UNLOCKS comment for why
+    // its snippet is a dependency coordinate rather than a builder line.
+    expect(Object.keys(SNIPPETS)).toHaveLength(6);
     for (const [name, snippet] of Object.entries(SNIPPETS)) {
       expect(snippet.trim().length, `${name}'s snippet must not be empty`).toBeGreaterThan(0);
     }
@@ -178,16 +186,24 @@ describe("the setup MCP tool", () => {
       instrumented: false,
       hint: "off by default; enable with porthole { strictMode.set(true) } in the app module",
     },
-    { name: "okhttp", onClasspath: true, instrumented: false, hint: "add installPorthole() to your OkHttpClient.Builder" },
+    {
+      name: "okhttp",
+      onClasspath: true,
+      instrumented: false,
+      hint: "add installPorthole() to your OkHttpClient.Builder",
+    },
     { name: "navigation", onClasspath: true, instrumented: true, hint: null },
   ];
 
   it("returns the runtime's own entries plus the ranked gaps and snippet, through a real MCP call", async () => {
     const rig = await buildRig({ handlers: { setup: () => fixture } });
     try {
-      const result = await rig.client.callTool("setup", {});
+      const result = await rig.client.callTool("setup", { detail: "normal" });
       expect(result.isError).toBeFalsy();
-      const json = result.json as { entries: SetupEntry[]; gaps: Array<{ name: string; add: string }> };
+      const json = result.json as {
+        entries: SetupEntry[];
+        gaps: Array<{ name: string; add: string }>;
+      };
       // Mutation this catches: registering the tool with `call()`'s generic
       // augment (which requires the augmented value to keep the raw `T`
       // shape) would either fail to compile or silently hand back the bare
@@ -203,10 +219,12 @@ describe("the setup MCP tool", () => {
   });
 
   it("says everything present is wired when the fixture has no gaps", async () => {
-    const wiredFixture: SetupEntry[] = [{ name: "okhttp", onClasspath: true, instrumented: true, hint: null }];
+    const wiredFixture: SetupEntry[] = [
+      { name: "okhttp", onClasspath: true, instrumented: true, hint: null },
+    ];
     const rig = await buildRig({ handlers: { setup: () => wiredFixture } });
     try {
-      const result = await rig.client.callTool("setup", {});
+      const result = await rig.client.callTool("setup", { detail: "normal" });
       expect(result.text).toContain("Everything present is wired");
     } finally {
       await rig.close();
@@ -222,7 +240,7 @@ describe("the setup MCP tool", () => {
       },
     });
     try {
-      const result = await rig.client.callTool("setup", {});
+      const result = await rig.client.callTool("setup", { detail: "normal" });
       expect(result.isError).toBe(true);
       expect(result.text).toContain("device went away mid-request");
     } finally {
@@ -236,12 +254,17 @@ describe("porthole_status names setup (GRA-228)", () => {
     const rig = await buildRig({
       handlers: {
         setup: () => [
-          { name: "okhttp", onClasspath: true, instrumented: false, hint: "add installPorthole() to your OkHttpClient.Builder" },
+          {
+            name: "okhttp",
+            onClasspath: true,
+            instrumented: false,
+            hint: "add installPorthole() to your OkHttpClient.Builder",
+          },
         ],
       },
     });
     try {
-      const result = await rig.client.callTool("porthole_status", {});
+      const result = await rig.client.callTool("porthole_status", { detail: "normal" });
       // Mutation this catches: dropping the `setupNote` concatenation (or
       // gating it on the wrong `pending`/mismatch condition) leaves
       // `porthole_status`'s summary silent about a real gap — the exact
@@ -262,7 +285,7 @@ describe("porthole_status names setup (GRA-228)", () => {
       },
     });
     try {
-      const result = await rig.client.callTool("porthole_status", {});
+      const result = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(result.text).not.toContain("present but unwired");
     } finally {
       await rig.close();
@@ -278,7 +301,7 @@ describe("porthole_status names setup (GRA-228)", () => {
       },
     });
     try {
-      const result = await rig.client.callTool("porthole_status", {});
+      const result = await rig.client.callTool("porthole_status", { detail: "normal" });
       expect(result.isError).toBeFalsy();
       expect(result.text).toContain("Connected to");
       expect(result.text).not.toContain("boom");

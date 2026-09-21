@@ -59,6 +59,12 @@ porthole {
     // for a real app; this repo's own sample is exactly the place to turn
     // it on.
     strictMode.set(true)
+    // GRA-235: same reasoning as strictMode above — on here so the sample
+    // demonstrates whole-tree recomposition counting with real names (the
+    // CoreTextField churn under Cart.PromoField, never wrapped) instead of
+    // placeholder ids. Off is the right default for a real app measuring its
+    // own recompose cost; this sample is exactly the place to turn it on.
+    composableNames.set(true)
 }
 
 dependencies {
@@ -92,5 +98,22 @@ dependencies {
 
     // The sample serves its own API from inside the app so the demo is
     // self-contained and deterministic. Swapping in a real base URL is one line.
+    //
+    // GRA-64 emulator finding: mockwebserver's own MockWebServer class
+    // extends org.junit.rules.ExternalResource, so junit:junit has to stay
+    // a real, resolvable-at-runtime dependency here — excluding it (even
+    // with a compileOnly fallback for the compiler) crashes
+    // ShopApplication.onCreate with NoClassDefFoundError the moment a
+    // MockWebServer is actually constructed. That real junit on the
+    // classpath is also exactly what leakcanary-android's own classpath
+    // probe reads as "this is an instrumented test process, not a real
+    // app" and disables itself for — see debug/res/values/leak_canary.xml
+    // for the actual fix, a resource LeakCanary itself reads.
     implementation(libs.mockwebserver)
+
+    // GRA-64: debugImplementation, the same as every real app would use it —
+    // never shipped in release, and never assumed by the runtime (Porthole's
+    // own runtime/build.gradle.kts has it compileOnly; see LeakCanaryPorthole
+    // for the classpath probe that makes an app without this line a no-op).
+    debugImplementation(libs.leakcanary.android)
 }

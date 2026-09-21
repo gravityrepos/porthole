@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.example.shop.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -10,10 +12,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -26,11 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.example.shop.data.SyncCartWorker
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.shop.LeakFixture
 import com.example.shop.data.CartItem
 import live.gravitylabs.porthole.compose.PortholeScreen
 import live.gravitylabs.porthole.compose.collectAsNamedState
@@ -86,6 +96,32 @@ fun CartScreen(viewModel: CartViewModel) = PortholeScreen("Cart") {
             onValueChange = viewModel::setPromo,
             label = { Text("Promo code") },
             modifier = Modifier.fillMaxWidth().portholeNode("Cart.PromoField"),
+        )
+
+        // GRA-72 fixture (deliberate defect, do not "fix" without updating
+        // AccessibilityLint's own tests): an icon-only button with no
+        // contentDescription and no text -- exactly the shape `accessibility`
+        // is meant to catch. IconButton applies its own 48dp minimum touch
+        // target automatically, so this fixture exercises only the missing-
+        // label rule, not the touch-target one.
+        IconButton(
+            onClick = { viewModel.setPromo("") },
+            modifier = Modifier.portholeNode("Cart.ClearPromo"),
+        ) {
+            Icon(Icons.Default.Close, contentDescription = null)
+        }
+
+        // GRA-72 fixture (deliberate defect): a touch target well under the
+        // 48dp minimum -- 32dp, not run through IconButton's automatic
+        // minimumInteractiveComponentSize, so its measured bounds really are
+        // 32dp. Carries its own contentDescription so this exercises only
+        // the touch-target rule, not the missing-label one.
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clickable { viewModel.setPromo("") }
+                .semantics { contentDescription = "Clear promo code (small target)" }
+                .portholeNode("Cart.TinyTarget"),
         )
 
         LazyColumn(
@@ -151,6 +187,9 @@ private fun Controls(viewModel: CartViewModel) {
             Button(onClick = { viewModel.fetchThumbnail() }) { Text("Thumbnail") }
             Button(onClick = { viewModel.blockTheMainThread() }) { Text("Block main") }
             Button(onClick = { viewModel.triggerStrictModeViolation(context) }) { Text("StrictMode") }
+            // GRA-64: a deliberate, obvious fixture — see LeakFixture's own
+            // doc comment for what to do after pressing it.
+            Button(onClick = { LeakFixture.leak(context) }) { Text("Leak activity") }
             Button(onClick = { viewModel.fetchWithKtor() }) { Text("Ktor") }
             Button(onClick = {
                 WorkManager.getInstance(context)
