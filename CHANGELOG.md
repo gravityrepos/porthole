@@ -576,6 +576,25 @@ PR that makes the change, not after the fact.
 
 ### Fixed
 
+- `findings`' `frames-dropped` and `main-thread-stall` windows were placed
+  one full duration too early. Both treated the event's `t` as the end of
+  the span and backdated it, but neither emitter stamps the end: a `frame`
+  is stamped at its vsync (`FrameMetrics.VSYNC_TIMESTAMP`, the frame's
+  start) and a `blocked` stall at the moment the watchdog's unanswered ping
+  was posted. Confirmed against a live Pixel 9 Pro Fold capture, where a
+  158ms first-draw frame's window ended before the process had even been
+  forked. Both windows now run `t .. t + duration`, as does the timeline
+  UI's Ask-the-trace window for the same two event kinds; the GRA-64
+  heap-dump stall attribution uses the same corrected window.
+- `system_context` ignored the server's test-only `adbBinary`/`adbEnv`
+  overrides because it reads the device through the synchronous `runAdb`,
+  which had no way to take them — so `surface.test.ts`'s every-tool walk,
+  which already injected a fake adb for every other tool, still ran four
+  real `dumpsys` reads against whatever phone was plugged into the machine
+  running the suite (~9.6s with the event loop blocked; green on CI only
+  because CI has no adb). `runAdb` now takes the same `binary`/`env` options
+  as `runAdbAsync`, `system_context` passes them through, and the walk
+  asserts the fake is what answered (GRA-182).
 - `FrameCollector` computed its first-draw flag, and fired the hooks that
   depend on it, only after the "is this frame janky" early return — so a
   smooth first frame never counted as the first draw, and anything keyed on

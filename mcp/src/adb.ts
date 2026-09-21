@@ -356,10 +356,34 @@ export function spawnOptionsFor<T extends object>(binary: string, base?: T): T &
   return { ...(base ?? ({} as T)), ...(batch ? { shell: true } : {}) };
 }
 
-export function runAdb(args: string[], serial?: string): AdbResult {
+/**
+ * `binary` and `env` mean exactly what they mean on `RunAdbAsyncOptions`
+ * below, and exist for the same reason (GRA-182). `system_context` reads the
+ * device through this *synchronous* function, and until this existed a test
+ * that needed that tool kept off the host's real adb had no way to say so:
+ * the override only reached the async twin. With a phone plugged into the
+ * machine running the suite, `surface.test.ts`'s every-tool walk turned
+ * `system_context`'s four `dumpsys` reads into ~9.6s of blocked event loop
+ * (found during GRA-186's device verification — the fake adb the walk
+ * already injected never reached this call). Undefined, as every real
+ * caller leaves them, means `findAdb()` and an inherited `process.env` —
+ * unchanged.
+ */
+export interface RunAdbOptions {
+  binary?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function runAdb(args: string[], serial?: string, options: RunAdbOptions = {}): AdbResult {
+  const { binary: adbBinary = findAdb(), env } = options;
   const prefix = serial ? ["-s", serial] : [];
-  const adbBinary = findAdb();
-  const result = spawnSync(adbBinary, [...prefix, ...args], spawnOptionsFor(adbBinary, { encoding: "utf8" as const }));
+  // Same rule as `runAdbAsync`: `env` is only passed through when given, so
+  // every real call spawns exactly as it always did.
+  const result = spawnSync(
+    adbBinary,
+    [...prefix, ...args],
+    spawnOptionsFor(adbBinary, env ? { encoding: "utf8" as const, env } : { encoding: "utf8" as const }),
+  );
 
   if (result.error) {
     return {
