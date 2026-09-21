@@ -520,6 +520,34 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
           // this one.
           const args = { ...(ARGS_BY_TOOL[tool.name] ?? {}), detail: "normal" };
           const result = await rig.client.callTool(tool.name, args);
+          if (tool.name === "system_context") {
+            // GRA-182 positive control: proves the fake adb injected above is
+            // what answered `system_context`, not a real adb on the host that
+            // happened to find nothing attached. Until GRA-182, this tool's
+            // *synchronous* `runAdb` ignored the rig's `adbBinary`/`adbEnv`,
+            // so with a phone plugged into the machine running the suite this
+            // walk did four real `dumpsys` reads here (~9.6s, event loop
+            // blocked throughout) — green on CI only because CI has no adb.
+            // The fake's own "no configured response" wording is the tell: a
+            // real adb with no device says "no devices/emulators found".
+            expect(result.isError, "system_context answers ok() with every source unavailable").toBeFalsy();
+            const { unavailable } = result.json as { unavailable: Array<{ source: string; reason: string }> };
+            // The three `dumpsys` reads are plain argv and reach the fake as
+            // such on every platform. `cpufreq` is one shell *string*
+            // (`CPU_PROBE`, with `|| echo` fallbacks inside it), and on
+            // Windows the fake is a `.cmd` that `spawnOptionsFor` has to run
+            // through cmd.exe, which interprets those `||` itself and turns
+            // the fake's "no configured response" exit into a successful
+            // `echo` — a fake-adb-on-Windows artifact only (a real `adb.exe`
+            // never goes through a shell), so that one source is asserted on
+            // the two legs where the fake receives the probe intact.
+            const expectedUnavailable =
+              process.platform === "win32"
+                ? ["thermalservice", "cpuinfo", "meminfo"]
+                : ["thermalservice", "cpufreq", "cpuinfo", "meminfo"];
+            expect(unavailable.map((u) => u.source)).toEqual(expectedUnavailable);
+            for (const u of unavailable) expect(u.reason, u.source).toMatch(/^fake-adb: no configured response/);
+          }
           if (result.isError) continue; // no payload block at all — see fail()
           const payload = result.json;
           const hasSinceLast =
@@ -530,6 +558,13 @@ describe("GRA-55: every tool's result carries sinceLast", () => {
           missing,
           `tool(s) whose successful result has no sinceLast field: ${missing.join(", ")}`,
         ).toEqual([]);
+        // GRA-182, the other half of the positive control above: every one of
+        // `system_context`'s four reads went to the fake, in order, and
+        // nothing in this walk reached for a real adb.
+        const dumpsysCalls = fakeAdb.calls().map(fakeAdbArgsKey);
+        expect(dumpsysCalls).toContain(fakeAdbArgsKey(["shell", "dumpsys", "thermalservice"]));
+        expect(dumpsysCalls).toContain(fakeAdbArgsKey(["shell", "dumpsys", "cpuinfo"]));
+        expect(dumpsysCalls).toContain(fakeAdbArgsKey(["shell", "dumpsys", "meminfo"]));
       } finally {
         await rig.close();
         fakeAdb.cleanup();

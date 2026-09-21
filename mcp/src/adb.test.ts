@@ -13,6 +13,7 @@ import {
   resolveProjectRoot,
   resolveSdkDir,
   restartAppAsync,
+  runAdb,
   runAdbAsync,
 } from "./adb.js";
 import { buildFakeAdb, fakeAdbArgsKey, type FakeAdb } from "./testing/fakeAdb.js";
@@ -764,6 +765,40 @@ describe("a relative sdk.dir (GRA-160)", () => {
  * demand. `binary` is the seam that makes this possible without a real adb
  * or a real device — see `runAdbAsync`'s own doc comment.
  */
+describe("runAdb — the synchronous twin takes the same binary/env overrides (GRA-182)", () => {
+  // Why this matters: `system_context` reads the device through this
+  // function, and until GRA-182 the rig's fake adb never reached it — with a
+  // phone attached to the machine running the suite, the every-tool walk in
+  // surface.test.ts did four real `dumpsys` reads instead. These prove the
+  // seam exists and that both halves of it — the binary and its environment,
+  // which is how the fake adb carries its response table — arrive at the
+  // child, with `-s SERIAL` still prefixed the way every real call has it.
+  let fakeAdb: FakeAdb;
+  beforeEach(() => {
+    fakeAdb = buildFakeAdb({
+      [fakeAdbArgsKey(["shell", "dumpsys", "thermalservice"])]: { stdout: "Thermal status: 0\n" },
+    });
+  });
+  afterEach(() => fakeAdb.cleanup());
+
+  it("says exactly what runAdbAsync says when the adb binary itself cannot be run", () => {
+    const missing = path.join(tmpdir(), `definitely-not-a-real-adb-binary-${Date.now()}`);
+    const result = runAdb(["devices"], undefined, { binary: missing });
+    expect(result.ok).toBe(false);
+    expect(result.output).toMatch(/^Could not run adb \(.+\)\. Set ANDROID_HOME, or put adb on your PATH\.$/);
+  });
+
+  it("spawns the given binary with the given env, serial prefix intact — the fake adb's configured answer comes back", () => {
+    const result = runAdb(["shell", "dumpsys", "thermalservice"], "A1", {
+      binary: fakeAdb.binaryPath,
+      env: fakeAdb.env,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("Thermal status: 0");
+    expect(fakeAdb.calls()).toEqual([["-s", "A1", "shell", "dumpsys", "thermalservice"]]);
+  });
+});
+
 describe("runAdbAsync — an async, awaited spawn standing in for spawnSync (GRA-89)", () => {
   const isWindows = process.platform === "win32";
   const shell = isWindows ? "cmd.exe" : "/bin/sh";

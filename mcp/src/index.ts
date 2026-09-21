@@ -186,10 +186,12 @@ export interface PortholeServerOptions {
   timeline?: TimelineServer;
   version?: string;
   /**
-   * Test-only. Passed straight through to every `runAdbAsync` call
-   * `capture_system_trace` makes; every real caller leaves it undefined, in
-   * which case each spawned adb inherits `process.env` exactly as it always
-   * did. This exists so a test can point `findAdb()` at a stand-in adb that
+   * Test-only. Passed straight through to every adb call a tool makes —
+   * the async ones (`runAdbAsync`, `capture_system_trace` and the rest) and
+   * `system_context`'s synchronous `runAdb` alike (GRA-182); every real
+   * caller leaves it undefined, in which case each spawned adb inherits
+   * `process.env` exactly as it always did. This exists so a test can point
+   * `findAdb()` at a stand-in adb that
    * needs its own `NODE_OPTIONS` (or any other variable) without mutating
    * the real `process.env` — a global shared with every other test running
    * in the same worker. See `runAdbAsync`'s own `env` option in `adb.ts` for
@@ -199,8 +201,9 @@ export interface PortholeServerOptions {
   adbEnv?: NodeJS.ProcessEnv;
   /**
    * Test-only, same reasoning as `adbEnv`: overrides `findAdb()`'s own
-   * resolution for every `runAdbAsync` call `capture_system_trace` makes, so
-   * a test can point it at a real, controllable process without setting
+   * resolution for every adb call a tool makes — async and, since GRA-182,
+   * `system_context`'s synchronous one too — so a test can point every tool
+   * at one real, controllable process without setting
    * `PORTHOLE_SDK_DIR`/`ANDROID_HOME` on the real `process.env` — again a
    * global, and again shared with `adb.test.ts`'s own tests of that exact
    * resolution, running concurrently in the same worker.
@@ -2179,7 +2182,11 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
       const unavailable: SystemContext["unavailable"] = [];
 
       const read = (source: string, args: string[]): string | null => {
-        const result = runAdb(args, serial);
+        // GRA-182: `adbBinary`/`adbEnv` reach this synchronous call too, not
+        // only the async ones — a test walking every tool (surface.test.ts)
+        // otherwise reads whatever device is attached to the host here,
+        // ~9.6s of `dumpsys` with the event loop blocked throughout.
+        const result = runAdb(args, serial, { binary: adbBinary, env: adbEnv });
         if (!result.ok) {
           unavailable.push({ source, reason: result.output.split("\n")[0].slice(0, 160) });
           return null;
