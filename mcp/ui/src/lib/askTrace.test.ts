@@ -71,18 +71,18 @@ describe("hitWindow", () => {
     });
   });
 
-  it("places a frame event's window from t-totalMs to t (t is the frame's end)", () => {
+  it("places a frame event's window from t to t+totalMs (t is the frame's vsync, its start)", () => {
     const hit: Hit = { kind: "event", lane: jankLane, event: event({ t: 2000, data: { totalMs: 34 } }) };
-    expect(hitWindow(hit, null)).toEqual({ from: 1966, to: 2000 });
+    expect(hitWindow(hit, null)).toEqual({ from: 2000, to: 2034 });
   });
 
-  it("places a blocked event's window from t-durationMs to t", () => {
+  it("places a blocked event's window from t to t+durationMs (t is when the unanswered ping was posted)", () => {
     const hit: Hit = {
       kind: "event",
       lane: blockedLane,
       event: event({ event: "blocked", t: 5000, data: { durationMs: 400 } }),
     };
-    expect(hitWindow(hit, null)).toEqual({ from: 4600, to: 5000 });
+    expect(hitWindow(hit, null)).toEqual({ from: 5000, to: 5400 });
   });
 
   it("places a db_end-on-main-thread event's window from t-elapsedMs to t", () => {

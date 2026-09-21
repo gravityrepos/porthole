@@ -639,9 +639,12 @@ export function findingsOf(
         at: worst.t,
         stack: str(worst.data.stack).split("\n").slice(0, 6),
       },
-      // `blocked` is reported when the stall ends, so `worst.t` is its end and
-      // the start is however long before that its own duration says.
-      window: { from: worst.t - num(worst.data.durationMs), to: worst.t },
+      // `blocked` is *emitted* when the stall ends, but `MainThreadWatchdog`
+      // stamps it `at = startedAt` — the moment the unanswered ping was
+      // posted — and its own `report` treats the span as `at .. at +
+      // durationMs`. So `worst.t` is the start and the duration runs forward
+      // from it, the same shape as `frames-dropped`'s vsync stamp.
+      window: { from: worst.t, to: worst.t + num(worst.data.durationMs) },
       ...(where ? { where } : {}),
     });
   }
@@ -781,10 +784,14 @@ export function findingsOf(
         : undefined,
       count: missed,
       during: markAt(marks, worst.t),
-      // A `frame` event is posted when the frame finishes, so `worst.t` is its
-      // end and its own totalMs backdates the start — the same reasoning as
-      // `main-thread-stall`.
-      window: { from: worst.t - num(worst.data.totalMs), to: worst.t },
+      // A `frame` event is *emitted* when the frame finishes, but it is
+      // *stamped* at the frame's vsync (`FrameCollector.vsyncUptimeMs`,
+      // FrameMetrics.VSYNC_TIMESTAMP) — the moment the frame started, not
+      // the moment it ended. So `worst.t` is the start and totalMs runs
+      // forward from it. This used to backdate `t` by totalMs, which on a
+      // Pixel 9 Pro Fold placed a 158ms first-draw frame's window on a span
+      // that ended before the process had even been forked.
+      window: { from: worst.t, to: worst.t + num(worst.data.totalMs) },
     });
   }
 

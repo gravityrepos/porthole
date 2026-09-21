@@ -37,21 +37,28 @@ export const HIT_WINDOW_FLOOR_MS = 200;
 
 /**
  * Duration lookup per event kind -- the "own duration" ruling 1 means, not
- * the width of whatever the user happens to have panned into view. Every
- * kind Porthole logs about a stretch of main-thread work reports it at
- * completion (`t` is the end), so the window runs backward from `t` by that
- * duration -- consistent with how `SelectionPanel`'s own `headingFor` already
- * reads these same two fields (`totalMs`, `durationMs`, `elapsedMs`) for its
- * subtitle. Anything else (a point event, like a finding-less click this
- * function is never actually asked about) is a zero-width point at `t`,
- * which `floorWindow` below turns into 200ms of context around it anyway.
+ * the width of whatever the user happens to have panned into view. Which way
+ * the duration runs from `t` depends on where the runtime stamped the event,
+ * not on when it emitted it: a `frame` is stamped at its vsync
+ * (`FrameCollector.vsyncUptimeMs`, the frame's *start*) and a `blocked` stall
+ * at the unanswered ping's post time (`MainThreadWatchdog.record`'s
+ * `at = startedAt`, again the *start*), so both run forward -- the same
+ * direction `draw.ts`'s `drawBlocked` already paints them and the same
+ * windows the server's `findingsOf` places `frames-dropped` and
+ * `main-thread-stall` on. A `db_end` is stamped when the query finished, so
+ * it alone runs backward. The fields themselves are the ones
+ * `SelectionPanel`'s `headingFor` reads (`totalMs`, `durationMs`,
+ * `elapsedMs`) for its subtitle. Anything else (a point event, like a
+ * finding-less click this function is never actually asked about) is a
+ * zero-width point at `t`, which `floorWindow` below turns into 200ms of
+ * context around it anyway.
  */
 function eventWindow(event: { event: string; t: number; data: Record<string, unknown> }): Window {
   switch (event.event) {
     case "frame":
-      return { from: event.t - num(event.data.totalMs), to: event.t };
+      return { from: event.t, to: event.t + num(event.data.totalMs) };
     case "blocked":
-      return { from: event.t - num(event.data.durationMs), to: event.t };
+      return { from: event.t, to: event.t + num(event.data.durationMs) };
     case "db_end":
       return { from: event.t - num(event.data.elapsedMs), to: event.t };
     default:

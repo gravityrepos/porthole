@@ -1000,9 +1000,12 @@ describe("GRA-113: every finding carries a window, taken from the events that pr
     expect(findings[0].spanning).toBeUndefined();
   });
 
-  it("places main-thread-stall by backdating the reporting event with its own duration", () => {
+  it("places main-thread-stall forward from the event's t, which MainThreadWatchdog stamps at the stall's start", () => {
+    // The runtime emits `blocked` once the main thread answers, but stamps it
+    // `at = startedAt` (the ping's post time) — see MainThreadWatchdog.record
+    // and its own `report`, which matches a stall as `at .. at + durationMs`.
     const events = [event("blocked", 500, { durationMs: 400, top: "a.B.c(B.kt:1)" })];
-    expect(find(events)[0].window).toEqual({ from: 100, to: 500 });
+    expect(find(events)[0].window).toEqual({ from: 500, to: 900 });
   });
 
   it("places http-failed at the failed call's own start and end", () => {
@@ -1021,9 +1024,37 @@ describe("GRA-113: every finding carries a window, taken from the events that pr
     expect(finding?.window).toEqual({ from: 10, to: 510 });
   });
 
-  it("places frames-dropped by backdating the worst frame with its own totalMs", () => {
+  it("places frames-dropped forward from the worst frame's t, which FrameCollector stamps at the frame's vsync", () => {
     const events = [event("frame", 300, { missedFrames: 1, totalMs: 50 })];
-    expect(find(events)[0].window).toEqual({ from: 250, to: 300 });
+    expect(find(events)[0].window).toEqual({ from: 300, to: 350 });
+  });
+
+  /**
+   * Regression from a live Pixel 9 Pro Fold capture. `FrameCollector` stamps
+   * every `frame` event at FrameMetrics.VSYNC_TIMESTAMP / 1e6 — the frame's
+   * *start* — but the finding used to treat `t` as the frame's end and
+   * backdate by totalMs. For this cold launch's first-draw frame the finding's
+   * window came out as 147343553..147343711, a span that ended before the
+   * process existed: Zygote's "Process 20823 created" logcat line is at
+   * 147343655 and MainActivity's BLAST surfaces were created at ~147343840.
+   * The frame actually ran 147343711..147343869, and that is what the window
+   * must say.
+   */
+  it("places a first-draw frame's window on the span the frame actually ran, not one before the process was forked", () => {
+    const vsync = 147_343_711;
+    const processCreated = 147_343_655;
+    const surfacesCreated = 147_343_840;
+    const events = [
+      event("frame", vsync, { totalMs: 158, missedFrames: 19, worstPhase: "unknownDelay", firstDraw: true }),
+    ];
+    const finding = find(events).find((f) => f.id === "frames-dropped");
+    expect(finding?.window).toEqual({ from: vsync, to: vsync + 158 });
+    // The window starts after the process was created and contains the moment
+    // the activity's surfaces appeared — neither of which the old, backdated
+    // window managed.
+    expect(finding!.window!.from).toBeGreaterThan(processCreated);
+    expect(finding!.window!.from).toBeLessThanOrEqual(surfacesCreated);
+    expect(finding!.window!.to).toBeGreaterThanOrEqual(surfacesCreated);
   });
 
   it("places blocking-gc across the earliest and latest blocking collection, not a single invented instant", () => {

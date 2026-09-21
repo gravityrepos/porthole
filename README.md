@@ -856,7 +856,7 @@ A finding line carries everything the ticket that sent you here needs to
 quote into `findings`/`what_was_happening`:
 
 ```
-ERROR  main thread blocked for 6240ms  t=2088311..2094551  com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:146)
+ERROR  main thread blocked for 6240ms  t=2094551..2100791  com.example.shop.ui.CartViewModel.blockTheMainThread(CartViewModel.kt:146)
 ```
 
 Severity, the finding's own title, the window on the device uptime clock
@@ -2773,16 +2773,16 @@ moment, the rendered report, the captured logcat and every saved tool output on
 the Pixel 9 Pro Fold, it appears zero times. The device serial appears zero
 times too.
 
-**2158 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
+**2159 tests, measured on ubuntu-latest CI** (a total holds on every leg; a
 pass/skip split holds on exactly one, so the leg is named — see
 [Testing](#testing)): 686 on the JVM (`./gradlew test`, which covers both
 build types of `runtime` and `runtime-noop` plus the Gradle plugin — 678
-passed, 0 failed, 8 skipped), 1159 in the MCP server (`cd mcp && npm test` —
-1153 passed, 0 failed, 6 skipped), and 313 in the timeline UI (`cd mcp && npm
+passed, 0 failed, 8 skipped), 1160 in the MCP server (`cd mcp && npm test` —
+1154 passed, 0 failed, 6 skipped), and 313 in the timeline UI (`cd mcp && npm
 run test:ui`, a separate suite from the server's — 313 passed, 0 failed, 0
 skipped). **What is checked, precisely:** `tools/check-readme-test-counts.py`
 fails CI when the JVM sentence's four numbers disagree with its own JUnit
-XML, and when 2158 disagrees with the sum of the three suites' totals stated
+XML, and when 2159 disagrees with the sum of the three suites' totals stated
 here; `mcp/scripts/check-readme-vitest-counts.mjs` does the same for the
 server and UI sentences against their own JUnit XML. Everything else in this
 paragraph and the next — the skip explanations, the per-platform comparison
