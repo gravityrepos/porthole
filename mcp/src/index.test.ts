@@ -3425,6 +3425,52 @@ describe("GRA-72: accessibility", () => {
     };
   }
 
+  /**
+   * QA F9: a bare clickable row (no role, no testTag anywhere in the tree)
+   * -- the ordinary shape of a plain Card/Row with `Modifier.clickable {}`
+   * -- with no PortholeScreen/portholeNode wrapping it anywhere.
+   */
+  function unattributedClickableRowTree() {
+    return {
+      capturedAt: CAPTURED_AT,
+      merged: true,
+      root: {
+        stableId: "root",
+        nodeId: 1,
+        role: null,
+        testTag: null,
+        text: null,
+        contentDescription: null,
+        bounds: { left: 0, top: 0, right: 1080, bottom: 2000 },
+        actions: [],
+        flags: [],
+        truncated: false,
+        children: [
+          {
+            stableId: "row1",
+            nodeId: 2,
+            role: null,
+            testTag: null,
+            text: "Item",
+            contentDescription: null,
+            bounds: { left: 0, top: 0, right: 1080, bottom: 200 },
+            actions: ["OnClick"],
+            flags: ["clickable"],
+            truncated: false,
+            children: [],
+          },
+        ],
+      },
+    };
+  }
+
+  /** The same row, this time under a PortholeScreen("Cart")-shaped root -- testTag on the ancestor, none on the row itself. */
+  function attributedClickableRowTree() {
+    const tree = unattributedClickableRowTree();
+    tree.root.testTag = "Cart";
+    return tree;
+  }
+
   const densityEvent = {
     event: "device",
     t: 0,
@@ -3432,6 +3478,58 @@ describe("GRA-72: accessibility", () => {
   };
 
   afterEach(() => resetAccessibilityCaptureForTests());
+
+  it("QA F9: a clickable row with no role is not reported when nothing in its ancestry is attributable", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: unattributedClickableRowTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: Array<{ id: string }>; coverage: string[] };
+      expect(payload.findings.find((f) => f.id === "a11y-click-mismatch")).toBeUndefined();
+      expect(
+        payload.coverage.some((c) => c.includes("possible defect(s) on nodes outside instrumented composables")),
+      ).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA F9: the same clickable row IS reported once an ancestor (a PortholeScreen root) carries a testTag", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: attributedClickableRowTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: Array<{ id: string; evidence?: Record<string, unknown> }> };
+      const finding = payload.findings.find((f) => f.id === "a11y-click-mismatch");
+      expect(finding).toBeDefined();
+      expect(finding?.evidence).toMatchObject({ stableId: "row1" });
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it("QA F8: a clickable, tiny, invisibleToUser node yields no findings, and coverage counts it as hidden", async () => {
+    const hiddenTinyClickable = () => {
+      const tree = attributedClickableRowTree();
+      tree.root.children[0] = {
+        ...tree.root.children[0],
+        stableId: "hidden-tiny",
+        bounds: { left: 0, top: 0, right: 20, bottom: 20 }, // ~6.7dp at density 3 -- would also be a touch-target warning
+        flags: ["clickable", "invisibleToUser"],
+      };
+      return tree;
+    };
+    const rig = await buildRig({ handlers: { semantics_tree: hiddenTinyClickable } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      const result = await rig.client.callTool("accessibility", { detail: "normal" });
+      const payload = result.json as { findings: unknown[]; coverage: string[] };
+      expect(payload.findings).toEqual([]);
+      expect(payload.coverage.some((c) => c.includes("hidden from assistive technology"))).toBe(true);
+    } finally {
+      await rig.close();
+    }
+  });
 
   it("reports the IconButton fixture (no contentDescription) with its stableId and position", async () => {
     const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
@@ -3447,6 +3545,29 @@ describe("GRA-72: accessibility", () => {
       expect(evidence.stableId).toBe("iconbtn-clearpromo");
       expect(evidence.testTag).toBe("Cart.ClearPromo");
       expect(evidence.path).toContain("Cart.ClearPromo");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  // QA F7 (blocker): at the default detail ("summary", GRA-68), this used
+  // to return only "1 finding(s) over 2 node(s) checked" and nothing else
+  // -- no stableId, no path, no title, no coverage -- which is the whole
+  // answer an agent sees unless it already knows to ask for detail:
+  // "normal". summarizeAccessibilityResult now carries the coverage
+  // sentences, the severity tally and the worst findings (each with
+  // stableId/path/title) directly in that summary line.
+  it("QA F7: at detail 'summary' (the default), the text alone names the IconButton fixture's stableId and a coverage sentence", async () => {
+    const rig = await buildRig({ handlers: { semantics_tree: a11ySemanticsTree } });
+    try {
+      await rig.pushEvents([densityEvent]);
+      // No `detail` at all -- proving the *default*, not an explicit ask.
+      const result = await rig.client.callTool("accessibility", {});
+      expect(result.isError).toBeFalsy();
+      expect(result.json).toBeUndefined(); // "summary" carries no payload block at all
+      expect(result.text).toContain("iconbtn-clearpromo");
+      expect(result.text).toContain("a11y-missing-label");
+      expect(result.text).toContain("Only the Compose semantics tree is checked");
     } finally {
       await rig.close();
     }

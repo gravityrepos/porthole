@@ -59,8 +59,19 @@ PR that makes the change, not after the fact.
   to what is on screen is by `stableId` through `semantics_tree`'s own
   output only. A clean screen says so explicitly, `"nothing found, N
   node(s) checked"`, and coverage is always stated: only the Compose
-  semantics tree is seen, never a plain Android `View` or anything Compose
-  itself marked `invisibleToUser`. `findings` folds these findings in too,
+  semantics tree is seen, never a plain Android `View`; a node Compose
+  itself marked `invisibleToUser`, and its whole subtree, is skipped by
+  every rule (TalkBack never reaches it either) and counted separately as
+  hidden; and the instrumented-node fraction `semantics_tree` reports is
+  restated here. Attribution follows the EM ruling on the ticket: a finding
+  is listed only when its node, or an ancestor, carries a `testTag` (a
+  Porthole `portholeNode`/`PortholeScreen` id arrives the same way) or its
+  own text resolves through the project's source; the rest are counted in
+  coverage as possible defects outside instrumented composables, never
+  listed and never silently dropped. At `detail: "summary"`, the default,
+  the summary line itself carries the coverage sentences, the tally by
+  severity and the worst five findings with `stableId` and path, so the
+  answer an agent sees by default is the answer. `findings` folds these findings in too,
   but only when a semantics capture (`semantics_tree` or `accessibility`,
   either counts) already landed inside the window being asked about — never
   a fresh capture of its own, so a caller who never asked about

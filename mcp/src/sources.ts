@@ -434,20 +434,25 @@ function resolveFile(root: string, fileName: string, packageName: string | null)
  * Splits a qualified prefix (everything before the trailing
  * `(File.kt:NN)`, e.g. `com.example.shop.ui.CartViewModel.blockTheMainThread`)
  * into a package, on the one convention the JVM actually guarantees: a
- * package segment is lowercase, a class is not (`CartViewModel`, or a
- * top-level Kotlin file's own `ScreensKt`). The longest lowercase-segment
- * prefix is the package; the first non-lowercase segment after it — a class
+ * package segment *starts* lowercase, a class does not (`CartViewModel`, or
+ * a top-level Kotlin file's own `ScreensKt`). QA F20: the segment itself may
+ * still carry uppercase letters past the first character — `exampleApp` is
+ * exactly as valid a package segment as `example` under ordinary Java
+ * identifier rules, and Android package names in the wild do this
+ * (`com.exampleApp.shop`) — so this only requires a lowercase (or `_`)
+ * first character, never lowercase throughout. The longest such prefix is
+ * the package; the first segment starting uppercase after it — a class
  * name, possibly followed by more (a method, `$1`, a nested class) — is
  * everything else, which this function has no use for. Returns `null` when
- * there is no such split to make: nothing lowercase at the front (a
- * default-package frame, or a bare dummy prefix in a test that names no
- * real package), or lowercase all the way through (nothing left to be the
- * class/method that would confirm the split is real).
+ * there is no such split to make: nothing lowercase-starting at the front
+ * (a default-package frame, or a bare dummy prefix in a test that names no
+ * real package), or lowercase-starting all the way through (nothing left to
+ * be the class/method that would confirm the split is real).
  */
 function packageFromQualifiedFrame(qualified: string): string | null {
   const segments = qualified.split(".").filter(Boolean);
   let i = 0;
-  while (i < segments.length && /^[a-z_][a-z0-9_]*$/.test(segments[i])) i++;
+  while (i < segments.length && /^[a-z_][A-Za-z0-9_]*$/.test(segments[i])) i++;
   if (i === 0 || i >= segments.length) return null;
   return segments.slice(0, i).join(".");
 }
@@ -596,7 +601,10 @@ function splitQualifiedClassName(name: string): { packageName: string; simpleNam
   const simpleName = segments[segments.length - 1];
   if (!/^[A-Z][A-Za-z0-9_]*$/.test(simpleName)) return null;
   const packageSegments = segments.slice(0, -1);
-  if (!packageSegments.every((s) => /^[a-z_][a-z0-9_]*$/.test(s))) return null;
+  // QA F20: the same fix as packageFromQualifiedFrame's — a package segment
+  // only has to *start* lowercase (`exampleApp`), not stay lowercase
+  // throughout.
+  if (!packageSegments.every((s) => /^[a-z_][A-Za-z0-9_]*$/.test(s))) return null;
   return { packageName: packageSegments.join("."), simpleName };
 }
 
@@ -635,7 +643,15 @@ export function whereForName(name: string | undefined | null): Where | undefined
   if (matches.length > 1) {
     const narrowed = narrowByPackage(root, entry, matches, qualified?.packageName ?? null);
     if (narrowed) return { resolved: true, path: narrowed.path, line: narrowed.line, kind: "declaration" };
-    return { resolved: false, reason: "ambiguous", candidates: matches.map((m) => m.path).sort() };
+    // QA F19: de-duped by path, not one entry per `Declaration` — the same
+    // file can register `name` twice (`class Dup` and `fun Dup` both live
+    // in `Dup.kt`), which is one ambiguous *file*, not two, and a caller
+    // comparing or displaying `candidates` should never see a path repeat.
+    return {
+      resolved: false,
+      reason: "ambiguous",
+      candidates: [...new Set(matches.map((m) => m.path))].sort(),
+    };
   }
   if (entry.capped) {
     return { resolved: false, reason: "too many source files under the project root to search them all" };

@@ -103,6 +103,20 @@ describe("parseFrame", () => {
       packageName: null,
     });
   });
+
+  it("QA F20: a package segment may carry uppercase letters past its first character -- com.exampleApp.shop, not truncated to com", () => {
+    // Before F20, packageFromQualifiedFrame required every character of a
+    // package segment to be lowercase, so `exampleApp` failed the test and
+    // the split stopped one segment early -- `packageName` came back "com"
+    // instead of "com.exampleApp.shop", silently wrong rather than null.
+    expect(
+      parseFrame("com.exampleApp.shop.CartViewModel.blockTheMainThread(CartViewModel.kt:1)"),
+    ).toEqual({
+      file: "CartViewModel.kt",
+      line: 1,
+      packageName: "com.exampleApp.shop",
+    });
+  });
 });
 
 describe("whereForFrame against the two-module fixture", () => {
@@ -620,5 +634,76 @@ describe("GRA-205: a resolved where is a breakpoint address", () => {
     // pre-GRA-205 behaviour.
     expect(whereForFrame("Ghost.method(Ghost.kt:1)")).toEqual({ resolved: false, reason: "not found" });
     expect(whereForName("Checkout.NoSuchField")).toEqual({ resolved: false, reason: "not found" });
+  });
+});
+
+/**
+ * QA F20 (2026-09-2x round): package narrowing end to end with a mixed-case
+ * package segment (`com.exampleApp.shop`, not `com.example.shop`) -- the
+ * regression the direct `parseFrame`/`packageFromQualifiedFrame` test above
+ * cannot fully prove on its own, since narrowing also depends on
+ * `splitQualifiedClassName` (whereForName's own qualified-name path) having
+ * the identical fix.
+ */
+describe("QA F20: mixed-case package segments narrow correctly end to end", () => {
+  it("whereForFrame narrows to the right file when the frame's package has an uppercase-carrying segment", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/com/exampleApp/shop/Repository.kt", "package com.exampleApp.shop\nclass Repository\n");
+    writeSource(root, "legacy/src/main/kotlin/com/example/other/Repository.kt", "package com.example.other\nclass Repository\n");
+    useProjectRoot(root);
+
+    const where = whereForFrame("com.exampleApp.shop.Repository.fetch(Repository.kt:2)");
+    expect(where).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/exampleApp/shop/Repository.kt",
+      line: 2,
+      kind: "frame",
+    });
+  });
+
+  it("whereForName narrows a fully qualified name through the same mixed-case package", () => {
+    const root = temporaryRoot();
+    writeSource(root, "app/src/main/kotlin/com/exampleApp/shop/Repository.kt", "package com.exampleApp.shop\nclass Repository\n");
+    writeSource(root, "legacy/src/main/kotlin/com/example/other/Repository.kt", "package com.example.other\nclass Repository\n");
+    useProjectRoot(root);
+
+    expect(whereForName("com.exampleApp.shop.Repository")).toEqual({
+      resolved: true,
+      path: "app/src/main/kotlin/com/exampleApp/shop/Repository.kt",
+      line: 2,
+      kind: "declaration",
+    });
+  });
+});
+
+/**
+ * QA F19: a name declared twice in the *same* file (a class and a function
+ * sharing an identifier -- legal Kotlin, different namespaces) must not
+ * make that one file count twice in `candidates` when the name is also
+ * ambiguous across files.
+ */
+describe("QA F19: ambiguous candidates are de-duped by path", () => {
+  it("whereForName never lists the same path twice, even when that file declares the name twice over", () => {
+    const root = temporaryRoot();
+    // Both a `class Dup` and a `fun Dup(...)` in the same file -- two
+    // Declaration entries, one path.
+    writeSource(
+      root,
+      "app/src/main/kotlin/Dup.kt",
+      "class Dup\nfun Dup(): Dup = Dup()\n",
+    );
+    writeSource(root, "legacy/src/main/kotlin/OtherDup.kt", "class Dup\n");
+    useProjectRoot(root);
+
+    const where = whereForName("Dup");
+    expect(where).toMatchObject({ resolved: false, reason: "ambiguous" });
+    if (where && !where.resolved && where.reason === "ambiguous") {
+      expect(where.candidates).toEqual([
+        "app/src/main/kotlin/Dup.kt",
+        "legacy/src/main/kotlin/OtherDup.kt",
+      ]);
+      // The load-bearing assertion: no path repeats.
+      expect(new Set(where.candidates).size).toBe(where.candidates.length);
+    }
   });
 });

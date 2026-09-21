@@ -3437,11 +3437,23 @@ export function createPortholeServer(options: PortholeServerOptions = {}): Porth
         "scale. Each finding names the node's `stableId`, its path in the tree and any `testTag` — " +
         "the `stableId` resolves through `semantics_tree`'s own output, so 'show me that node' is one " +
         "more call away, never a screenshot annotation (not available in this build — pairing is by " +
-        "`stableId` through `semantics_tree` only).\n\n" +
+        "`stableId` through `semantics_tree` only). At detail: \"summary\" (the default) the summary " +
+        "line itself already carries every coverage sentence, the tally by severity and the worst " +
+        "few findings (id, stableId, path/testTag, title) — not just a bare count.\n\n" +
         "A clean screen says so explicitly: 'nothing found, N node(s) checked', never a bare empty " +
         "list indistinguishable from 'did not look'. `coverage` says what this pass did and did not " +
-        "see — only the Compose semantics tree, never a plain Android View, never anything Compose " +
-        "itself marked invisible to the user.\n\n" +
+        "see — only the Compose semantics tree, never a plain Android View; a node Compose itself " +
+        "marked invisible to the user, and everything beneath it, is skipped entirely (TalkBack never " +
+        "reaches it either) and counted separately, never linted; and it always states the " +
+        "instrumented-node fraction `semantics_tree` itself reports.\n\n" +
+        "Attribution (an EM ruling on this ticket): a finding is only reported when its node, or an " +
+        "ancestor, is attributable to the app — carries a Porthole `portholeNode`/`PortholeScreen` id " +
+        "or a plain `testTag` (both arrive as the wire `testTag`), or its own text/description " +
+        "resolves through the project's own source. A bare `Modifier.clickable {}` with no role is " +
+        "the ordinary shape of a plain Card/Row and shows up constantly in library UI Porthole had no " +
+        "hand in; without this, that reads as one note per list row. An unattributable finding is " +
+        "never silently dropped — `coverage` names how many possible defects were found on nodes " +
+        "outside instrumented composables, just not listed individually.\n\n" +
         "A touch target between 24dp and 48dp is a `note`, not a `warning`: Compose's own " +
         "`minimumInteractiveComponentSize` (wired into IconButton, Checkbox and friends by default) " +
         "may already pad it back up to 48dp at touch time, invisibly to the bounds this tool can see — " +
